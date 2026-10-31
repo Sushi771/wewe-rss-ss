@@ -1,6 +1,6 @@
+import { Modal } from '@web/components/AppOverlays';
 import {
   Button,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
@@ -19,6 +19,7 @@ const AccountPage = () => {
   const [starting, setStarting] = useState(false);
   const [checking, setChecking] = useState(false);
   const [login, setLogin] = useState<LoginView>();
+  const hasQr = login?.state === 'waiting' && Boolean(login.qrcode);
   const [error, setError] = useState('');
   const [showLegacy, setShowLegacy] = useState(false);
   const active = useRef(false);
@@ -265,14 +266,18 @@ const AccountPage = () => {
       </details>
       <Modal
         isOpen={isOpen}
+        classNames={{ base: hasQr ? 'wechat-qr-dialog' : '' }}
         onOpenChange={(open) => {
           if (!open) dismiss();
         }}
         onClose={dismiss}
       >
         <ModalContent>
-          <ModalHeader>登录 Wechat2RSS 微信账号</ModalHeader>
+          <ModalHeader>
+            {hasQr ? '微信扫码登录' : '登录 Wechat2RSS 微信账号'}
+          </ModalHeader>
           <ModalBody
+            className={hasQr ? 'wechat-qr-body' : undefined}
             tabIndex={0}
             role="region"
             aria-label="Wechat2RSS 登录状态与二维码"
@@ -281,28 +286,45 @@ const AccountPage = () => {
             {!starting && login?.state === 'waiting' && !login.qrcode && (
               <Spinner label="正在生成二维码…" />
             )}
-            <p role="status">{login?.message}</p>
-            {login?.state === 'waiting' && login.qrcode && (
-              <img
-                src={login.qrcode}
-                alt="Wechat2RSS 微信登录二维码"
-                className="mx-auto h-64 w-64 max-w-full object-contain"
-              />
+            {hasQr ? (
+              <div className="wechat-qr-layout">
+                <img
+                  src={login?.qrcode}
+                  alt="Wechat2RSS 微信登录二维码"
+                  className="wechat-login-qr"
+                />
+                <div className="wechat-qr-instructions">
+                  <p role="status">{login?.message}</p>
+                  <p className="text-default-500 text-xs">
+                    请用微信扫描完整二维码。关闭窗口会停止检查登录状态。
+                  </p>
+                  <p className="wechat-qr-short-hint text-xs">
+                    窗口较矮；若扫码困难，请增大窗口或降低浏览器缩放。
+                  </p>
+                  <p className="wechat-qr-too-small text-sm" role="status">
+                    窗口高度不足，无法完整显示二维码。请增大窗口或降低浏览器缩放后扫码。
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <p role="status">{login?.message}</p>
             )}
-            {login?.state === 'waiting' && (
+            {login?.state === 'waiting' && !hasQr && (
               <p className="text-default-500 text-xs">
                 二维码最多等待三分钟。关闭窗口会停止检查登录状态。
               </p>
             )}
           </ModalBody>
-          <ModalFooter>
-            {login &&
-              login.state !== 'waiting' &&
-              login.state !== 'succeeded' && (
-                <Button onPress={begin}>重新获取二维码</Button>
-              )}
-            <Button onPress={dismiss}>关闭</Button>
-          </ModalFooter>
+          {!hasQr && (
+            <ModalFooter>
+              {login &&
+                login.state !== 'waiting' &&
+                login.state !== 'succeeded' && (
+                  <Button onPress={begin}>重新获取二维码</Button>
+                )}
+              <Button onPress={dismiss}>关闭</Button>
+            </ModalFooter>
+          )}
         </ModalContent>
       </Modal>
     </div>

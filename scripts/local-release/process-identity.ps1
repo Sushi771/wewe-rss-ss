@@ -1,7 +1,7 @@
 ﻿# Windows 进程身份核验。Stop 操作持有 Process 对象句柄，避免按 PID 二次查找后误杀复用 PID。
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('Snapshot', 'Stop', 'Port', 'Discover', 'OwnedSnapshot', 'OwnedStop', 'Tree')][string]$Action,
     [int]$TargetPid,
     [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
     [string]$ExpectedStartUtc,
@@ -11,6 +11,25 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'tcp-listeners.ps1')
+if ($Action -eq 'Tree') {
+    if ($TargetPid -le 0) { throw 'Invalid project root PID' }
+    $pending=[Collections.Generic.Queue[int]]::new();$pending.Enqueue($TargetPid)
+    $visited=[Collections.Generic.HashSet[int]]::new();$records=@{};$watch=[Diagnostics.Stopwatch]::StartNew()
+    while($pending.Count -gt 0) {
+        $parent=$pending.Dequeue();if(-not $visited.Add($parent)){continue}
+        if($visited.Count -gt 64 -or $watch.ElapsedMilliseconds -gt 15000){throw 'Project process observation limit'}
+        $rows=@(Get-CimInstance Win32_Process -Filter "ProcessId=$parent OR ParentProcessId=$parent" -ErrorAction Stop)
+        foreach($row in $rows) {
+            $childId=[int]$row.ProcessId
+            if(-not $row.ExecutablePath -or -not $row.CommandLine){throw 'Project process metadata unavailable'}
+            $owned=[Diagnostics.Process]::GetProcessById($childId)
+            try{$null=$owned.Handle;$records[$childId]=@{pid=$childId;parentPid=[int]$row.ParentProcessId;startUtc=$owned.StartTime.ToUniversalTime().ToString('o');executable=[string]$row.ExecutablePath;commandLine=[string]$row.CommandLine}}finally{$owned.Dispose()}
+            if($childId -ne $parent){$pending.Enqueue($childId)}
+        }
+    }
+    @{complete=$true;active=@($records.Values);portOwners=@(Get-LocalTcpListener -Port $Port)}|ConvertTo-Json -Compress -Depth 5
+    return
+}
 if ($Action -eq 'Port') {
     $listeners = @(Get-LocalTcpListener -Port $Port |
         Select-Object LocalAddress, OwningProcess)
@@ -36,7 +55,8 @@ try {
         throw '进程句柄与 CIM 启动时间不一致'
     }
     $listeners = @(Get-LocalTcpListener -Port $Port)
-    if ($listeners.Count -eq 0 -or @($listeners | Where-Object { $_.OwningProcess -ne $TargetPid }).Count -ne 0) {
+    $ownedAction=$Action -eq 'OwnedSnapshot' -or $Action -eq 'OwnedStop'
+    if (-not $ownedAction -and ($listeners.Count -eq 0 -or @($listeners | Where-Object { $_.OwningProcess -ne $TargetPid }).Count -ne 0)) {
         throw '监听端口不存在或由其他进程占有'
     }
     $executable = [string]$cim.ExecutablePath
@@ -50,7 +70,8 @@ try {
         port = $Port
         localAddresses = @($listeners | ForEach-Object { $_.LocalAddress } | Sort-Object -Unique)
     }
-    if ($Action -eq 'Stop') {
+    if ($ownedAction -and (-not $ExpectedExecutable -or -not $ExpectedCommandLine -or -not [string]::Equals($executable,$ExpectedExecutable,[StringComparison]::OrdinalIgnoreCase) -or $commandLine -cne $ExpectedCommandLine)) { throw 'Owned process launch identity changed' }
+    if ($Action -eq 'Stop' -or $Action -eq 'OwnedStop') {
         if (-not $ExpectedStartUtc -or -not $ExpectedExecutable -or -not $ExpectedCommandLine) {
             throw '停止进程必须提供完整的预期身份'
         }

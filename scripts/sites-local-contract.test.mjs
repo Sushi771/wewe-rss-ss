@@ -10,6 +10,18 @@ import worker, {
 } from './sites-local-contract.mjs';
 
 const originalFetch = globalThis.fetch;
+test('WeChat in-app body command is removed while download remains available', () => {
+  assert.throws(
+    () =>
+      parseSitesCommand({
+        action: 'body',
+        platform: 'wechat',
+        parentId: 'MP_WXS_12345',
+        id: 'cached',
+      }),
+    /BAD_REQUEST/,
+  );
+});
 before(() => {
   globalThis.fetch = () => {
     throw new Error('REAL_NETWORK_FORBIDDEN');
@@ -514,10 +526,10 @@ test('oversized transport results retain truncation even when the sender claims 
 const png =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
 const bodyCommand = {
-  action: 'body',
-  platform: 'xiaohongshu',
-  authorId: 'creator-1',
-  itemId: 'XHS_synthetic-note',
+  action: 'download',
+  platform: 'wechat',
+  authorId: 'MP_WXS_12345',
+  itemId: 'old-short-id',
 };
 const refreshCommand = {
   action: 'refresh',
@@ -538,7 +550,6 @@ function cacheFixture(options = {}) {
     calls.push([name, input]);
     return value;
   };
-  caller.xiaohongshu.body = track('xiaohongshu.body', cached);
   caller.xiaohongshu.capability = track('xiaohongshu.capability', {
     sourceConfigured: true,
     canRefresh: true,
@@ -626,18 +637,13 @@ test('new commands require explicit IDs and confirmation and still reject paths,
   ])
     assert.throws(() => parseSitesCommand(command), { code: 'BAD_REQUEST' });
 });
-test('XHS cached body travels through the actual contract chain with ordered actual PNG bytes and no private fields', async () => {
+test('Wechat cached body travels through the actual contract chain with ordered actual PNG bytes and no private fields', async () => {
   const { gateway, calls, cached } = cacheFixture();
   cached.images = [png, png];
   const result = await clientFor(gateway)(bodyCommand);
   assert.deepEqual(result.images, [png, png]);
   assert.equal(result.text, cached.text);
-  assert.deepEqual(calls, [
-    [
-      'xiaohongshu.body',
-      { creatorId: 'creator-1', noteId: 'XHS_synthetic-note' },
-    ],
-  ]);
+  assert.deepEqual(calls, [['article.byId', 'old-short-id']]);
   assert.equal(result.itemId, bodyCommand.itemId);
   assert.equal('sourceUrl' in result, false);
 });
@@ -661,7 +667,7 @@ test('cached-only browser download is self-contained escaped HTML with a real Bl
   );
   assert.deepEqual(
     calls.map((c) => c[0]),
-    ['xiaohongshu.body'],
+    ['article.byId'],
   );
 });
 test('remote images, MIME mismatches, truncated/fake bytes, sparse media and empty cached bodies fail without fallback', async () => {
@@ -679,7 +685,7 @@ test('remote images, MIME mismatches, truncated/fake bytes, sparse media and emp
   cached.images = [];
   cached.text = '';
   await rejects(gateway.execute(bodyCommand), 'CACHE_UNAVAILABLE');
-  assert.ok(calls.every((c) => c[0] === 'xiaohongshu.body'));
+  assert.ok(calls.every((c) => c[0] === 'article.byId'));
 });
 test('text-only cached body works, but oversized text, media count and aggregate bytes are refused without truncation', async () => {
   const { gateway, cached } = cacheFixture();
@@ -1003,4 +1009,47 @@ test('refresh transport timeout reports unknown without replay; later status res
     'complete',
   );
   assert.equal(count, 1);
+});
+
+test('XHS body and browser-content download commands are removed before caller or transport dispatch', async () => {
+  const { gateway, calls } = cacheFixture();
+  let sent = 0;
+  const client = createSitesClient(async () => {
+    sent++;
+    throw Error('unexpected dispatch');
+  });
+  const site = createSitesWorker({
+    authorize: owner,
+    transport: {
+      send: async () => {
+        sent++;
+        throw Error('unexpected transport');
+      },
+    },
+  });
+  for (const action of ['body', 'download']) {
+    const command = {
+      action,
+      platform: 'xiaohongshu',
+      authorId: 'creator-1',
+      itemId: 'XHS_synthetic-note',
+    };
+    assert.throws(() => parseSitesCommand(command), { code: 'BAD_REQUEST' });
+    await rejects(gateway.execute(command), 'BAD_REQUEST');
+    await rejects(client(command), 'BAD_REQUEST');
+    assert.equal((await site.fetch(req(command))).status, 400);
+    assert.throws(
+      () =>
+        sitesDownloadBlob({
+          ...command,
+          title: 'synthetic',
+          text: 'synthetic',
+          images: [],
+          publishTime: 1700000000,
+        }),
+      { code: 'BAD_REQUEST' },
+    );
+  }
+  assert.deepEqual(calls, []);
+  assert.equal(sent, 0);
 });

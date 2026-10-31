@@ -26,21 +26,60 @@ function Processes {
   if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_PROCESS_LIMIT' }
   @($items | ForEach-Object {
     Budget
+    $startUtc=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null })
+    if ($projectOnly) {
+      $related=([int]$_.ProcessId -eq [int]$policy.preservingUpdate.active.oldProcess.pid)
+      foreach ($text in @([string]$_.ExecutablePath,[string]$_.CommandLine)) {
+        foreach ($needle in $projectNeedles) {
+          if ($needle -and $text.Replace('/','\').IndexOf($needle.Replace('/','\'),[StringComparison]::OrdinalIgnoreCase) -ge 0) { $related=$true }
+        }
+      }
+      if ($related) {
+        # Same clock as process-identity.ps1 Snapshot; CIM truncates sub-microsecond
+        # precision. Do not round or relax the bound old/new process comparison.
+        $nativeProcess=[Diagnostics.Process]::GetProcessById([int]$_.ProcessId)
+        try {
+          $null=$nativeProcess.Handle
+          $nativeStart=$nativeProcess.StartTime.ToUniversalTime()
+          if ($_.CreationDate -and [Math]::Abs(($_.CreationDate.ToUniversalTime()-$nativeStart).TotalSeconds) -gt 1) { throw 'REFERENCE_PROCESS_CHANGED' }
+          $startUtc=$nativeStart.ToString('o')
+        }
+        finally { $nativeProcess.Dispose() }
+      }
+    }
     [PSCustomObject]@{
       pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;name=[string]$_.Name
       executable=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine
-      startUtc=$(if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null })
+      startUtc=$startUtc
     }
   })
 }
 function Tasks {
   $items=@(Get-ScheduledTask -ErrorAction Stop)
   if ($items.Count -gt 8192) { throw 'REFERENCE_NATIVE_TASK_LIMIT' }
+  if ($projectOnly) {
+    # Retain-only operations bind the known project task and visible references;
+    # unrelated task actions are not interpreted or claimed compatible.
+    $needles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
+    $items=@($items | Where-Object {
+      $taskIdentity=[string]$_.TaskPath+[string]$_.TaskName
+      if (@($effectScope.taskIdentities) -contains $taskIdentity) { return $true }
+      foreach ($action in $_.Actions) {
+        foreach ($text in @([string]$action.Execute,[string]$action.Arguments,[string]$action.WorkingDirectory)) {
+          foreach ($needle in $needles) {
+            if ($needle -and $text.Replace('/','\').IndexOf($needle.Replace('/','\'),[StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+          }
+        }
+      }
+      return $false
+    })
+  }
   @($items | Sort-Object TaskPath,TaskName | ForEach-Object {
     Budget
     [PSCustomObject]@{
       identity=([string]$_.TaskPath+[string]$_.TaskName)
       actions=@($_.Actions | ForEach-Object {
+        if ($preserving -and (([string]$_.Execute+[string]$_.Arguments+[string]$_.WorkingDirectory) -match '%[A-Za-z_][A-Za-z0-9_]*%')) { throw 'REFERENCE_NATIVE_TASK_ENVIRONMENT_UNCERTAIN' }
         [PSCustomObject]@{execute=(Expand-ReferenceText ([string]$_.Execute));arguments=(Expand-ReferenceText ([string]$_.Arguments));workingDirectory=(Expand-ReferenceText ([string]$_.WorkingDirectory))}
       })
     }
@@ -52,8 +91,18 @@ try {
   $sha=[Security.Cryptography.SHA256]::Create()
   $policySha=([BitConverter]::ToString($sha.ComputeHash($policyBytes))).Replace('-','').ToLowerInvariant()
   $policy=[Text.Encoding]::UTF8.GetString($policyBytes) | ConvertFrom-Json
+  $preserving=($policy.preservingUpdate.format -eq 1 -and $policy.preservingUpdate.operation -in @('build','install','restart'))
+  $buildOnly=($preserving -and $policy.phase -eq 'build-only' -and $policy.preservingUpdate.operation -eq 'build' -and @($policy.preservingUpdate.effects).Count -eq 1 -and $policy.preservingUpdate.effects[0] -eq 'new-output-only')
+  $effectScope=$policy.preservingUpdate.effectScope
+  $projectOnly=($preserving -and -not $buildOnly -and $effectScope.format -eq 1)
+  $projectNeedles=@()
+  if ($projectOnly) {
+    $projectNeedles=@($policy.roots | ForEach-Object { [string]$_.path }) + @($policy.windowsReferences.launchers | ForEach-Object { [IO.Path]::GetDirectoryName([string]$_.entry); [string]$_.workingDirectory })
+  }
+  if ($preserving -and ($policy.preservingUpdate.operation -eq 'build' -or $policy.phase -eq 'build-only') -and -not $buildOnly) { throw 'REFERENCE_NATIVE_BUILD_CONTRACT_INVALID' }
   $before=@(Processes)
-  $tasks=@(Tasks)
+  if (-not $buildOnly) { $tasks=@(Tasks) }
+  if (-not $preserving) {
   # Current and common known folders cover this single-user adapter. Additional
   # non-special profiles are an explicit incomplete scope, never silently skipped.
   $profiles=@(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object { -not $_.Special })
@@ -117,7 +166,8 @@ try {
       $coverage.Add([PSCustomObject]@{kind=$labels[$i];path=$folder;status='enumerated';identity=$rootProof.identity})
     }
   } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) }
-  $tasksAfter=@(Tasks)
+  }
+  if (-not $buildOnly) { $tasksAfter=@(Tasks) }
   $after=@(Processes)
   Budget
 } catch {
@@ -127,8 +177,8 @@ try {
 }
 $complete=$errors.Count -eq 0
 [PSCustomObject]@{
-  format=1;complete=$complete;policySha256=$policySha
-  categories=@{processes=$complete;tasks=$complete;shortcuts=$complete}
+  format=$(if ($preserving) {2} else {1});complete=$(if ($preserving) {$false} else {$complete});observationComplete=$(if ($preserving) {$complete} else {$null});policySha256=$policySha
+  categories=@{processes=$complete;tasks=$(if ($buildOnly) {'not_applicable'} else {$complete});shortcuts=$(if ($preserving) {'not_applicable'} else {$complete})}
   errors=@($errors.ToArray());processesBefore=@($before);processesAfter=@($after)
   tasks=@($tasks);tasksAfter=@($tasksAfter);shortcuts=@($shortcuts.ToArray());shortcutCoverage=@($coverage.ToArray())
   shortcutDirectories=@($directorySnapshots.ToArray())

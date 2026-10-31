@@ -17,6 +17,11 @@ function load(file, imports = {}) {
   const mod = { exports: {} };
   new Function('require', 'exports', 'module', output)(
     (name) => {
+      if (
+        name === '@web/components/AppOverlays' &&
+        imports['@nextui-org/react']
+      )
+        return imports['@nextui-org/react'];
       if (!(name in imports)) throw Error(`Unexpected dependency ${name}`);
       return imports[name];
     },
@@ -59,6 +64,7 @@ test('shared transport logger excludes signed-link resolution and session fields
   for (const direction of ['up', 'down']) {
     for (const route of [
       'xiaohongshu.resolveSubscription',
+      'xiaohongshu.prepareOriginalLink',
       'xiaohongshu.connectSession',
     ])
       assert.equal(
@@ -71,6 +77,23 @@ test('shared transport logger excludes signed-link resolution and session fields
       );
   }
   assert.equal(permitLog({ direction: 'up', path: 'article.list' }), true);
+});
+test('missing basic action submits only selected notes to the guarded entry',async()=>{
+  const f=fixture();
+  try {
+    await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
+    await f.button('仅补所选基础缺项').props.onPress();await tick();
+    assert.deepEqual(f.calls.find(([name])=>name==='refreshMissingBasic'),['refreshMissingBasic',{id:'creator-a',noteIds:['pending']}]);
+    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,0);
+  } finally {f.dispose();}
+});
+test('media summary distinguishes a missing manifest and a stopped request',async()=>{
+  const active={...status('running','list'),taskId:'media-task',creatorId:'creator-a',mediaSummary:{manifestNotes:0,declaredImages:0,recordedSavedImages:0,pendingImages:0,needsReviewNotes:1,blockedNotes:1,needsDetailRefreshNotes:0}};
+  const f=fixture({recentTasks:[active],taskStatus:active});try{
+    await f.start(true);await tick();
+    const visible=f.render().filter(value=>typeof value==='string').join(' ');
+    assert.match(visible,/图片清单待核对/);assert.match(visible,/请求结果待核对，已停止/);
+  }finally{f.dispose();}
 });
 const status = (state = 'running', kind = 'download') => ({
   kind,
@@ -129,6 +152,7 @@ function fixture(options = {}) {
       }
     },
   };
+  let groupData = { items: (options.groups || [{ id: 'group-a', name: '合成分组', order: 0 }]) };
   const creators = {
     items: [
       {
@@ -195,6 +219,8 @@ function fixture(options = {}) {
       'resolveSubscription',
       'subscribe',
       'refresh',
+      'refreshFull',
+      'refreshMissingBasic',
       'downloadNotes',
       'cancelTask',
       'resumeTask',
@@ -228,8 +254,9 @@ function fixture(options = {}) {
               creatorId: 'creator-a',
               created: !existing,
               subscribed: true,
+              ...(!existing ? { collection: { taskId: 'list-task', creatorId: 'creator-a' } } : {}),
             };
-          if (name === 'refresh') {
+          if (name === 'refresh' || name === 'refreshFull' || name === 'refreshMissingBasic') {
             taskStatus = status('running', 'list');
             return { taskId: 'list-task', creatorId: input.id };
           }
@@ -282,7 +309,11 @@ function fixture(options = {}) {
           {
             invalidate: async () => {
               calls.push(['invalidate', name]);
+              if (options.stallInvalidation) return new Promise(() => {});
+              if (options.failInvalidation) throw Error('synthetic refresh failed');
             },
+            cancel: async () => {},
+            setData: (_key, update) => { if (name === 'groups') groupData = update(groupData); if (name === 'list') Object.assign(creators, update(creators)); },
           },
         ],
       ),
@@ -322,13 +353,15 @@ function fixture(options = {}) {
     capability: { useQuery: () => query({ canRefresh: true }) },
     list: { useQuery: () => query(creators) },
     groups: {
-      useQuery: () =>
-        query({ items: [{ id: 'group-a', name: '合成分组', order: 0 }] }),
+      useQuery: () => ({ ...query(groupData), refetch: async () => ({ data: groupData }) }),
     },
     notes: {
       useQuery: (input) => {
         const range = shared.articlePublicationRange(input);
         return query({
+          ...(options.queryVersion
+            ? { queryVersion: options.queryVersion }
+            : {}),
           items: items
             .map((note) => ({
               creatorId: 'creator-a',
@@ -359,7 +392,22 @@ function fixture(options = {}) {
     body: {
       useQuery: (input) => {
         if (input.noteId) calls.push(['bodyLookup', input]);
-        return query(bodyData);
+        return query(
+          bodyData
+            ? {
+                ...bodyData,
+                engagement: bodyData.engagement ?? {
+                  metrics: null,
+                  creatorMetrics: null,
+                  comments: [],
+                  windows: [],
+                  totalSaved: 0,
+                  returned: 0,
+                  offset: 0,
+                },
+              }
+            : bodyData,
+        );
       },
     },
   };
@@ -374,6 +422,7 @@ function fixture(options = {}) {
     'remove',
     'export',
     'saveGroup',
+    'reorderGroups',
     'removeGroup',
     'moveCreators',
   ])
@@ -381,6 +430,8 @@ function fixture(options = {}) {
       useMutation: () => ({
         mutateAsync: async (input) => {
           calls.push([name, input]);
+          if (name === 'moveCreators') return {ids:input.ids,groupId:input.groupId,moved:input.ids.length};
+          if (name === 'reorderGroups') { if (options.reorderError) throw Error('synthetic reorder failed'); return { ids: input.ids }; }
           return name === 'export'
             ? {
                 base64: '',
@@ -412,6 +463,16 @@ function fixture(options = {}) {
       'Switch',
     ].map((name) => [name, name]),
   );
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
   const primitives = load(
     'apps/web/src/components/SubscriptionPrimitives.tsx',
     {
@@ -425,6 +486,35 @@ function fixture(options = {}) {
     './SubscriptionPrimitives': primitives,
     '@web/utils/xiaohongshu-subscription': helpers,
   }).default;
+  router.refreshMetrics = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  router.collectComments = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
+  router.engagement = {
+    useQuery: (input) => {
+      if (input.noteId) calls.push(['engagementLookup', input]);
+      return query(undefined);
+    },
+  };
+  const engagement = load('apps/web/src/components/XhsEngagement.tsx', {
+    react,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@web/utils/trpc': {
+      trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
+    },
+  });
   const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
@@ -433,9 +523,23 @@ function fixture(options = {}) {
       trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
     },
     '@web/components/SubscriptionPrimitives': primitives,
+    sonner: { toast: { warning: message => calls.push(['warning', message]) } },
     '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
-    '@web/components/ArticleReader': 'ArticleReader',
+    '@web/components/XhsOriginalLink': 'XhsOriginalLink',
+    '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
+    '@web/components/XhsBatchSubscription': 'XhsBatchSubscription',
+    '@web/components/XhsCombinedFilter': 'XhsCombinedFilter',
+    '@web/utils/xhs-combined-filter': load(
+      'apps/web/src/utils/xhs-combined-filter.ts',
+    ),
+    '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
+    '@web/components/XhsSourceBudget': 'XhsSourceBudget',
+    '@web/components/XhsEngagement': engagement,
+    '@web/utils/xhs-note-presentation': load(
+      'apps/web/src/utils/xhs-note-presentation.ts',
+    ),
     '@web/components/ArticleDateFilter': 'ArticleDateFilter',
     '@web/utils/article-date-selection': dateHelpers,
     '@wewe-rss/shared': shared,
@@ -451,18 +555,57 @@ function fixture(options = {}) {
     },
   }).default;
   const previousFetch = global.fetch;
-  global.fetch = async (url) => ({
-    ok: true,
-    json: async () =>
-      url.endsWith('/directory')
-        ? {
-            directory: 'synthetic-only',
-            askEveryTime: true,
-            cancelled: cancelledPicker,
-            pickToken: 'synthetic-grant',
-          }
-        : { directory: 'synthetic-only', askEveryTime: true },
-  });
+  let cacheMode = 'normal';
+  const directoryCalls=[];
+  global.fetch = async (url, request) => {
+    if (/\/directory(?:-confirm)?\?/.test(url)) directoryCalls.push(url);
+    if (url.endsWith('/xiaohongshu/cache-export')) {
+      const payload = JSON.parse(request.body);
+      calls.push(['cacheExport', payload]);
+      if (cacheMode === 'lost') throw Error('transport lost');
+      if(['audit-status','audit-cancel','audit-code'].includes(cacheMode))return {ok:true,json:async()=>({results:payload.items.map(item=>cacheMode==='audit-code'?{id:item.id,error:'XHS_CACHED_SAVE_FAILED'}:{id:item.id,saved:{alreadySaved:false,status:cacheMode==='audit-status'?'failed':'new'}}),cancelled:cacheMode==='audit-cancel'?'false':false})};
+
+      if (cacheMode === 'bad')
+        return {
+          ok: true,
+          json: async () => ({
+            results: [{ id: payload.items[0].id }],
+            cancelled: false,
+          }),
+        };
+      if (cacheMode === 'pending')
+        return new Promise((resolve, reject) =>
+          request.signal.addEventListener(
+            'abort',
+            () => reject(Error('aborted')),
+            { once: true },
+          ),
+        );
+      return {
+        ok: true,
+        json: async () => ({
+          results: payload.items.map((item) => ({
+            id: item.id,
+            saved: { alreadySaved: false, status: 'new' },
+          })),
+          cancelled: false,
+        }),
+      };
+    }
+    if (url.endsWith('/directory-confirm?target=xiaohongshu')) return {ok:true,json:async()=>({directory:'synthetic-only',askEveryTime:true,pickToken:'synthetic-grant'})};
+    return {
+      ok: true,
+      json: async () =>
+        url.endsWith('/directory?target=xiaohongshu')
+          ? {
+              directory: 'synthetic-only',
+              askEveryTime: true,
+              cancelled: cancelledPicker,
+              pickToken: 'synthetic-grant',
+            }
+          : { directory: 'synthetic-only', askEveryTime: true },
+    };
+  };
   let tree;
   const all = (node) =>
     node == null
@@ -484,7 +627,9 @@ function fixture(options = {}) {
         n.type === type &&
         (n.props['aria-label'] === text ||
           n.props.label === text ||
-          all(n.props.children).join('') === text),
+          all(n.props.children)
+            .filter((child) => typeof child !== 'object')
+            .join('') === text),
     );
   const button = (text) => {
     const node = find('Button', text);
@@ -494,25 +639,44 @@ function fixture(options = {}) {
   return {
     calls,
     recoveryQueries,
+    directoryCalls,
+    all,
     creators,
     items,
     render,
     find,
     button,
-    async start(all = false) {
+    async start(includeAll = false) {
       render();
       await tick();
       render();
-      if (!all) {
-        find('button', '合成作者').props.onClick();
+      if (!includeAll) {
+        const matches = render().filter(
+          (node) =>
+            node.type === 'button' &&
+            typeof node.props['aria-pressed'] === 'boolean' &&
+            all(node.props.children).includes('合成作者'),
+        );
+        assert.equal(
+          matches.length,
+          1,
+          'one selectable creator named 合成作者',
+        );
+        assert.equal(typeof matches[0].props.onClick, 'function');
+        matches[0].props.onClick();
         render();
       }
     },
+    async openZip() { await button('导出笔记').props.onPress(); find('select', '导出方式').props.onChange({target:{value:'zip'}}); render(); },
+    async startExport(twice=false) { const n=render().find(x=>x.type==='Button' && all(x.props.children).join('').startsWith('开始导出')); assert.ok(n, 'export confirmation button'); n.props.onPress(); if(twice)n.props.onPress(); for(let i=0;i<8;i++)await tick(); },
+    async openLocalExport(twice=false) { await button('导出笔记').props.onPress(); render(); await this.startExport(twice); await tick(); },
+    async confirmDirectory(accept=true) { await tick(); render(); if(accept)button('确认保存').props.onPress(); else {const footer=render().find(n=>n.type==='ModalFooter'&&all(n.props.children).some(x=>x?.type==='Button'&&all(x.props.children).join('')==='确认保存'));assert.ok(footer);const cancelExport=all(footer.props.children).find(x=>x?.type==='Button'&&all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();} },
     dispose() {
       slots.forEach((slot) => slot?.cleanup?.());
       global.fetch = previousFetch;
     },
     settings(o) {
+      if ('cacheMode' in o) cacheMode = o.cacheMode;
       if ('body' in o) bodyData = o.body;
       if ('recentTasks' in o) recentItems = o.recentTasks;
       if ('connection' in o) connectionData = o.connection;
@@ -557,12 +721,8 @@ test('note/profile resolution requires confirmation, preserves grouping, and ref
         f.calls.find(([name]) => name === 'subscribe'),
         ['subscribe', { resolutionId: 'resolution-a', groupId: 'group-a' }],
       );
-      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 1);
-      assert.equal(
-        f.calls.findIndex(([name]) => name === 'refresh') >
-          f.calls.findIndex(([name]) => name === 'subscribe'),
-        true,
-      );
+      assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 0);
+      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 0);
     } finally {
       f.dispose();
     }
@@ -611,8 +771,8 @@ test('date and title filters reset selection; pending image notes selectable, un
       f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
       true,
     );
-    await f.button('导出已保存 ZIP').props.onPress();
-    await f.button('开始导出').props.onPress();
+    await f.openZip();
+    await f.startExport();
     assert.deepEqual(f.calls.find(([n]) => n === 'export')[1].noteIds, [
       'saved',
       'old',
@@ -653,17 +813,38 @@ test('date and title filters reset selection; pending image notes selectable, un
   }
 });
 
-test('local picker cancellation does not download; repeated download and cancel clicks start one operation; progress collapses', async () => {
+test('cancelling the native directory picker retains settings and submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.settings({cancelledPicker:true});
+    await f.button('选择目录').props.onPress();
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory?')).length,1);
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport','refreshFull'].includes(name)).length,0);
+    assert(f.render().filter(x=>typeof x==='string').join(' ').includes('已取消目录选择'));
+  } finally { f.dispose(); }
+});
+
+test('cancelling the archived save confirmation submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true); f.render();
+    const pending=f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory(false); await pending;
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport'].includes(name)).length,0);
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory-confirm?')).length,0);
+  } finally { f.dispose(); }
+});
+
+test('export confirmation cancellation submits nothing; repeated export and cancel clicks start one operation', async () => {
   const f = fixture();
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    f.settings({ cancelledPicker: true });
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.button('导出笔记').props.onPress();
+    const footer=f.render().find(n=>n.type==='ModalFooter'&&f.all(n.props.children).some(x=>x?.type==='Button'&&f.all(x.props.children).join('').startsWith('开始导出')));
+    assert.ok(footer);const cancelExport=f.all(footer.props.children).find(x=>x?.type==='Button'&&f.all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
-    f.settings({ cancelledPicker: false });
-    const download = f.button('下载图文到本地 (1)');
-    await Promise.all([download.props.onPress(), download.props.onPress()]);
+    await f.openLocalExport(true);
     f.render();
     await tick();
     assert.deepEqual(f.calls.find(([n]) => n === 'downloadNotes')[1], {
@@ -679,7 +860,7 @@ test('local picker cancellation does not download; repeated download and cancel 
     assert.equal(f.calls.filter(([n]) => n === 'cancelTask').length, 1);
     f.find('summary', '收起进度').props.onClick({ preventDefault() {} });
     assert.ok(f.find('summary', '查看进度'));
-    assert.equal(f.button('更新笔记列表').props.isDisabled, false);
+    assert.equal(f.button('更新本号').props.isDisabled, false);
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
     f.render();
     await tick();
@@ -693,26 +874,38 @@ test('local picker cancellation does not download; repeated download and cancel 
   }
 });
 
+test('subscription and cache update never request a save directory', async () => {
+  const f=fixture();
+  try {
+    await f.start(); await f.resolve(); await f.button('确认订阅').props.onPress();
+    assert.equal(f.directoryCalls.length,0);
+    f.render(); await tick(); f.setTask(status('completed','list')); await tick(); f.render();
+    await f.button('更新本号').props.onPress();
+    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,1);
+    assert.equal(f.directoryCalls.length,0);
+  } finally { f.dispose(); }
+});
+
 test('list refresh has distinct progress; status outages never resubmit work; partial completion unlocks controls', async () => {
   const f = fixture();
   try {
     await f.start();
-    const refresh = f.button('更新笔记列表');
+    const refresh = f.button('更新本号');
     await Promise.all([refresh.props.onPress(), refresh.props.onPress()]);
     f.settings({ failStatus: true });
     f.render();
     await tick();
-    assert.equal(f.calls.filter(([n]) => n === 'refresh').length, 1);
-    assert.equal(f.button('更新笔记列表').props.isDisabled, true);
+    assert.equal(f.calls.filter(([n]) => n === 'refreshFull').length, 1);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
     f.settings({ failStatus: false });
     f.setTask(status('partial', 'list'));
     await tick();
-    assert.equal(f.button('更新笔记列表').props.isDisabled, false);
+    assert.equal(f.button('更新本号').props.isDisabled, false);
     assert.ok(
       f
         .render()
         .some(
-          (n) => typeof n === 'string' && n.includes('更新笔记列表：部分完成'),
+          (n) => typeof n === 'string' && n.includes('部分完成'),
         ),
     );
   } finally {
@@ -741,9 +934,7 @@ test('management folders retain move/filter handlers and selections above 100 re
         publishTime: 0,
       });
     await f.button('选择当前筛选全部').props.onPress();
-    const download = f.button('下载图文到本地 (104)');
-    assert.equal(download.props.isDisabled, false);
-    await download.props.onPress();
+    await f.openLocalExport();
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
       1,
@@ -828,17 +1019,17 @@ test('cross-page loaded selection preserves earlier IDs; filtered export include
       end: '',
     });
     f.find('Checkbox', '全选已加载').props.onValueChange(true);
-    assert.ok(f.button('下载图文到本地 (20)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     await f.button('加载更多').props.onPress();
     assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     f.find('Checkbox', '全选已加载').props.onValueChange(true);
-    assert.ok(f.button('下载图文到本地 (40)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
     assert.equal(f.find('Checkbox', '选择笔记 批量 204'), undefined);
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
     const exports = f.calls
       .filter(([name]) => name === 'export')
       .map(([, input]) => input);
@@ -859,7 +1050,7 @@ test('cross-page loaded selection preserves earlier IDs; filtered export include
       'synthetic-part-2-of-3.zip',
       'synthetic-part-3-of-3.zip',
     ]);
-    assert.ok(f.button('下载图文到本地 (40)'));
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
   } finally {
     f.dispose();
     global.document = oldDocument;
@@ -922,17 +1113,19 @@ test('resuming waits for executor release, uses original task identity and newly
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.openLocalExport();
     f.render();
     await tick();
     f.setTask({ ...status('cancelled'), resumable: false });
     await tick();
     assert.equal(f.find('Button', '继续未完成任务'), undefined);
-    assert.equal(f.button('更新笔记列表').props.isDisabled, true);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
     f.setTask({ ...status('cancelled'), resumable: true });
     await tick();
     const resume = f.button('继续未完成任务');
-    await Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    const resumes = Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    await f.confirmDirectory();
+    await resumes;
     assert.deepEqual(
       f.calls.find(([name]) => name === 'resumeTask'),
       ['resumeTask', { taskId: 'download-task', pickToken: 'synthetic-grant' }],
@@ -996,46 +1189,42 @@ test('search clear and hidden-filter feedback match WeChat; Escape closes input 
   }
 });
 
-test('saved note uses the common reader/find component, preserves images, and reserves Escape while finding', async () => {
+test('comment entry and panel are absent while native original-link and count data remain', async () => {
   const f = fixture();
   try {
     await f.start();
-    f.settings({
-      body: {
-        title: '合成正文',
-        text: 'A <script> & 关键词\n第二段',
-        images: ['data:image/png;base64,c3ludGhldGlj'],
-        kind: 'image-text',
-      },
-    });
-    f.render()
-      .find(
-        (node) => node.type === 'button' && node.props.children === '苹果存档',
-      )
-      .props.onClick();
-    let reader = f.find('ArticleReader');
-    assert.ok(reader);
-    assert.match(reader.props.contentHtml, /A &lt;script&gt; &amp; 关键词/);
-    assert.match(
-      reader.props.contentHtml,
-      /data:image\/png;base64,c3ludGhldGlj/,
+    const nodes = f.render();
+    assert.equal(
+      nodes.some(
+        (n) =>
+          n.type === 'button' &&
+          String(n.props?.['aria-label'] || '').startsWith('查看互动与评论'),
+      ),
+      false,
     );
-    assert.equal(reader.props.findOpen, false);
-    reader.props.onFindOpenChange(true);
-    const modal = f
-      .render()
-      .find((node) => node.type === 'Modal' && node.props.size === '4xl');
-    assert.equal(modal.props.isKeyboardDismissDisabled, true);
-    modal.props.onClose();
-    reader = f.find('ArticleReader');
-    assert.equal(reader.props.findOpen, false);
+    assert.equal(
+      nodes.some((n) => n.type === 'Modal' && n.props.size === '4xl'),
+      false,
+    );
+    assert(
+      nodes.some(
+        (n) => n.type === 'XhsOriginalLink' && n.props.noteId === 'saved',
+      ),
+    );
+    assert.equal(
+      f.calls.filter(
+        ([name]) => name === 'bodyLookup' || name === 'engagementLookup',
+      ).length,
+      0,
+    );
   } finally {
     f.dispose();
   }
 });
 
-test('global/group queries preserve authors, exports dispatch by author and reading uses the actual owner', async () => {
-  const f = fixture();
+test('global/group queries preserve authors, exports dispatch by author and original links use the actual owner', async () => {
+  const queryVersion = 'a'.repeat(64);
+  const f = fixture({ queryVersion });
   const oldDocument = global.document,
     oldCreate = URL.createObjectURL,
     oldRevoke = URL.revokeObjectURL;
@@ -1059,33 +1248,51 @@ test('global/group queries preserve authors, exports dispatch by author and read
     await f.start(true);
     assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
     await f.button('选择当前筛选全部').props.onPress();
-    await f.button('导出已保存 ZIP').props.onPress();
-    await f.button('开始导出').props.onPress();
+    await f.openZip();
+    await f.startExport();
     const exports = f.calls.filter(([name]) => name === 'export');
-    assert.ok(exports.some(([, input]) => input.creatorId === 'creator-a'));
+    assert.ok(exports.some(([, input]) => input.noteIds.includes('saved')));
+    assert.ok(exports.every(([, input]) => input.creatorId === undefined));
+    assert.ok(
+      exports.every(([, input]) => input.queryVersion === queryVersion),
+    );
     assert.deepEqual(
-      exports.find(([, input]) => input.creatorId === 'creator-b')[1].noteIds,
+      exports.find(([, input]) => input.noteIds.includes('author-b-note'))[1]
+        .noteIds,
       ['author-b-note'],
     );
     f.find('ManagementFolders').props.onFilter('group-a');
     assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
     assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
-    await f.button('导出已保存 ZIP').props.onPress();
+    await f.openZip();
     f.render()
       .find((n) => n.type === 'input' && n.props.value === 'filtered')
       .props.onChange();
-    await f.button('开始导出').props.onPress();
+    await f.startExport();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion,
+      queryVersion,
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].groupId,
+      'group-a',
+    );
     assert.equal(
       f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
       'group-a',
     );
-    f.render()
-      .find((n) => n.type === 'button' && n.props.children === '分组正文')
-      .props.onClick();
-    f.render();
     assert.equal(
-      f.calls.filter(([name]) => name === 'bodyLookup').at(-1)[1].creatorId,
+      f
+        .render()
+        .find(
+          (n) =>
+            n.type === 'XhsOriginalLink' && n.props.noteId === 'author-b-note',
+        ).props.creatorId,
       'creator-b',
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'engagementLookup').length,
+      0,
     );
     f.find('ManagementFolders').props.onFilter('ungrouped');
     assert.equal(f.find('Checkbox', '选择笔记 分组正文'), undefined);
@@ -1124,7 +1331,7 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
     f.find('Checkbox', '选择笔记 第二图文').props.onValueChange(true);
     f.find('Checkbox', '选择笔记 第三图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (3)').props.onPress();
+    await f.openLocalExport();
     f.render();
     await tick();
     assert.equal(
@@ -1142,7 +1349,7 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
     await f.button('取消任务').props.onPress();
     await tick();
     f.render();
-    assert.ok(f.button('下载图文到本地 (3)'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文').props.isSelected, true);
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
       2,
@@ -1231,6 +1438,44 @@ test('moving group membership invalidates cached note scope and clears stale sel
     );
   } finally {
     f.dispose();
+  }
+});
+
+test('recent task history starts collapsed on each entry and only explicit disclosure opens it', async () => {
+  for (let entry = 0; entry < 2; entry++) {
+    const f = fixture({
+      recentTasks: [
+        {
+          ...status('completed'),
+          taskId: 'history-only',
+          creatorId: 'creator-a',
+          resumable: false,
+        },
+      ],
+    });
+    try {
+      await f.start(true);
+      await tick();
+      const region = f
+        .render()
+        .find(
+          (node) =>
+            node.type === 'section' &&
+            node.props['aria-label'] === '最近笔记任务',
+        );
+      assert.ok(region);
+      assert.equal(region.props.children.at(-1).props.open, false);
+      f.find('summary', '查看最近任务').props.onClick({ preventDefault() {} });
+      assert.ok(f.find('summary', '收起最近任务'));
+      assert.equal(
+        f.calls.some(([name]) =>
+          ['resumeTask', 'refresh', 'downloadNotes'].includes(name),
+        ),
+        false,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });
 
@@ -1372,7 +1617,7 @@ test('late discovery does not replace a newly started task or clear selections a
   try {
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
-    await f.button('下载图文到本地 (1)').props.onPress();
+    await f.openLocalExport();
     f.render();
     release();
     await tick();
@@ -1422,7 +1667,9 @@ test('uncertain resume receipt immediately removes stale continue action and onl
         },
       ],
     });
-    await f.button('继续未完成任务').props.onPress();
+    const resumePending = f.button('继续未完成任务').props.onPress();
+    await f.confirmDirectory();
+    await resumePending;
     await tick();
     f.render();
     assert.equal(f.find('Button', '继续未完成任务'), undefined);
@@ -1435,4 +1682,195 @@ test('uncertain resume receipt immediately removes stale continue action and onl
   } finally {
     f.dispose();
   }
+});
+
+test('disabled source displays recorded risk and unrecorded history remains unknown', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    assert.ok(
+      f.find(
+        'p',
+        '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。',
+      ),
+    );
+    f.settings({
+      connection: {
+        liveEnabled: false,
+        connected: false,
+        riskCode: 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+      },
+    });
+    assert.ok(
+      f.find(
+        'p',
+        '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。',
+      ),
+    );
+    assert.equal(f.calls.filter(([name]) => /Session/.test(name)).length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('combined filters preserve exact refreshed export ids and leave all export unfiltered', async () => {
+  const f = fixture({ queryVersion: 'a'.repeat(64) }),
+    oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    f.items.forEach(
+      (row, i) => (row.metrics = { values: { likes: i * 10, collects: i } }),
+    );
+    await f.start(true);
+    const combo = f.render().find((n) => n.type === 'XhsCombinedFilter');
+    combo.props.onChange({
+      mode: 'and',
+      conditions: [
+        { id: 1, metric: 'likes', operator: '>=', value: '20', upper: '' },
+        { id: 2, metric: 'collects', operator: '<=', value: '2', upper: '' },
+      ],
+    });
+    assert(f.find('Checkbox', '选择笔记 旧笔记'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果存档'), undefined);
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.startExport();
+    assert.deepEqual(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds,
+      ['old'],
+    );
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'all')
+      .props.onChange();
+    await f.startExport();
+    const ids = f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds;
+    assert(
+      ids.includes('saved') && ids.includes('old') && ids.includes('video'),
+    );
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('archived-only action freezes one cache scope and never calls source-capable downloadNotes', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    assert.deepEqual(f.calls.find(([n]) => n === 'cacheExport')[1], {
+      items: [{ id: 'saved', creatorId: 'creator-a' }],
+      pickToken: 'synthetic-grant',
+    });
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+test('a lost cache-only receipt is not replayed or routed to a source download', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({ cacheMode: 'lost' });
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('cache-only stop aborts its single scope request; malformed receipts cannot fall back to source work', async () => {
+  for (const mode of ['bad', 'pending']) {
+    const f = fixture();
+    try {
+      await f.start();
+      f.settings({ cacheMode: mode });
+      f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+      f.render();
+      const pending = f.button('保存已选归档到本地').props.onPress();
+      await f.confirmDirectory();
+      if (mode === 'pending') {
+        await tick();
+        f.render();
+        await f.button('停止后续缓存保存').props.onPress();
+      }
+      await pending;
+      assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+      assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test('AUDIT: malformed saved status and cancellation type cannot claim cache completion',async()=>{
+ for(const mode of ['audit-status','audit-cancel']){
+  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+   const visible=f.render().filter(n=>typeof n==='string').join(' ');
+   assert.match(visible,/回执未确认|回执不完整/);assert.equal(f.calls.filter(([n])=>n==='cacheExport').length,1);
+  }finally{f.dispose()}
+ }
+});
+test('AUDIT: failed cache receipt displays a user explanation without backend codes',async()=>{
+ const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+  const visible=f.render().filter(n=>typeof n==='string').join(' ');assert.doesNotMatch(visible,/XHS_CACHED_SAVE_FAILED/);assert.match(visible,/失败 1/);
+ }finally{f.dispose()}
+});
+
+
+test('xhs folder reorder sends confirmed order, keeps membership, and leaves cache unchanged on failure',async()=>{
+ const groups=[{id:'a',name:'A',order:0},{id:'b',name:'B',order:1},{id:'c',name:'C',order:2}];
+ const f=fixture({groups});try { await f.start();
+   await f.find('ManagementFolders').props.onReorder(['c','a','b'],['a','b','c']);
+   assert.deepEqual(f.calls.find(([name])=>name==='reorderGroups'),['reorderGroups',{ids:['c','a','b'],expectedIds:['a','b','c']}]);
+   assert.deepEqual(f.find('ManagementFolders').props.folders.map(x=>x.id),['c','a','b']);
+   assert.equal(f.calls.filter(([name])=>name==='moveCreators').length,0);
+ } finally {f.dispose();}
+ const bad=fixture({groups,reorderError:true});try {await bad.start();
+   await assert.rejects(bad.find('ManagementFolders').props.onReorder(['b','a','c'],['a','b','c']),/synthetic reorder failed/);
+   assert.deepEqual(bad.find('ManagementFolders').props.folders.map(x=>x.id),['a','b','c']);
+ } finally {bad.dispose();}
+});
+
+
+test('folder member picker receives unfiltered creators and confirmed move releases without waiting for invalidation',async()=>{
+ const f=fixture({stallInvalidation:true});try {await f.start(); const folders=f.find('ManagementFolders');
+ assert.deepEqual(folders.props.members.map(x=>x.id),['creator-a']);
+ let done=false;void folders.props.onMove(['creator-a'],'group-a').then(()=>done=true);await tick();
+ assert.equal(done,true);assert.deepEqual(f.calls.find(([n])=>n==='moveCreators'),['moveCreators',{ids:['creator-a'],groupId:'group-a'}]);
+ assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
+ }finally{f.dispose()}
+});
+
+
+test('failed refresh after a confirmed creator move warns without undoing membership',async()=>{
+ const f=fixture({failInvalidation:true});try {await f.start();await f.find('ManagementFolders').props.onMove(['creator-a'],'group-a');await tick();
+ assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
+ assert.match(f.calls.find(([name])=>name==='warning')[1],/分类已保存，列表刷新失败/);
+ }finally{f.dispose()}
+});
+
+
+test('selected note media action opens existing diagnostics with exact selection',async()=>{
+ const f=fixture();try{await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
+ assert.deepEqual(f.find('XhsWholeCreator').props.selectedNoteIds,['pending']);
+ assert.ok(f.button('补所选图片'));assert.equal(f.calls.some(([name])=>/Media/.test(name)),false);
+ }finally{f.dispose()}
 });

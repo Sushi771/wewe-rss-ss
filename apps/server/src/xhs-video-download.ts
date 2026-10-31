@@ -1,3 +1,4 @@
+import { xhsOriginalLink } from './collection/xhs-original-link';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -320,7 +321,10 @@ const escape = (text: string) =>
  * expectedBytes/hash protect transport; evidenceVerified is the trusted adapter's
  * upstream evidence obligation. Neither declares successful video decoding.
  */
-export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
+export function prepareXhsVideoDownload(
+  input: XhsVerifiedVideoCache,
+  sourceLayout = false,
+) {
   try {
     check(input.evidenceVerified === true && input.note.kind === 'video');
     const draft = xhsArchiveDraft(input.note.authorId, {
@@ -376,8 +380,10 @@ export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
     return async (directory: string) => {
       const prepared = await buildCompleteArticleDownload(
         article,
-        '小红书已核视频缓存（笔记身份：' + draft.noteKey + '）',
+        '[原文](' + xhsOriginalLink(draft.noteKey) + ')',
         directory,
+        false,
+        sourceLayout,
       );
       await mkdir(join(directory, 'video'));
       await writeFile(join(directory, 'video', filename), bytes, {
@@ -392,7 +398,7 @@ export function prepareXhsVideoDownload(input: XhsVerifiedVideoCache) {
           ')\n\n' +
           '视频缓存已通过容器与字节一致性校验；解码及真实来源完整性须由上游另行核实。\n',
       );
-      return { ...prepared, videoCount: 1 };
+      return { ...prepared, sourceUrl: null, videoCount: 1 };
     };
   } catch {
     throw invalid();

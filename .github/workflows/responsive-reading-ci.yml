@@ -1,0 +1,128 @@
+name: Responsive reading workspace
+
+on:
+  push:
+    branches: [codex/responsive-shared-layout, codex/xhs-unified-integration]
+  pull_request:
+    branches: [codex/xhs-depth-integration]
+    paths:
+      - 'apps/web/**'
+      - 'scripts/responsive-layout-browser.test.cjs'
+      - 'scripts/article-date-shortcuts-browser.test.cjs'
+      - 'scripts/feed-refresh-state-ui.test.cjs'
+      - 'scripts/**'
+      - 'packages/shared/**'
+      - 'apps/server/src/trpc/**'
+      - '.github/workflows/responsive-reading-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  responsive-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DATABASE_URL: 'file:./ci-placeholder.sqlite'
+      XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+      XHS_COMMENT_COLLECTION_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          submodules: false
+          lfs: false
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Web lint, types and compiled frontend
+        run: |
+          pnpm --filter web lint
+          pnpm --filter web build
+      - name: Scope, selection, export, progress and cancellation regressions
+        run: >-
+          node --test
+          scripts/browser-readiness.test.cjs
+          scripts/xhs-avatar-fallback.test.cjs
+          scripts/cdp-navigation.test.cjs
+          scripts/overlay-click-readiness.test.cjs
+          scripts/feed-refresh-state-ui.test.cjs
+          scripts/xhs-batch-subscription-ui.test.cjs scripts/xhs-combined-filter.test.cjs scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs
+          scripts/feed-export-date-ui.test.cjs
+          scripts/article-body-state.test.cjs
+          scripts/article-date-shortcuts.test.cjs
+          scripts/feed-browse-state.test.cjs
+          scripts/folder-member-picker.test.cjs
+          scripts/deployed-export-adaptation.test.cjs
+      - name: Compiled frontend geometry and pointer interactions
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/responsive-layout-browser.test.cjs
+      - name: Calendar, source pane and dialog browser regressions
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: >-
+          node --test
+          scripts/article-date-shortcuts-browser.test.cjs
+          scripts/feed-sidebar-layout.test.cjs
+          scripts/subscription-dialog-layout.test.cjs
+
+      - name: Original note links, count cells and deleted comment UI
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-note-data-browser.test.cjs
+
+      - name: Original links and shared overlay interaction matrix
+        id: overlay-matrix
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/overlay-matrix-browser.test.cjs
+
+      - name: Preserve failed synthetic overlay evidence
+        if: failure() && steps.overlay-matrix.outputs.evidence != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-overlay-failure
+          path: |
+            ${{ steps.overlay-matrix.outputs.evidence }}/failure*.json
+            ${{ steps.overlay-matrix.outputs.evidence }}/failure*.png
+            ${{ steps.overlay-matrix.outputs.evidence }}/result.json
+          retention-days: 3
+
+      - name: Metric header cycles, complete-set ordering and responsive counts
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-metric-sort-browser.test.cjs
+
+      - name: Combined metric filters and scoped export
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-combined-filter-browser.test.cjs
+
+      - name: Batch subscription receipts and explicit recovery
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-batch-subscription-browser.test.cjs
+
+      - name: Batch keyboard and short-window recovery
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-batch-keyboard-browser.test.cjs
+
+      - name: Combined filter short-window title visibility
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-filter-short-review.cjs
+
+      - name: Creator avatar fallback and long-name layout
+        env:
+          RESPONSIVE_TEST_BROWSER: /usr/bin/google-chrome
+        run: node scripts/xhs-avatar-name-browser.test.cjs

@@ -10,6 +10,9 @@ export type SubscriptionTask = Omit<
   'taskId' | 'creatorId' | 'message'
 > & {
   message?: string;
+  collectDetails?: boolean;
+  collectionStage?: 'listing' | 'details';
+  collectionScope?: 'recent' | 'all' | 'selected';
   resumable?: boolean;
   resumedFromTaskId?: string;
   supersededByTaskId?: string;
@@ -56,6 +59,12 @@ export function canAdoptRecoveredTask(input: {
 }
 
 export function taskNextStep(task: SubscriptionTask) {
+  if (task.state === 'completed' && task.code) return '采集回执存在限制或未确认，请检查任务状态。';
+  if (task.collectionStage === 'listing' && task.state === 'completed') return '已发现笔记，但正文与媒体尚未确认完成，请检查任务状态。';
+  if (task.code === 'XHS_VIDEO_CACHE_UNAVAILABLE')
+    return '部分视频暂未采集，已完成的内容已保留。';
+  if (task.code === 'XHS_VIDEO_SOURCE_UNVERIFIED')
+    return '视频来源信息无法确认，采集已暂停；已保存的内容保留，请检查来源状态后再继续。';
   if (task.code === 'XHS_LIST_PAGE_LIMIT_REACHED')
     return '已达到本次列表页数上限，可使用已列出的笔记；点击继续才会读取下一批，不会自动遍历全部历史。';
   if (task.supersededByTaskId)
@@ -67,17 +76,26 @@ export function taskNextStep(task: SubscriptionTask) {
   if (!taskFinished(task)) return '正在查看已存在任务的进度，不会创建新采集。';
   if (task.state === 'completed')
     return '此任务已完成，可继续阅读或导出已保存内容。';
-  if (
-    task.code?.startsWith('XHS_SOURCE_') ||
-    task.code === 'XHS_SESSION_REQUIRED'
-  )
-    return '请先通过本机安全工具处理连接、验证或访问限制，再明确继续；已有内容保留。';
+  if (task.code === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED')
+    return '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。';
+  if (task.code === 'XHS_SOURCE_VERIFICATION_BLOCKED')
+    return '历史来源请求已暂停，具体原因尚待核查；采集已停止，不会因重新连接自动解除。';
+  if (task.code?.startsWith('XHS_SOURCE_') || task.code === 'XHS_SESSION_REQUIRED')
+    return '来源请求已暂停，请通过本机安全工具核查采集会话与来源状态后再明确连接；已保存数据保留。';
   if (task.code === 'XHS_RESUME_DIRECTORY_CHANGED')
     return '请选回此任务原来的保存目录，再继续未完成内容。';
   return task.resumable
     ? `任务尚未完成${task.remaining > 0 ? `，剩余 ${task.remaining} 项` : ''}。点击“继续未完成任务”后才会再次执行；已有内容保留。`
     : '任务尚未完成，请重新读取状态确认下一步；已有内容保留。';
 }
+export const withCachedExportSummary = (summary: string, next: string) => summary ? `${summary} ${next}` : next;
+export const batchVideoWarning = (count: number) => count ? `此前 ${count} 位博主有视频暂未采集，可在任务记录中查看。` : '';
+
+export function canContinueCreatorQueue(task: SubscriptionTask) {
+  return (task.state === 'completed' && !task.code && task.collectionStage !== 'listing') ||
+    (task.state === 'partial' && task.collectionStage === 'details' && task.code === 'XHS_VIDEO_CACHE_UNAVAILABLE');
+}
+
 export const taskFinished = (task: SubscriptionTask) =>
   task.state !== 'queued' && task.state !== 'running';
 
@@ -98,6 +116,13 @@ export function selectedImageNotes<T extends { id: string; kind: string }>(
 }
 
 export function taskText(task: SubscriptionTask): string {
+  if (task.state === 'completed' && task.code) return '任务回执存在限制或未确认，请检查任务状态。';
+  if (task.collectDetails || task.collectionStage) {
+    if (task.collectionStage === 'listing' && task.state === 'completed') return '目录已发现；正文与媒体尚未确认完成。';
+    const states = { queued: '等待中', running: '采集中', completed: '采集完成', partial: '部分完成', blocked: '已暂停', cancelled: '已取消', failed: '未完成' };
+    const phase = task.collectionStage === 'details' ? '正文与媒体' : '发现笔记';
+    return `${phase}：${states[task.state]}；已完成 ${task.completed} / ${task.total} 篇${task.failed ? `，未完成 ${task.failed} 篇` : ''}。${task.message || ''}`;
+  }
   const states = {
     queued: '等待中',
     running: '进行中',
@@ -184,27 +209,6 @@ export async function exportArchiveBatches<
     options.onProgress(completed, ids.length);
   }
   return { completed, total: ids.length, cancelled: false };
-}
-
-/** Compose the existing verified text/image response for the shared inert reader.
- * Note text remains text, including HTML-looking snippets and literal symbols. */
-export function noteReaderHtml(body: {
-  text: string;
-  images: readonly string[];
-}) {
-  const escape = (value: string) =>
-    value.replace(
-      /[&<>"']/g,
-      (char) =>
-        ({
-          '&': '&amp;',
-          '<': '&lt;',
-          '>': '&gt;',
-          '"': '&quot;',
-          "'": '&#39;',
-        })[char]!,
-    );
-  return `<article><p style="white-space:pre-wrap">${escape(body.text)}</p>${body.images.map((src, index) => `<img src="${escape(src)}" alt="第 ${index + 1} 张归档图片">`).join('')}</article>`;
 }
 
 /** Keep per-author authorization and ZIP boundaries while reporting one frozen scope. */

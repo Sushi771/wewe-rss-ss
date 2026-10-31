@@ -1,10 +1,10 @@
+import { Popover } from '@web/components/AppOverlays';
 import { CalendarDate } from '@internationalized/date';
 import { useState } from 'react';
 import {
   Button,
   Calendar,
   NextUIProvider,
-  Popover,
   PopoverContent,
   PopoverTrigger,
 } from '@nextui-org/react';
@@ -107,69 +107,86 @@ export default function ArticleDateFilter({
 }) {
   const today = articleDateShortcut('today').start;
   return (
-    <div className="flex flex-wrap items-center gap-2 px-3 py-2 text-xs">
-      <span>原文发布日期（上海时间）</span>
-      <select
-        aria-label="日期筛选方式"
-        className="bg-background min-w-0 rounded border px-2 py-1 text-sm"
-        value={value.shortcut || value.mode}
-        onChange={(event) => {
-          const mode = event.target.value;
-          if (isArticleDateShortcut(mode))
-            onChange({ ...articleDateShortcut(mode), shortcut: mode });
-          else
-            onChange({
-              ...value,
-              mode: mode as ArticleDateSelection['mode'],
-              shortcut: undefined,
-            });
-        }}
-      >
-        <option value="day">单日</option>
-        <option value="range">起止日期</option>
-        <optgroup label="快捷日期（上海时间）">
-          <option value="today">今天</option>
-          <option value="last7">近7天（含今天）</option>
-          <option value="month">本月（截至今天）</option>
-        </optgroup>
-      </select>
-      <DateCalendarButton
-        key={`start-${value.mode}`}
-        label={value.mode === 'day' ? '原文发布日期' : '开始日期'}
-        value={value.start}
-        defaultDate={value.end || today}
-        error={error}
-        onChange={(start) => onChange({ ...value, start, shortcut: undefined })}
-      />
-      {value.mode === 'range' && (
-        <>
-          <span>至</span>
-          <DateCalendarButton
-            label="结束日期"
-            value={value.end}
-            defaultDate={value.start || today}
-            error={error}
-            onChange={(end) => onChange({ ...value, end, shortcut: undefined })}
-          />
-        </>
-      )}
-      <button
-        type="button"
-        className="hover:bg-default-100 rounded px-2 py-1 text-sm disabled:opacity-40"
-        disabled={!value.start && !value.end}
-        onClick={() => onChange({ mode: value.mode, start: '', end: '' })}
-      >
-        清除日期
-      </button>
-      {error && (
-        <span
-          id="article-date-error"
-          role="alert"
-          className="w-full text-red-600"
+    <details className="content-date-filter">
+      <summary className="cursor-pointer px-3 py-2 text-xs">
+        日期筛选 ·{' '}
+        {value.start || value.end
+          ? `${value.start || '不限'}${value.mode === 'range' ? ` 至 ${value.end || '不限'}` : ''}`
+          : '不限日期'}
+        {error && (
+          <span role="alert" className="ml-2 text-red-600">
+            {error}
+          </span>
+        )}
+      </summary>
+      <div className="content-date-controls flex flex-wrap items-center gap-2 px-3 pb-2 text-xs">
+        <span>原文发布日期（上海时间）</span>
+        <select
+          aria-label="日期筛选方式"
+          className="bg-background min-w-0 rounded border px-2 py-1 text-sm"
+          value={value.shortcut || value.mode}
+          onChange={(event) => {
+            const mode = event.target.value;
+            if (isArticleDateShortcut(mode))
+              onChange({ ...articleDateShortcut(mode), shortcut: mode });
+            else
+              onChange({
+                ...value,
+                mode: mode as ArticleDateSelection['mode'],
+                shortcut: undefined,
+              });
+          }}
         >
-          {error}
-        </span>
-      )}
-    </div>
+          <option value="day">单日</option>
+          <option value="range">起止日期</option>
+          <optgroup label="快捷日期（上海时间）">
+            <option value="today">今天</option>
+            <option value="last7">近7天（含今天）</option>
+            <option value="month">本月（截至今天）</option>
+          </optgroup>
+        </select>
+        <DateCalendarButton
+          key={`start-${value.mode}`}
+          label={value.mode === 'day' ? '原文发布日期' : '开始日期'}
+          value={value.start}
+          defaultDate={value.end || today}
+          error={error}
+          onChange={(start) =>
+            onChange({ ...value, start, shortcut: undefined })
+          }
+        />
+        {value.mode === 'range' && (
+          <>
+            <span>至</span>
+            <DateCalendarButton
+              label="结束日期"
+              value={value.end}
+              defaultDate={value.start || today}
+              error={error}
+              onChange={(end) =>
+                onChange({ ...value, end, shortcut: undefined })
+              }
+            />
+          </>
+        )}
+        <button
+          type="button"
+          className="hover:bg-default-100 rounded px-2 py-1 text-sm disabled:opacity-40"
+          disabled={!value.start && !value.end}
+          onClick={() => onChange({ mode: value.mode, start: '', end: '' })}
+        >
+          清除日期
+        </button>
+        {error && (
+          <span
+            id="article-date-error"
+            role="alert"
+            className="w-full text-red-600"
+          >
+            {error}
+          </span>
+        )}
+      </div>
+    </details>
   );
 }

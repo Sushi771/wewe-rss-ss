@@ -1,6 +1,12 @@
+import {
+  sourceOriginalLink,
+  sourceUserPcLink,
+} from './xhs-source-original-link';
+import type { XhsOriginalLinkResult } from '@wewe-rss/shared';
 import { RedbookClient, RedbookUserPageOptions } from './redbook-client';
 import {
   mapRedbookDetail,
+  mapRedbookBasicDetail,
   mapRedbookPage,
   RedbookMediaTransport,
 } from './redbook-response';
@@ -8,7 +14,13 @@ import { XhsSubscriptionSource } from './xhs-subscription.service';
 import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { selectXhsNativeDetail } from './xhs-native-media';
+import { extractXhsMediaManifest, selectXhsNativeDetail } from './xhs-native-media';
+import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
+import {
+  mapXhsComments,
+  xhsNoteMetrics,
+  xhsProfileMetrics,
+} from './xhs-engagement-contract';
 
 const record = (v: unknown): Record<string, unknown> => {
   if (!v || typeof v !== 'object' || Array.isArray(v))
@@ -29,7 +41,14 @@ export type XhsProfileParser = (
 const unknownProfile: XhsProfileParser = () => {
   throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');
 };
-type Access = { token: string; source: string; expiresAt: number };
+type Access = {
+  token: string;
+  source: string;
+  expiresAt: number;
+  originalUrl?: string;
+  linkChecked?: boolean;
+  revision?: number;
+};
 type Options = {
   profileParser?: XhsProfileParser;
   shortLinks?: XhsShortLinkResolver;
@@ -38,6 +57,12 @@ type Options = {
   now?: () => number;
 };
 export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
+  private readonly rebuildCursors = new Map<
+    string,
+    { cursor: string | null; ended: boolean; expiresAt: number }
+  >();
+  private revision = 0;
+  private readonly minimumRevision = new Map<string, number>();
   private readonly tokens = new Map<string, Access>();
   private readonly authors = new Map<string, Access>();
   private readonly now: () => number;
@@ -48,7 +73,8 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     private readonly client: Pick<
       RedbookClient,
       'getUserInfo' | 'getUserNotes' | 'getNoteById'
-    >,
+    > &
+      Partial<Pick<RedbookClient, 'getComments' | 'getSubComments'>>,
     options: Options = {},
     private readonly media?: RedbookMediaTransport,
   ) {
@@ -72,9 +98,22 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     for (const access of [...this.tokens.values(), ...this.authors.values()]) {
       access.token = '';
       access.source = '';
+      access.originalUrl = undefined;
     }
+    this.rebuildCursors.clear();
+    this.minimumRevision.clear();
     this.tokens.clear();
     this.authors.clear();
+  }
+  hasAuthorContext(authorId: string): boolean {
+    const access=this.authors.get(authorId);
+    return !!access && access.expiresAt>this.now();
+  }
+  /** A verified public identity needs no invented share token. The normal list
+   * client supports empty/default options; the actual response decides access. */
+  restoreDefaultAuthorAccess(authorId: string) {
+    id(authorId);
+    if (!this.hasAuthorContext(authorId)) this.authors.set(authorId,this.access('',''));
   }
   private options(authorId: string): RedbookUserPageOptions {
     const context = this.authors.get(authorId);
@@ -82,7 +121,62 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
     return { xsecToken: context.token, xsecSource: context.source };
   }
-  async resolve(raw: string) {
+  /** Rebuild only from the existing public profile/list flow. No token is saved. */
+  async restoreContext(
+    authorId: string,
+    noteId?: string,
+    signal?: AbortSignal,
+    forOriginalLink = false,
+    fromFirstPage = false,
+  ) {
+    id(authorId);
+    if (noteId) id(noteId);
+    const author = this.authors.get(authorId);
+    if (!author || author.expiresAt <= this.now()) {
+      this.rebuildCursors.delete(authorId);
+      const resolved = await this.resolve(
+        `https://www.xiaohongshu.com/user/profile/${authorId}`,
+      );
+      if (resolved.author.id !== authorId)
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    }
+    if (!noteId) return;
+    const key = JSON.stringify([authorId, noteId]);
+    const cached = this.tokens.get(key);
+    if (
+      cached &&
+      cached.expiresAt > this.now() &&
+      (!forOriginalLink || cached.linkChecked)
+    )
+      return;
+    const prior = fromFirstPage ? undefined : this.rebuildCursors.get(authorId);
+    if (prior && prior.expiresAt > this.now() && prior.ended)
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    let cursor: string | null =
+      prior && prior.expiresAt > this.now() ? prior.cursor : null;
+    const seen = new Set<string | null>();
+    do {
+      if (signal?.aborted)
+        throw new XhsSubscriptionError('XHS_TASK_INTERRUPTED');
+      if (seen.has(cursor)) throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
+      seen.add(cursor);
+      const page = await this.list(authorId, cursor, signal);
+      if (!fromFirstPage)
+        this.rebuildCursors.set(authorId, {
+          cursor: page.nextCursor,
+          ended: page.nextCursor === null,
+          expiresAt: this.now() + this.lifetime,
+        });
+      if (page.notes.some((note) => note.noteId === noteId)) return;
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+  }
+  async resolve(
+    raw: string,
+    inspect?: (value: ReturnType<typeof inspectLimitedRecovery>, media?: ReturnType<typeof extractXhsMediaManifest>) => void,
+  ) {
+    const revision = ++this.revision;
     const url = await this.shortLinks.resolve(raw);
     const inputKind = url.pathname.startsWith('/user/profile/')
       ? ('profile' as const)
@@ -132,7 +226,22 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
         name: user.nickname.trim(),
         profileUrl: `https://www.xiaohongshu.com/user/profile/${authorId}`,
       };
-      this.tokens.set(JSON.stringify([authorId, noteId]), access);
+      if (inspect) {
+        const note=inspectLimitedRecovery(rawDetail, authorId, noteId);
+        let media:ReturnType<typeof extractXhsMediaManifest>|undefined;
+        try { media=extractXhsMediaManifest(rawDetail, authorId, noteId); } catch { /* preserve valid basic data */ }
+        inspect(note,media);
+      }
+      access.originalUrl = sourceOriginalLink(raw, url, noteId);
+      access.linkChecked = true;
+      const key = JSON.stringify([authorId, noteId]);
+      if (
+        Math.max(
+          this.tokens.get(key)?.revision ?? -1,
+          this.minimumRevision.get(key) ?? -1,
+        ) <= revision
+      )
+        this.tokens.set(key, { ...access, revision });
       // A note token never becomes an author-profile token.
       if (!this.authors.has(authorId))
         this.authors.set(authorId, this.access('', ''));
@@ -147,6 +256,7 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     return { inputKind, author };
   }
   async list(authorId: string, cursor: string | null, signal?: AbortSignal) {
+    const revision = ++this.revision;
     const raw = record(
       await this.client.getUserNotes(authorId, cursor ?? '', {
         ...this.options(authorId),
@@ -158,10 +268,20 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       if (access.expiresAt <= this.now()) this.tokens.delete(key);
     // No arbitrary all-entry eviction: earlier pages remain usable for large jobs.
     const notes = page.notes.map((n, i) => {
-      this.tokens.set(
-        JSON.stringify([authorId, n.noteId]),
-        this.access(n.xsecToken, 'pc_user'),
-      );
+      const key = JSON.stringify([authorId, n.noteId]);
+      const prior = this.tokens.get(key);
+      const access = this.access(n.xsecToken, 'pc_user');
+      // Official Web User-route contract with the checked list identity.
+      // A supplied complete URL takes priority while its live token matches.
+      if (prior && prior.expiresAt > this.now() && prior.token === n.xsecToken)
+        access.originalUrl = prior.originalUrl;
+      access.originalUrl ??= sourceUserPcLink(n.noteId, n.xsecToken);
+      access.linkChecked = true;
+      if (
+        Math.max(prior?.revision ?? -1, this.minimumRevision.get(key) ?? -1) <=
+        revision
+      )
+        this.tokens.set(key, { ...access, revision });
       const source = record((raw.notes as unknown[])[i]);
       const card =
         source.note_card === undefined ? source : record(source.note_card);
@@ -181,6 +301,69 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       };
     });
     return { authorId, notes, nextCursor: page.nextCursor };
+  }
+  cachedOriginalLink(
+    authorId: string,
+    noteId: string,
+  ): XhsOriginalLinkResult | undefined {
+    id(authorId);
+    id(noteId);
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now()) return;
+    if (access.originalUrl) return { state: 'ready', url: access.originalUrl };
+    if (access.linkChecked)
+      return {
+        state: 'not_ready',
+        code: 'XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE',
+      };
+  }
+  async prepareOriginalLink(
+    authorId: string,
+    noteId: string,
+    refreshContext = false,
+  ): Promise<XhsOriginalLinkResult> {
+    if (refreshContext) {
+      this.minimumRevision.set(
+        JSON.stringify([authorId, noteId]),
+        ++this.revision,
+      );
+      const cached = this.tokens.get(JSON.stringify([authorId, noteId]));
+      if (cached) {
+        cached.originalUrl = undefined;
+        cached.linkChecked = false;
+      }
+    }
+    try {
+      await this.restoreContext(
+        authorId,
+        noteId,
+        undefined,
+        true,
+        refreshContext,
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === 'REDBOOK_AUTHOR_MISMATCH')
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+      throw error;
+    }
+    return (
+      this.cachedOriginalLink(authorId, noteId) ?? {
+        state: 'not_ready',
+        code: 'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
+      }
+    );
+  }
+  async basicDetailWithMedia(authorId: string, noteId: string, signal?: AbortSignal) {
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now()) throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    const raw = await this.client.getNoteById(noteId, access.token, access.source, signal);
+    const basic = mapRedbookBasicDetail(raw, authorId, noteId);
+    // Media is optional: malformed or absent images must never discard the basic response.
+    try { return { basic, media: extractXhsMediaManifest(raw, authorId, noteId) }; }
+    catch { return { basic, media: null }; }
+  }
+  async basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+    return (await this.basicDetailWithMedia(authorId, noteId, signal)).basic;
   }
   async detail(authorId: string, noteId: string, signal?: AbortSignal) {
     const access = this.tokens.get(JSON.stringify([authorId, noteId]));
@@ -210,5 +393,57 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       noteId,
       media,
     );
+  }
+  async metrics(authorId: string, noteId?: string) {
+    if (!noteId) {
+      const raw = await this.client.getUserInfo(
+        authorId,
+        this.options(authorId),
+      );
+      let author: XhsAuthor;
+      try {
+        author = this.profileParser(raw, authorId);
+      } catch (error) {
+        if (error instanceof XhsSubscriptionError) throw error;
+        throw new XhsSubscriptionError('XHS_PROFILE_SCHEMA_UNRECOGNIZED');
+      }
+      if (!author || author.id !== authorId)
+        throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+      return xhsProfileMetrics(raw);
+    }
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now())
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    const raw = record(
+      await this.client.getNoteById(noteId, access.token, access.source),
+    );
+    const items = raw.items;
+    if (!Array.isArray(items) || items.length !== 1)
+      throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    const item = record(items[0]),
+      card = record(item.note_card);
+    if (
+      item.id !== noteId ||
+      card.note_id !== noteId ||
+      record(card.user).user_id !== authorId
+    )
+      throw new XhsSubscriptionError('XHS_AUTHOR_MISMATCH');
+    return xhsNoteMetrics(card);
+  }
+  async comments(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ) {
+    const access = this.tokens.get(JSON.stringify([authorId, noteId]));
+    if (!access || access.expiresAt <= this.now())
+      throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+    if (!this.client.getComments || !this.client.getSubComments)
+      throw new XhsSubscriptionError('XHS_SOURCE_UNCONFIGURED');
+    const raw = rootId
+      ? await this.client.getSubComments(noteId, rootId, cursor)
+      : await this.client.getComments(noteId, cursor, access.token);
+    return mapXhsComments(raw, rootId ?? null);
   }
 }

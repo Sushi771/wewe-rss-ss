@@ -1,13 +1,24 @@
+import {projectWriterGate} from './project-writer-boundary';
+import { safeSourceFailure, type SafeSourceReceipt, type SafeSourceStage, type SourceReceiptScope } from './xhs-source-receipt';
+import { consumeReviewedTransportPermit, consumeReviewedContextPermit, type ContextBinding } from './xhs-reviewed-dispatch';
+import type { AttemptScope } from './xhs-reviewed-attempt';
+import { createDispatchOwner } from './xhs-dispatch-owner';
+import type { Prisma } from '@prisma/client';
+import { setTimeout as waitForRate } from 'node:timers/promises';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
+import { XhsRequestBudget } from './xhs-request-budget';
 import { OnModuleDestroy } from '@nestjs/common';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
+  redbookResponseReason,
   RedbookPauseError,
   RedbookTransport,
 } from './redbook-client';
-import { RedbookMediaTransport } from './redbook-response';
+import { allowedRedbookMediaUrl, RedbookMediaTransport } from './redbook-response';
+import type { XhsMediaManifest } from './xhs-native-media';
 import {
   RedbookSubscriptionAdapter,
   XhsProfileParser,
@@ -16,6 +27,7 @@ import {
   fetchXhsShortLink,
   XhsShortLinkResolver,
   XhsShortLinkTransport,
+  xhsPublicInputUrl,
 } from './xhs-short-link';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
@@ -31,14 +43,35 @@ import {
 } from './xhs-http-transport';
 import type { XhsConnectionStatus } from '@wewe-rss/shared';
 import { parseXhsProfile } from './xhs-profile';
+import { XhsSourceRiskStore } from './xhs-source-risk-store';
+import { XhsLimitedRecoveryStore } from './xhs-limited-recovery-store';
+import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
+import { sourceOriginalLink } from './xhs-source-original-link';
+import {
+  commitWholeSourceCheckpoint,
+  commitWholeMediaCheckpoint,
+  prepareWholeSourceFence,
+  type WholeSourceGroup,
+  type Phase,
+  type Charge,
+} from './xhs-whole-source-fence';
 
+type RequestAdmission = {
+  budget?: XhsRequestBudget;
+  id: string;
+  failure?: unknown;
+  parent?: RequestAdmission;
+  sourceTotalCovered?: boolean;
+};
 type RuntimeOptions = {
+  commentsEnabled?: () => boolean;
   enabled: () => boolean;
   vault?: XhsSessionVault;
   api?: RedbookTransport;
   media?: RedbookMediaTransport;
   shortLinks?: XhsShortLinkTransport;
   profileParser?: XhsProfileParser;
+  requirePersistentRisk?: boolean;
 };
 const failure = (code: string): never => {
   throw new XhsSubscriptionError(code);
@@ -50,14 +83,296 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
+  private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
+  private readonly reviewedContext = new AsyncLocalStorage<{ binding: ContextBinding; started:boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
+  private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
+  private readonly wholeSourceGroup = new AsyncLocalStorage<
+    WholeSourceGroup & { checkpointed: boolean; noteId?: string; sessionGeneration: number; receipt?: SafeSourceReceipt; receiptTail?: Promise<unknown>; persistReceipt?:(receipt:SafeSourceReceipt)=>Promise<unknown>; dispatchFailureCode?:string; closed:boolean }
+  >();
+  private receiptWriter?: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>;
+  bindWholeReceipt(writer: (scope: SourceReceiptScope, receipt: SafeSourceReceipt) => Promise<unknown>) { this.receiptWriter ??= writer; }
+  markDispatchPersistenceFailure() {
+    const group=this.wholeSourceGroup.getStore();
+    if(group?.generationId) { group.dispatchFailureCode='XHS_STORAGE_FAILED'; const admission=this.budgetScope.getStore(); if(admission) admission.failure=new XhsSubscriptionError('XHS_STORAGE_FAILED'); }
+  }
+  observeSourceStage(stage: SafeSourceStage, status?: number, notSent = false) {
+    const g = this.wholeSourceGroup.getStore();
+    if (!g?.generationId || g.closed || !this.receiptWriter) return;
+    if (stage!=='transport' && g.receipt?.stage===stage && g.receipt.status===status) return;
+    g.receipt = { ...(g.receipt ?? {}), generationId:g.generationId, marker:g.marker, owner:g.owner, phase:g.phase, stage,
+      sequence:(g.receipt?.sequence ?? 0) + (stage==='transport' && !notSent ? 1 : 0),
+      outcome:notSent ? 'not-sent' : status ? 'response-received' : g.receipt?.outcome ?? 'in-progress', settled:false,
+      ...(status ? {status} : {}) } as SafeSourceReceipt;
+    if (stage==='transport' && !notSent) { delete g.receipt.status; delete g.receipt.code; g.receipt.outcome='in-progress'; }
+    const value = { ...g.receipt };
+    g.receiptTail = (g.receiptTail ?? Promise.resolve()).then(() => g.persistReceipt!(value));
+    void g.receiptTail.catch(() => {});
+  }
+  async sourceStorage<T>(work: () => Promise<T>): Promise<T> {
+    this.observeSourceStage('storage');
+    // Drain before opening the business write, never inside its transaction.
+    // Otherwise the checkpoint can remove the fence before any receipt is saved.
+    await this.wholeSourceGroup.getStore()?.receiptTail;
+    return work();
+  }
+  private readonly wholeAuthorization = new AsyncLocalStorage<{
+    jobId: string;
+    creatorId: string;
+    authorId: string;
+    generationId?: string;
+  }>();
+  withWholeAuthorization<T>(
+    scope: { jobId: string; creatorId: string; authorId: string; generationId?: string },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (this.wholeAuthorization.getStore())
+      return Promise.reject(
+        new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'),
+      );
+    return this.wholeAuthorization.run(scope, work);
+  }
+  withCheckpointGroup<T>(
+    phase: Phase,
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const scope = this.wholeAuthorization.getStore();
+    if (!scope) return work();
+    if (scope.authorId !== authorId)
+      return Promise.reject(
+        new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'),
+      );
+    return this.withWholeSourceGroup({ ...scope, phase, noteId }, work);
+  }
+
+  async withWholeSourceGroup<T>(
+    scope: {
+      jobId: string;
+      creatorId: string;
+      authorId: string;
+      phase: Phase;
+      noteId?: string;
+      generationId?: string;
+      mediaAttempt?: WholeSourceGroup['mediaAttempt'];
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (this.wholeSourceGroup.getStore())
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const owner = createDispatchOwner();
+    if (!owner) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const group: WholeSourceGroup & { checkpointed:boolean; sessionGeneration:number; receipt?:SafeSourceReceipt; receiptTail?:Promise<unknown>; persistReceipt?:(receipt:SafeSourceReceipt)=>Promise<unknown>; dispatchFailureCode?:string; closed:boolean } = {
+      ...scope,
+      owner,
+      marker: 'xhs:dispatch-pending:whole:' + randomUUID(),
+      acquired: false,
+      started: false,
+      checkpointed: false,
+      closed: false,
+      sessionGeneration: this.generation,
+    };
+    return this.wholeSourceGroup.run(group, async () => {
+      // Native callbacks can inherit an expired dispatch transaction admission.
+      // Capture the group entry, so each receipt obtains its own guarded write.
+      group.persistReceipt=AsyncResource.bind((receipt:SafeSourceReceipt)=>this.receiptWriter!(group,receipt));
+      try {
+        const result = await work();
+        if (group.acquired && !group.checkpointed) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        group.closed=true;
+        await group.receiptTail;
+        return result;
+      } catch (error) {
+        group.closed=true;
+        if (scope.generationId && this.receiptWriter) {
+          const receipt = group.receipt ?? {generationId:scope.generationId,marker:group.marker,owner,phase:scope.phase,stage:'admitted',outcome:'in-progress',settled:false} as SafeSourceReceipt;
+          const classified = safeSourceFailure(error,receipt.stage);
+          if (group.dispatchFailureCode) classified.code=group.dispatchFailureCode;
+          const restriction=this.reviewedFailureCode();
+          if (restriction) classified.code=restriction;
+          const terminal = {...receipt,...classified, outcome:classified.outcome==='local-failure' ? 'local-failure' : receipt.status ? 'response-received' : receipt.outcome==='not-sent' ? 'not-sent' : classified.outcome,settled:!group.dispatchFailureCode} as SafeSourceReceipt;
+          try { await group.receiptTail; } catch { /* terminal attempts its own durable write */ }
+          try { await group.persistReceipt!(terminal); } catch { /* original unknown remains conservative */ }
+        }
+        throw error;
+      }
+    });
+  }
+  /** One media resource uses its own source fence and resource receipt. */
+  withWholeMediaAttempt<T>(scope: {jobId:string;creatorId:string;authorId:string;noteId:string;generationId?:string;mediaAttempt:NonNullable<WholeSourceGroup['mediaAttempt']>}, work: (hooks: {
+    reserve: (tx: Prisma.TransactionClient) => Promise<void>;
+    reserved: () => void;
+    dispatch: (start:(tx: Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>)=>Promise<void>) => void;
+    checkpoint: (tx: Prisma.TransactionClient) => Promise<void>;
+    storage: <R>(operation:()=>Promise<R>)=>Promise<R>;
+    transport: RedbookMediaTransport;
+  }) => Promise<T>): Promise<T> {
+    return this.withWholeSourceGroup({ ...scope, phase:'detail' }, async () => {
+      const group=this.wholeSourceGroup.getStore();
+      if (!group || !group.mediaAttempt || !this.sourceAdmission || !this.sourceDispatch) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      return this.withSession(() => work({
+        reserve: async tx => { this.requireSession(); await prepareWholeSourceFence(tx,group); },
+        reserved: () => { group.acquired=true; },
+        dispatch: start => { if(group.mediaDispatch || group.mediaDispatched) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); group.mediaDispatch = start; },
+        checkpoint: async tx => {
+          this.requireSession();
+          if (!group.acquired || !group.started || group.sessionGeneration!==this.generation || this.sessionAbort.signal.aborted) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          await commitWholeMediaCheckpoint(tx,group.jobId,group.marker,group.owner,group.generationId);
+          group.checkpointed=true;
+        },
+        storage: operation => this.sourceStorage(operation),
+        transport: this.mediaTransport,
+      }));
+    });
+  }
+  async checkpointWholeDirectory(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]) {
+    const scope = this.wholeAuthorization.getStore();
+    if (!scope?.generationId) return;
+    if (scope.creatorId !== creatorId) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const tasks = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId} AND creator_id=${creatorId} AND state='running'`;
+    const rows = await tx.$queryRaw<Array<{ document: string }>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${scope.jobId} AND creator_id=${creatorId} AND state='running'`;
+    if (tasks.length !== 1 || rows.length !== 1) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    const task = JSON.parse(tasks[0].document), job = JSON.parse(rows[0].document);
+    const sameIds = (a: unknown, b: unknown) => Array.isArray(a) && Array.isArray(b) &&
+      JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
+    const repair = job.generation?.basicRepair?.taskId === taskId ? job.generation.basicRepair : undefined;
+    const selected = repair?.noteIds ?? job.generation?.selectedIds;
+    const directoryMatches = selected
+      ? task.collectionScope === 'selected' && (task.selectionComplete === true || task.listFinished === true) &&
+        sameIds(task.selectedIds, selected) && sameIds(ids, selected)
+      : task.listFinished === true && JSON.stringify(task.listedIds) === JSON.stringify(ids);
+    if (task.collectionStage !== 'details' || !directoryMatches || (!repair && job.listTask !== taskId) ||
+        job.generation?.id !== scope.generationId || job.generation?.activeFence ||
+        job.sourceGrant?.authorId !== scope.authorId)
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    job.listEnd = true;
+    if (!repair) job.generation.directoryIds = ids;
+    const changed = await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${scope.jobId} AND state='running' AND document=${rows[0].document}`;
+    if (changed !== 1) return failure('XHS_TASK_STATE_CHANGED');
+  }
+
+  async checkpointWholeSource(
+    tx: Prisma.TransactionClient,
+    collectedAt?: number,
+  ) {
+    const group = this.wholeSourceGroup.getStore();
+    if (group?.acquired) {
+      this.observeSourceStage('checkpoint');
+      this.requireSession();
+      if (group.sessionGeneration !== this.generation || this.sessionAbort.signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
+      if (!group.started) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      await commitWholeSourceCheckpoint(
+        tx,
+        group.jobId,
+        group.marker,
+        group.owner,
+        collectedAt,
+        group.generationId,
+      );
+      group.checkpointed = true;
+    }
+  }
+  private checkWholeAuthor(authorId: string, noteId?: string) {
+    const group = this.wholeSourceGroup.getStore();
+    if (
+      group &&
+      (group.authorId !== authorId ||
+        (noteId !== undefined && group.noteId !== noteId))
+    )
+      return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  }
+
+  private readonly limitedRecoveryScope = new AsyncLocalStorage<{
+    noteId: string;
+    owner: string;
+    started: boolean;
+    isCancelled?: () => boolean;
+  }>();
+  private limitedRecoveryStore?: XhsLimitedRecoveryStore;
+  bindLimitedRecoveryStore(store: XhsLimitedRecoveryStore) {
+    this.limitedRecoveryStore ??= store;
+  }
+  withRequestBudget<T>(
+    budget: XhsRequestBudget,
+    id: string,
+    work: () => Promise<T>,
+    sourceTotalCovered = false,
+  ) {
+    const parent = this.budgetScope.getStore();
+    // Preserve an enclosing test/operator cap; the same budget object/ID is one gate.
+    for (let scope = parent; scope; scope = scope.parent)
+      if (scope.id === id && scope.budget === budget) return work();
+    return this.budgetScope.run(
+      { budget, id, parent, sourceTotalCovered },
+      work,
+    );
+  }
+  private readonly batchDispatchScope = new AsyncLocalStorage<{
+    assertReady: (tx?: Prisma.TransactionClient) => Promise<void>;
+    isCancelled: () => boolean;
+    onDispatch: () => void;
+    onReceipt: () => void;
+  }>();
+  withBatchDispatch<T>(
+    guard: {
+      assertReady: (tx?: Prisma.TransactionClient) => Promise<void>;
+      isCancelled: () => boolean;
+      onDispatch: () => void;
+      onReceipt: () => void;
+    },
+    work: () => Promise<T>,
+  ) {
+    return this.batchDispatchScope.run(guard, work);
+  }
+  private readonly originalLinks = new Map<
+    string,
+    Promise<import('@wewe-rss/shared').XhsOriginalLinkResult>
+  >();
+  private sourceAdmission?: (
+    alreadyBudgeted: boolean,
+    group?: WholeSourceGroup,
+    ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
+  ) => Promise<(() => Promise<void>) | void>;
+  private sourceDispatch?: <T>(
+    operation: () => Promise<T>,
+    ready: (tx?: Prisma.TransactionClient) => Promise<void>,
+    group?: WholeSourceGroup,
+    charge?: Charge,
+  ) => Promise<T>;
+  bindSourceAdmission(
+    admit: (
+      alreadyBudgeted: boolean,
+      group?: WholeSourceGroup,
+      ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
+    ) => Promise<(() => Promise<void>) | void>,
+    dispatch?: XhsSubscriptionRuntime['sourceDispatch'],
+  ) {
+    this.sourceAdmission ??= admit;
+    this.sourceDispatch ??= dispatch;
+  }
   private cookies?: XhsSessionCookies;
   private generation = 0;
   private sessionAbort = new AbortController();
+  private readonly transientMedia = new Map<string,{generation:number;expiresAt:number;version:string;getUrl:(key:string)=>string|undefined}>();
   private changing = false;
   private stored: boolean | null = null;
   private verified = false;
   private stopCode?: string;
+  private persistedRisk?: string;
+  private riskStore?: XhsSourceRiskStore;
+  bindRiskStore(store: XhsSourceRiskStore) {
+    this.riskStore ??= store;
+  }
+  /** Called only after a committed, explicitly confirmed history handoff. */
+  async refreshAfterHistoryHandoff() {
+    if (!this.riskStore) return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    const risk=await this.riskStore.read();
+    this.persistedRisk=risk;
+    if (!risk && this.stopCode==='XHS_SOURCE_HISTORY_REVIEW_REQUIRED') this.stopCode=undefined;
+  }
   private readonly adapter: RedbookSubscriptionAdapter;
+  private readonly mediaTransport: RedbookMediaTransport;
   private readonly requestAttempts = {
     instanceId: randomUUID(),
     profiles: 0,
@@ -65,9 +380,11 @@ export class XhsSubscriptionRuntime
     details: 0,
     media: 0,
     shortLinks: 0,
+    comments: 0,
+    replies: 0,
   };
   constructor(private readonly options: RuntimeOptions) {
-    const api = options.api ?? createRedbookHttpTransport();
+    const api = options.api ?? createRedbookHttpTransport(undefined, (stage,status,notSent) => this.observeSourceStage(stage,status,notSent));
     const media = options.media ?? createXhsMediaTransport();
     const shortLinks = options.shortLinks ?? fetchXhsShortLink;
     const signal = (other?: AbortSignal) =>
@@ -79,8 +396,79 @@ export class XhsSubscriptionRuntime
         this.requireSession();
         return { ...this.cookies! };
       },
-      transport: (request) =>
-        this.guardTransport(() =>
+      transport: async (request) => {
+        const group = this.wholeSourceGroup.getStore();
+        if (group) {
+          const url = new URL(request.url);
+          const route = url.pathname;
+          if (route === '/api/sns/web/v1/user/otherinfo') {
+            if (
+              (group.generationId && group.phase !== 'profile') ||
+              request.method !== 'GET' ||
+              url.searchParams.get('target_user_id') !== group.authorId
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else if (route === '/api/sns/web/v1/user_posted') {
+            if (
+              (group.generationId && group.phase !== 'list') ||
+              request.method !== 'GET' ||
+              url.searchParams.get('user_id') !== group.authorId
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else if (route === '/api/sns/web/v1/feed') {
+            let body: any;
+            try {
+              body = JSON.parse(request.body || '');
+            } catch {
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+            }
+            if (
+              request.method !== 'POST' ||
+              !group.noteId ||
+              body?.source_note_id !== group.noteId ||
+              !['detail', 'metrics'].includes(group.phase)
+            )
+              return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+          } else return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
+        const reviewed = this.reviewedSingle.getStore();
+        if (reviewed) {
+          let body: any;
+          try { body=JSON.parse(request.body || ''); } catch { return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); }
+          if(request.method!=='POST'||new URL(request.url).pathname!=='/api/sns/web/v1/feed'||body?.source_note_id!==reviewed.scope.noteId) return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
+        const context = this.reviewedContext.getStore();
+        if(context){
+          const url=new URL(request.url);
+          const matchesList=context.binding.phase==='list'&&url.pathname==='/api/sns/web/v1/user_posted'&&url.searchParams.get('user_id')===context.binding.authorId;
+          const matchesProfile=context.binding.phase==='profile'&&url.pathname==='/api/sns/web/v1/user/otherinfo'&&url.searchParams.get('target_user_id')===context.binding.authorId;
+          if(request.method!=='GET'||(!matchesList&&!matchesProfile))
+            return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+        }
+        const recovery = this.limitedRecoveryScope.getStore();
+        if (recovery) {
+          let body: any;
+          try {
+            body = JSON.parse(request.body || '');
+          } catch {
+            return failure('XHS_URL_INVALID');
+          }
+          if (
+            recovery.started ||
+            request.method !== 'POST' ||
+            new URL(request.url).pathname !== '/api/sns/web/v1/feed' ||
+            body?.source_note_id !== recovery.noteId
+          )
+            return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+          await this.limitedRecoveryStore!.start(
+            recovery.owner,
+            recovery.noteId,
+          );
+          recovery.started = true;
+        }
+        const route = new URL(request.url).pathname;
+        const charge: Charge = route.endsWith('/user/otherinfo') ? 'profile' : route.endsWith('/user_posted') ? 'list' : group?.phase === 'metrics' ? 'metrics' : 'detail';
+        return this.guardTransport(() =>
           (() => {
             const route = new URL(request.url).pathname;
             if (route.endsWith('/user/otherinfo'))
@@ -88,40 +476,148 @@ export class XhsSubscriptionRuntime
             else if (route.endsWith('/user_posted'))
               this.requestAttempts.lists++;
             else if (route.endsWith('/feed')) this.requestAttempts.details++;
-            return api({ ...request, signal: signal(request.signal) });
+            else if (route.endsWith('/comment/page'))
+              this.requestAttempts.comments++;
+            else if (route.endsWith('/comment/sub/page'))
+              this.requestAttempts.replies++;
+            this.observeSourceStage('transport');
+            return api({ ...request, signal: signal(request.signal) }).then(value => {
+              this.observeSourceStage('response',value.status);
+              if (group?.generationId) { const reason=redbookResponseReason(value.status,value.body); if(reason) { this.stopCode=`XHS_SOURCE_${reason.toUpperCase()}_BLOCKED`;this.verified=false; } }
+              return value;
+            });
           })(),
-        ),
+        charge);
+      },
     });
+    this.mediaTransport = (url, request) =>
+      this.guardTransport(() => {
+        this.observeSourceStage('transport');
+        this.requestAttempts.media++;
+        return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
+      }, 'media');
     this.adapter = new RedbookSubscriptionAdapter(
       client,
       {
-        profileParser: options.profileParser,
+        profileParser: options.profileParser ? (raw,id) => { this.observeSourceStage('parse'); return options.profileParser!(raw,id); } : undefined,
         shortLinks: new XhsShortLinkResolver(async (url, request) => {
+          const group = this.wholeSourceGroup.getStore();
+          if (group && (!group.generationId || group.phase !== 'profile'))
+            return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
           return this.guardTransport(() =>
             (() => {
+              this.observeSourceStage('transport');
               this.requestAttempts.shortLinks++;
               return shortLinks(url, {
                 ...request,
                 signal: signal(request.signal),
               });
             })(),
-          );
+          group ? 'profile' : undefined);
         }),
       },
-      (url, request) =>
-        this.guardTransport(() =>
-          (() => {
-            this.requestAttempts.media++;
-            return media(url, { ...request, signal: signal(request.signal) });
-          })(),
-        ),
+      this.mediaTransport,
     );
   }
-  private async guardTransport<T>(operation: () => Promise<T>) {
+  private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
     this.requireSession();
+    const context=this.reviewedContext.getStore();
+    if(context){
+      if(context.started||charge!==context.binding.phase)return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      context.started=true;
+      const generation=this.generation,signal=this.sessionAbort.signal;
+      return context.dispatch(()=>{this.reviewedReadyCheck()();if(generation!==this.generation||signal.aborted)return failure('XHS_SESSION_CHANGED');return operation();});
+    }
+    const reviewed=this.reviewedSingle.getStore();
+    if(reviewed){
+      if(reviewed.started||charge!=='detail'||!['detail','metrics'].includes(reviewed.scope.phase))return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+      reviewed.started=true;
+      const generation=this.generation,signal=this.sessionAbort.signal;
+      return reviewed.dispatch(()=>{
+        this.requireSession();
+        if(generation!==this.generation||signal.aborted)return failure('XHS_SESSION_CHANGED');
+        return operation();
+      });
+    }
     const generation = this.generation,
       signal = this.sessionAbort.signal;
-    const result = await operation();
+    const admission = this.budgetScope.getStore();
+    const scopes: RequestAdmission[] = [];
+    for (let scope = admission; scope; scope = scope.parent)
+      if (scope.budget) scopes.push(scope);
+    const totalCovered = scopes.some((scope) => scope.sourceTotalCovered);
+    const undo: Array<() => Promise<void>> = [];
+    let dispatched = false;
+    const ready = async (tx?: Prisma.TransactionClient) => {
+      const batch = this.batchDispatchScope.getStore();
+      if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
+      if (batch) await batch.assertReady(tx);
+      const recovery = this.limitedRecoveryScope.getStore();
+      if (recovery?.isCancelled?.()) return failure('XHS_TASK_CANCELLED');
+      if (recovery)
+        await this.limitedRecoveryStore!.assertActive(recovery.owner, tx);
+      for (const scope of scopes) await scope.budget!.assertReady(tx);
+      this.requireSession();
+      if (generation !== this.generation || signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
+    };
+    const dispatch = () => {
+      const batch = this.batchDispatchScope.getStore();
+      if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
+      if (this.limitedRecoveryScope.getStore()?.isCancelled?.())
+        return failure('XHS_TASK_CANCELLED');
+      this.requireSession();
+      if (generation !== this.generation || signal.aborted)
+        return failure('XHS_SESSION_CHANGED');
+      dispatched = true;
+      batch?.onDispatch();
+      try {
+        return operation();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+    let result: T;
+    try {
+      // Reject already-known failures before any reservation, including generic operator caps.
+      for (const scope of scopes) await scope.budget!.check(scope.id);
+      if (!totalCovered && this.sourceAdmission) {
+        const release = await this.sourceAdmission(
+          scopes.length > 0,
+          this.wholeSourceGroup.getStore(),
+          ready,
+        );
+        if (release) undo.push(release);
+      }
+      for (const scope of scopes)
+        undo.push(await scope.budget!.reserve(scope.id));
+      await ready();
+      result = this.sourceDispatch
+        ? await this.sourceDispatch(
+            dispatch,
+            ready,
+            this.wholeSourceGroup.getStore(),
+            charge,
+          )
+        : await dispatch();
+      this.batchDispatchScope.getStore()?.onReceipt();
+    } catch (error) {
+      // Only a known non-dispatch permits reservation-specific CAS rollback.
+      const group=this.wholeSourceGroup.getStore();
+      if(group?.generationId && error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^P\d{4}$/.test(error.code)) {
+        group.dispatchFailureCode='XHS_STORAGE_FAILED';
+        if(admission) admission.failure=error;
+      }
+      for (const release of dispatched ? [] : undo.reverse()) {
+        try {
+          await release();
+        } catch {
+          /* retain conservatively */
+        }
+      }
+      if (!dispatched && admission) admission.failure = error;
+      throw error;
+    }
     if (generation !== this.generation || signal.aborted)
       return failure('XHS_SESSION_CHANGED');
     this.requireSession();
@@ -132,7 +628,15 @@ export class XhsSubscriptionRuntime
   }
   private requireSession() {
     if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
-    if (this.stopCode) return failure(this.stopCode);
+    if (
+      this.stopCode &&
+      !(
+        (this.limitedRecoveryScope.getStore() ||
+          this.wholeSourceGroup.getStore() || this.reviewedSingle.getStore() || this.reviewedContext.getStore()) &&
+        this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+      )
+    )
+      return failure(this.stopCode);
     if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
   }
   private clearMemory() {
@@ -146,16 +650,21 @@ export class XhsSubscriptionRuntime
     this.cookies = undefined;
     this.verified = false;
     this.adapter.clearAccessContext();
+    this.transientMedia.clear();
+    this.originalLinks.clear();
   }
   private snapshot(code?: string): XhsConnectionStatus {
     const liveEnabled = this.enabled(),
-      connected = liveEnabled && !!this.cookies;
+      connected = liveEnabled && !!this.cookies,
+      risk = this.stopCode ?? this.persistedRisk;
     return {
       requestAttempts: { ...this.requestAttempts },
       liveEnabled,
       connected,
+      sessionPresent: !!this.cookies,
+      riskCode: risk,
       stored: liveEnabled ? this.stored : null,
-      verified: connected && this.verified,
+      verified: connected && this.verified && !risk,
       canConnect: liveEnabled,
       canPersist: liveEnabled && !!this.options.vault,
       restartRequiresReparse: true,
@@ -163,18 +672,36 @@ export class XhsSubscriptionRuntime
         code ??
         (!liveEnabled
           ? 'XHS_LIVE_ACCESS_DISABLED'
-          : (this.stopCode ??
-            (!connected ? 'XHS_SESSION_REQUIRED' : undefined))),
+          : (risk ?? (!connected ? 'XHS_SESSION_REQUIRED' : undefined))),
       message: !liveEnabled
         ? '真实访问尚未启用；未读取凭据。'
-        : this.stopCode
-          ? '当前来源已停止，请先处理登录、验证或访问限制，再明确重新连接。'
+        : risk
+          ? risk === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+            ? '历史来源状态需要核查；未确认前不会发起来源请求。'
+            : risk === 'XHS_SOURCE_RISK_REVIEW_REQUIRED'
+              ? '来源操作仍在进行或结果未确认；请等待或核查后再操作。'
+              : risk === 'XHS_SOURCE_RISK_UNAVAILABLE'
+                ? '本机来源风险状态暂不可用；来源请求已停止。'
+                : risk === 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+                  ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。'
+                  : risk === 'XHS_SOURCE_VERIFICATION_BLOCKED'
+                    ? '来源明确提示需要验证；当前没有可确认的验证入口，采集已停止。'
+                    : '当前来源已停止，请先核查来源状态；重新连接不会自动解除限制。'
           : !connected
             ? '尚未连接；请由本机页面明确提供会话或恢复受保护记录。'
             : '本机会话已就绪；不代表平台已确认登录。重启后需重新解析链接。',
     };
   }
   async connectionStatus() {
+    if (this.riskStore) {
+      try {
+        this.persistedRisk = await this.riskStore.read();
+      } catch {
+        this.stopCode ??= 'XHS_SOURCE_RISK_UNAVAILABLE';
+      }
+    } else if (this.options.requirePersistentRisk) {
+      this.stopCode ??= 'XHS_SOURCE_RISK_UNAVAILABLE';
+    }
     if (!this.enabled()) return this.snapshot();
     if (this.options.vault) {
       try {
@@ -188,12 +715,17 @@ export class XhsSubscriptionRuntime
   }
   capability() {
     const status = this.snapshot(),
-      ready = status.liveEnabled && status.connected && !this.stopCode;
+      ready =
+        status.liveEnabled &&
+        status.connected &&
+        !this.stopCode &&
+        !this.persistedRisk;
     return {
       sourceConfigured: ready,
       canSubscribe: ready,
       canRefresh: ready,
       canDownload: ready,
+      canCollectComments: ready && this.options.commentsEnabled?.() === true,
       liveEnabled: status.liveEnabled,
       connected: status.connected,
       restartRequiresReparse: true,
@@ -232,7 +764,6 @@ export class XhsSubscriptionRuntime
         }
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
-        this.stopCode = undefined;
         this.cookies = { ...next };
         return this.snapshot();
       } finally {
@@ -254,7 +785,6 @@ export class XhsSubscriptionRuntime
         }
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
-        this.stopCode = undefined;
         this.cookies = { ...next };
         this.stored = true;
         return this.snapshot();
@@ -269,7 +799,6 @@ export class XhsSubscriptionRuntime
   async disconnectSession() {
     return this.change(async () => {
       this.clearMemory();
-      this.stopCode = undefined;
       try {
         await this.options.vault?.disconnect();
         this.stored = false;
@@ -280,23 +809,64 @@ export class XhsSubscriptionRuntime
       }
     });
   }
-  private async withSession<T>(operation: () => Promise<T>) {
+  private async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    if (!this.budgetScope.getStore())
+      return this.budgetScope.run({ id: '' }, () =>
+        this.withSession(operation),
+      );
     this.requireSession();
     const generation = this.generation;
+    const admission = this.budgetScope.getStore();
+    if (admission) delete admission.failure;
+    if (!this.riskStore && this.options.requirePersistentRisk)
+      return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    let riskOwner: string | undefined;
+    if (
+      this.riskStore &&
+      !this.limitedRecoveryScope.getStore() &&
+      !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore() && !this.reviewedContext.getStore()
+    ) {
+      try {
+        riskOwner = await this.riskStore.begin();
+      } catch (error) {
+        const code =
+          error instanceof XhsSubscriptionError
+            ? error.code
+            : 'XHS_SOURCE_RISK_UNAVAILABLE';
+        // A live concurrent operation also owns a pending fence. Reject this
+        // caller without poisoning the owner; a crash leaves the fence durable.
+        if (code !== 'XHS_SOURCE_RISK_REVIEW_REQUIRED') this.stopCode = code;
+        return failure(code);
+      }
+    }
     try {
       const result = await operation();
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       this.requireSession();
-      this.verified = true;
+      if (riskOwner) {
+        const owner = riskOwner;
+        riskOwner = undefined;
+        try {
+          await this.riskStore!.finish(owner);
+        } catch {
+          this.stopCode = 'XHS_SOURCE_RISK_UNAVAILABLE';
+          return failure(this.stopCode);
+        }
+        this.persistedRisk = undefined;
+      }
+      if (
+        !this.limitedRecoveryScope.getStore() &&
+        !this.wholeSourceGroup.getStore() && !this.reviewedSingle.getStore() && !this.reviewedContext.getStore()
+      )
+        this.verified = true;
       return result;
     } catch (error) {
-      if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
-      if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       if (
         error instanceof RedbookPauseError &&
         [
           'authentication',
           'verification',
+          'unknown_rejection',
           'permission',
           'signature',
           'rate_limit',
@@ -305,20 +875,336 @@ export class XhsSubscriptionRuntime
         this.stopCode = `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
         this.verified = false;
         this.sessionAbort.abort();
+        this.transientMedia.clear();
         this.adapter.clearAccessContext();
       }
+      if (riskOwner) {
+        const known =
+          admission?.failure instanceof XhsSubscriptionError
+            ? admission.failure
+            : error;
+        const code =
+          this.stopCode ??
+          ((admission?.failure === known &&
+            known instanceof XhsSubscriptionError &&
+            known.code === 'XHS_TASK_CANCELLED') ||
+          (known instanceof XhsSubscriptionError &&
+            [
+              'XHS_REQUEST_BUDGET_REQUIRED',
+              'XHS_REQUEST_BUDGET_EXHAUSTED',
+              'XHS_REQUEST_RATE_PAUSED',
+              'XHS_ACCESS_CONTEXT_UNAVAILABLE',
+              'XHS_ACCESS_CONTEXT_EXPIRED',
+            ].includes(known.code))
+            ? undefined
+            : 'XHS_SOURCE_RISK_REVIEW_REQUIRED');
+        try {
+          await this.riskStore!.finish(
+            riskOwner,
+            code,
+            error instanceof RedbookPauseError
+              ? { status: error.httpStatus, endpoint: error.endpoint }
+              : undefined,
+          );
+          this.persistedRisk = code;
+        } catch {
+          this.stopCode = 'XHS_SOURCE_RISK_UNAVAILABLE';
+          return failure(this.stopCode);
+        }
+      }
+      if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
+      if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
+      // RedbookClient intentionally wraps transport failures. Preserve only the
+      // local pre-dispatch admission result, never provider text or responses.
+      if (!this.stopCode && admission?.failure) throw admission.failure;
       throw error;
     }
   }
+  private async restoreContext(
+    authorId: string,
+    noteId?: string,
+    signal?: AbortSignal,
+  ) {
+    // Existing manual workflows retain their explicit reparse boundary.
+    for (let scope = this.budgetScope.getStore(); scope; scope = scope.parent) {
+      if (scope.budget) {
+        await this.adapter.restoreContext(authorId, noteId, signal);
+        return;
+      }
+    }
+  }
+  assertSourceReady() {
+    this.requireSession();
+  }
+  async waitForSourceRate(ms: number) {
+    this.requireSession();
+    try {
+      await waitForRate(ms, undefined, { signal: this.sessionAbort.signal });
+    } catch {
+      this.requireSession();
+      return failure('XHS_SESSION_CHANGED');
+    }
+    this.requireSession();
+  }
+  cachedOriginalLink(authorId: string, noteId: string) {
+    this.requireSession();
+    return this.adapter.cachedOriginalLink(authorId, noteId);
+  }
+  reviewedCachedOriginalLink(authorId:string,noteId:string) {
+    this.reviewedReadyCheck()();
+    return this.adapter.cachedOriginalLink(authorId,noteId);
+  }
+  prepareOriginalLink(
+    authorId: string,
+    noteId: string,
+    refreshContext = false,
+  ) {
+    this.requireSession();
+    const key = JSON.stringify([
+      this.generation,
+      authorId,
+      noteId,
+      refreshContext,
+    ]);
+    const active = this.originalLinks.get(key);
+    if (active) return active;
+    const pending = this.withSession(() =>
+      this.adapter.prepareOriginalLink(authorId, noteId, refreshContext),
+    ).finally(() => this.originalLinks.delete(key));
+    this.originalLinks.set(key, pending);
+    return pending;
+  }
   resolve(url: string) {
-    return this.withSession(() => this.adapter.resolve(url));
+    return this.withSession(() => this.adapter.resolve(url)).then(value => {this.observeSourceStage('parse');return value;});
+  }
+  reviewedReadyCheck() {
+    const generation=this.generation;
+    return () => {
+      if(!this.enabled())return failure('XHS_LIVE_ACCESS_DISABLED');
+      if(!this.cookies)return failure('XHS_SESSION_REQUIRED');
+      if(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED')return failure(this.stopCode);
+      if(generation!==this.generation||this.sessionAbort.signal.aborted)return failure('XHS_SESSION_CHANGED');
+    };
+  }
+  reviewedFailureCode() {
+    return this.stopCode && /^XHS_SOURCE_(AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(this.stopCode) ? this.stopCode : undefined;
+  }
+  validateReviewedInput(raw:string,scope:AttemptScope) {
+    const url=xhsPublicInputUrl(raw);
+    const match=/^\/(?:explore|discovery\/item)\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(url.pathname);
+    if(url.protocol!=='https:'||url.hostname!=='www.xiaohongshu.com'||match?.[1]!==scope.noteId||!url.searchParams.get('xsec_token')||!sourceOriginalLink(raw,url,scope.noteId))return failure('XHS_URL_INVALID');
+    return url;
+  }
+  async listReviewedContext(binding:ContextBinding,profile:{id:string;profileUrl:string;collectedAt:number},cursor:string|null,permit:unknown){
+    const capability=consumeReviewedContextPermit(permit,binding);
+    if(binding.phase!=='list'||profile?.id!==binding.authorId||profile.profileUrl!==`https://www.xiaohongshu.com/user/profile/${binding.authorId}`||!Number.isSafeInteger(profile.collectedAt)||profile.collectedAt<=0||this.reviewedContext.getStore()||this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();this.adapter.restoreDefaultAuthorAccess(binding.authorId);
+    return this.reviewedContext.run({binding,started:false,dispatch:capability.dispatch},async()=>{
+      const page=await this.withSession(()=>this.adapter.list(binding.authorId,cursor));
+      if(!this.reviewedContext.getStore()!.started||page.authorId!==binding.authorId)return failure('XHS_AUTHOR_MISMATCH');
+      return page;
+    });
+  }
+  async resolveReviewedContextAuthor(binding:ContextBinding,permit:unknown){
+    const capability=consumeReviewedContextPermit(permit,binding);
+    if(binding.phase!=='profile'||this.reviewedContext.getStore()||this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();
+    return this.reviewedContext.run({binding,started:false,dispatch:capability.dispatch},async()=>{
+      const resolved=await this.withSession(()=>this.adapter.resolve(`https://www.xiaohongshu.com/user/profile/${binding.authorId}`));
+      if(!this.reviewedContext.getStore()!.started||resolved.inputKind!=='profile'||resolved.author.id!==binding.authorId||resolved.author.profileUrl!==`https://www.xiaohongshu.com/user/profile/${binding.authorId}`)return failure('XHS_AUTHOR_MISMATCH');
+      return {...resolved.author,collectedAt:Date.now()};
+    });
+  }
+  async resolveReviewedNote(raw:string,scope:AttemptScope,permit:unknown) {
+    const capability=consumeReviewedTransportPermit(permit,scope);
+    const url=this.validateReviewedInput(raw,scope);
+    if(this.reviewedSingle.getStore())return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+    this.reviewedReadyCheck()();
+    return this.reviewedSingle.run({scope,started:false,dispatch:capability.dispatch},async()=>{
+      let note:ReturnType<typeof inspectLimitedRecovery>|undefined;
+      let media:Parameters<NonNullable<Parameters<RedbookSubscriptionAdapter['resolve']>[1]>>[1];
+      const resolution=await this.withSession(()=>this.adapter.resolve(raw,(value,projection)=>{note=value;media=projection;}));
+      if(!this.reviewedSingle.getStore()!.started||!note||resolution.inputKind!=='note'||note.noteId!==scope.noteId||note.authorId!==scope.authorId||resolution.author.id!==scope.authorId)return failure('XHS_AUTHOR_MISMATCH');
+      if(JSON.stringify({author:resolution.author,note}).includes(url.searchParams.get('xsec_token')!))return failure('XHS_DETAIL_INCOMPLETE');
+      if(media && !note.mediaFailure && media.manifest.images.length===note.media.length && media.manifest.images.every((image,i)=>image.ordinal===note!.media[i].ordinal && image.resourceKey===note!.media[i].sourceFingerprint)) {
+        const id=JSON.stringify([scope.authorId,scope.noteId]);
+        if(this.transientMedia.size>=1000 && !this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+        this.transientMedia.set(id,{generation:this.generation,expiresAt:Date.now()+600000,version:media.manifest.version,getUrl:media.getUrl});
+      }
+      return {author:resolution.author,note};
+    });
+  }
+  async resolveLimitedRecovery(
+    raw: string,
+    expectedAuthorId: string,
+    isCancelled?: () => boolean,
+    appendUnknownAttempt = false,
+  ) {
+    const url = xhsPublicInputUrl(raw);
+    const match =
+      /^\/(?:explore|discovery\/item)\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(
+        url.pathname,
+      );
+    if (
+      url.hostname !== 'www.xiaohongshu.com' ||
+      !match ||
+      !url.searchParams.get('xsec_token')
+    )
+      return failure('XHS_URL_INVALID');
+    if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
+    if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
+    if (!this.limitedRecoveryStore)
+      return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+    if (!this.sourceAdmission || !this.sourceDispatch)
+      return failure('XHS_REQUEST_BUDGET_REQUIRED');
+    if (this.stopCode && this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED')
+      return failure(this.stopCode);
+    const noteId = match[1];
+    if (!sourceOriginalLink(raw, url, noteId))
+      return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
+    if (isCancelled?.()) return failure('XHS_TASK_CANCELLED');
+    const owner = await (appendUnknownAttempt
+      ? this.limitedRecoveryStore.armAppend(noteId, expectedAuthorId)
+      : this.limitedRecoveryStore.arm(noteId, expectedAuthorId));
+    const scope = { noteId, owner, started: false, isCancelled };
+    return this.limitedRecoveryScope.run(scope, async () => {
+      let projection: ReturnType<typeof inspectLimitedRecovery> | undefined;
+      try {
+        const resolution = await this.withSession(() =>
+          this.adapter.resolve(raw, (value) => {
+            projection = value;
+          }),
+        );
+        if (
+          !scope.started ||
+          !projection ||
+          resolution.inputKind !== 'note' ||
+          resolution.author.id !== projection.authorId ||
+          projection.authorId !== expectedAuthorId
+        )
+          return failure('XHS_AUTHOR_MISMATCH');
+        const transientToken = url.searchParams.get('xsec_token')!;
+        if (
+          JSON.stringify({
+            author: resolution.author,
+            note: projection,
+          }).includes(transientToken)
+        )
+          return failure('XHS_DETAIL_INCOMPLETE');
+        const original = this.adapter.cachedOriginalLink(
+          expectedAuthorId,
+          noteId,
+        );
+        if (original?.state !== 'ready')
+          return failure('XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE');
+        return {
+          owner,
+          author: resolution.author,
+          note: projection,
+          originalUrl: original.url,
+        };
+      } catch (error) {
+        try {
+          if (
+            error instanceof RedbookPauseError &&
+            [
+              'authentication',
+              'verification',
+              'unknown_rejection',
+              'permission',
+              'signature',
+              'rate_limit',
+            ].includes(error.reason)
+          )
+            await this.limitedRecoveryStore!.recordRefusal(
+              owner,
+              `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`,
+            );
+          else await this.limitedRecoveryStore!.finish(owner, 'unknown');
+        } catch {
+          /* retain a durable uncertainty fence */
+        }
+        throw error;
+      }
+    });
+  }
+  hasAuthorContext(authorId: string): boolean { return this.adapter.hasAuthorContext(authorId); }
+  restoreCheckpointAuthorContext(profile:{id:string;profileUrl:string;collectedAt:number}) {
+    const scope=this.wholeAuthorization.getStore();
+    if(!scope?.generationId || scope.authorId!==profile?.id ||
+        profile.profileUrl!==`https://www.xiaohongshu.com/user/profile/${scope.authorId}` ||
+        !Number.isSafeInteger(profile.collectedAt) || profile.collectedAt<=0)
+      return failure('XHS_AUTHOR_MISMATCH');
+    this.reviewedReadyCheck()();
+    this.adapter.restoreDefaultAuthorAccess(profile.id);
   }
   list(authorId: string, cursor: string | null, signal?: AbortSignal) {
-    return this.withSession(() => this.adapter.list(authorId, cursor, signal));
+    this.checkWholeAuthor(authorId);
+    return this.withSession(async () => {
+      await this.restoreContext(authorId, undefined, signal);
+      return this.adapter.list(authorId, cursor, signal);
+    });
+  }
+  basicDetail(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
+    return this.withSession(() => this.restoreContext(authorId, noteId, signal).then(() => this.adapter.basicDetail(authorId, noteId, signal)));
+  }
+  async basicDetailWithMedia(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
+    const result=await this.withSession(() => this.restoreContext(authorId, noteId, signal).then(() => this.adapter.basicDetailWithMedia(authorId, noteId, signal)));
+    if(result.media){
+      const id=JSON.stringify([authorId,noteId]);
+      if(this.transientMedia.size>=1000 && !this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+      this.transientMedia.set(id,{generation:this.generation,expiresAt:Date.now()+600000,version:result.media.manifest.version,getUrl:result.media.getUrl});
+    }
+    return result;
+  }
+  withScheduledMediaSession<T>(work:(transport:RedbookMediaTransport)=>Promise<T>) { return this.withSession(()=>work(this.mediaTransport)); }
+  /** Rehydrate only a confirmed receipt's query-free URLs; never infer a signature. */
+  restoreReviewedMediaUrls(manifest:XhsMediaManifest,entries:unknown) {
+    if(!Array.isArray(entries)||entries.length!==manifest.images.length||entries.length>60)return;
+    const version=createHash('sha256').update(JSON.stringify([manifest.authorId,manifest.noteId,manifest.images])).digest('hex');
+    if(version!==manifest.version)return;
+    const urls=new Map<string,string>();
+    for(let i=0;i<entries.length;i++){
+      const e=entries[i],image=manifest.images[i];
+      if(!e||e.ordinal!==i+1||image.ordinal!==i+1||e.sourceFingerprint!==image.resourceKey||e.sourceQueryOmitted!==false||typeof e.sourceUrl!=='string'||e.sourceUrl.length>8192)continue;
+      try {const url=allowedRedbookMediaUrl(e.sourceUrl);if(url.search||url.hash||createHash('sha256').update(url.href).digest('hex')!==image.resourceKey)continue;urls.set(image.resourceKey!,url.href);} catch { /* unsafe or stale addresses stay pending */ }
+    }
+    if(!urls.size)return;
+    const id=JSON.stringify([manifest.authorId,manifest.noteId]),old=this.transientMedia.get(id),now=Date.now();
+    const prior=old&&old.generation===this.generation&&old.expiresAt>now&&old.version===version?old:undefined;
+    if(this.transientMedia.size>=1000&&!this.transientMedia.has(id))this.transientMedia.delete(this.transientMedia.keys().next().value!);
+    this.transientMedia.set(id,{generation:this.generation,expiresAt:prior?.expiresAt??now+600000,version,getUrl:key=>prior?.getUrl(key)??urls.get(key)});
+  }
+  getTransientMediaUrl(authorId:string,noteId:string,version:string,resourceKey:string) {
+    if(!this.cookies||this.sessionAbort.signal.aborted||(this.stopCode && this.stopCode!=='XHS_SOURCE_HISTORY_REVIEW_REQUIRED'))return undefined;
+    const id=JSON.stringify([authorId,noteId]), entry=this.transientMedia.get(id);
+    if(!entry||entry.generation!==this.generation||entry.expiresAt<=Date.now()||entry.version!==version){this.transientMedia.delete(id);return undefined;}
+    return entry.getUrl(resourceKey);
   }
   detail(authorId: string, noteId: string, signal?: AbortSignal) {
+    this.checkWholeAuthor(authorId, noteId);
     return this.withSession(() =>
-      this.adapter.detail(authorId, noteId, signal),
+      this.restoreContext(authorId, noteId, signal).then(() =>
+        this.adapter.detail(authorId, noteId, signal),
+      ),
+    );
+  }
+  metrics(authorId: string, noteId?: string) {
+    this.checkWholeAuthor(authorId, noteId);
+    return this.withSession(async () => {
+      await this.restoreContext(authorId, noteId);
+      return this.adapter.metrics(authorId, noteId);
+    });
+  }
+  comments(authorId: string, noteId: string, cursor: string, rootId?: string) {
+    if (this.options.commentsEnabled?.() !== true)
+      return failure('XHS_COMMENT_COLLECTION_DISABLED');
+    return this.withSession(() =>
+      this.restoreContext(authorId, noteId).then(() =>
+        this.adapter.comments(authorId, noteId, cursor, rootId),
+      ),
     );
   }
   onModuleDestroy() {
@@ -329,17 +1215,22 @@ export class XhsSubscriptionRuntime
 export function createLocalXhsSubscriptionRuntime() {
   let vault: XhsSessionVault | undefined;
   const raw = process.env.DATABASE_URL ?? '';
+  const writerLease = projectWriterGate().writerForUrl(raw, path.join(process.cwd(), 'prisma'));
   const database = raw.startsWith('file:')
     ? decodeURIComponent(raw.slice(5).split('?')[0])
     : '';
   if (process.platform === 'win32' && path.isAbsolute(database))
     vault = new XhsDpapiSessionVault(path.dirname(database));
   return new XhsSubscriptionRuntime({
-    enabled: () =>
-      process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&
+    commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED === '1',
+    enabled: () => {
+      writerLease?.check();
+      return process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&
       !privateOnlineMode() &&
-      process.env.WEWE_ACCEPTANCE_MODE !== '1',
+      process.env.WEWE_ACCEPTANCE_MODE !== '1';
+    },
     vault,
     profileParser: parseXhsProfile,
+    requirePersistentRisk: true,
   });
 }

@@ -10,6 +10,10 @@ const alive = (pid: number) => {
   }
 };
 
+// Serialize same-process contenders through the entire file-claim lifetime.
+// Other processes are still governed by the durable file lock below.
+const localClaims = new Set<string>();
+
 /** Same-host durable queue mutex. A dead owner's valid PID is recoverable;
  * malformed/empty claims fail closed. Recovery itself is serialized, so a
  * contender cannot remove a newly acquired worker claim. No timed lease can
@@ -20,6 +24,32 @@ export async function batchStorageLock(
 ) {
   if (!/^(?:worker|[a-f0-9-]{36}\.write)\.lock$/.test(name))
     throw Error('BATCH_INVALID');
+  const identity = path.resolve(directory, name);
+  if (localClaims.has(identity)) return;
+  localClaims.add(identity);
+  try {
+    const release = await acquireFileClaim(directory, name);
+    if (!release) {
+      localClaims.delete(identity);
+      return;
+    }
+    let finished = false;
+    return async () => {
+      if (finished) return;
+      finished = true;
+      try {
+        await release();
+      } finally {
+        localClaims.delete(identity);
+      }
+    };
+  } catch (error) {
+    localClaims.delete(identity);
+    throw error;
+  }
+}
+
+async function acquireFileClaim(directory: string, name: string) {
   const lock = path.join(directory, name);
   const recovery = lock + '.recovery';
   const take = async () => {
@@ -59,7 +89,15 @@ export async function batchStorageLock(
     const stat = await fs.lstat(lock).catch(() => undefined);
     if (stat && (!stat.isFile() || stat.isSymbolicLink() || stat.size > 20))
       return;
-    const raw = stat ? await fs.readFile(lock, 'utf8') : '';
+    let raw: string;
+    try {
+      raw = stat ? await fs.readFile(lock, 'utf8') : '';
+    } catch (error) {
+      // The live owner may release between lstat and readFile. No claim was
+      // acquired: return to the caller's existing bounded admission loop.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
     if (stat && (!/^[1-9]\d{0,9}$/.test(raw) || alive(Number(raw)))) return;
     if (stat) await fs.unlink(lock);
     return await take();

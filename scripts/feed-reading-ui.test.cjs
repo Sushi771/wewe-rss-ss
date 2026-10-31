@@ -199,7 +199,7 @@ test('short reading status preserves failure, paused and partial meanings', () =
     '部分内容已保存',
   );
   assert.equal(status({ collectionChannel: 'unavailable' }), '更新来源未就绪');
-  assert.equal(status({}), '阅读本地存量');
+  assert.equal(status({}), '查看已存目录');
   const notice = feeds.elements.find(
     (n) =>
       feeds.value(n, 'role').includes('updateFailed') && within(n, toolbar),

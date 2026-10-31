@@ -2,9 +2,9 @@ name: XHS subscription offline
 
 on:
   push:
-    branches: [codex/xhs-subscription-integration, codex/xhs-depth-integration]
+    branches: [codex/xhs-subscription-integration, codex/xhs-depth-integration, feat/xhs-engagement, codex/xhs-receipt-link, codex/xhs-unified-integration]
   pull_request:
-    branches: [fix/desktop-docker-cold-start]
+    branches: [fix/desktop-docker-cold-start, codex/xhs-depth-integration]
 
 permissions:
   contents: read
@@ -18,7 +18,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
+      DATABASE_URL: 'file:./ci-placeholder.sqlite'
       XHS_SUBSCRIPTION_LIVE_ENABLED: '0'
+      XHS_COMMENT_COLLECTION_ENABLED: '0'
       XHS_TEST_PYTHON: python
       PYTHONDONTWRITEBYTECODE: '1'
     defaults:
@@ -26,6 +28,13 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          submodules: false
+          lfs: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -46,18 +55,44 @@ jobs:
         with:
           node-version: 24.11.1
           cache: pnpm
+      - name: Privacy inventory and protected package regressions
+        run: |
+          node --test scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs
+          node --test --test-name-pattern='^(v3|a v3)' scripts/local-release/release-scope.test.cjs
+      - name: Preserving update effects and process transitions
+        run: |
+          node --test --test-concurrency=1 scripts/local-release/preserving-contract.test.cjs scripts/local-release/preserving-restart.test.cjs scripts/local-release/legacy-restart-cleanup.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/writer-self.fixture.test.cjs scripts/local-release/project-writer-gate.test.cjs scripts/local-release/guarded-prisma.test.cjs
+          node --test --test-name-pattern='^legacy (adapter|boundary)' scripts/local-release/release-scope.test.cjs
+          node --test --test-concurrency=1 --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
-        run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu)|trpc/(xiaohongshu-ui|management-groups)|article-local-save|xhs-single-download|xhs-video-download)'
+        run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|platform-export-target|article-folder-picker|xhs-cached-local-export|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
+      - name: Scheduled round admission and batching
+        run: node --experimental-transform-types --test apps/server/src/collection/xhs-scheduled-admission.test.mjs apps/server/src/collection/xhs-scheduled-runner.test.mjs
+      - name: Legacy maintenance native synthetic regressions
+        if: runner.os == 'Windows'
+        run: |
+          pnpm --filter server exec jest --runInBand --testPathPattern='collection/legacy-(maintenance|project-adapter)'
+          node --test scripts/local-release/legacy-compact-maintenance.test.cjs
       - name: Shared UI and WeChat regressions
-        run: node --test scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs
+        # Native process-start identity and confirmed owned-child exit are Windows contracts.
+        run: node --test scripts/xhs-original-link-privacy.test.cjs scripts/xhs-original-link-ui.test.cjs scripts/xhs-source-budget-ui.test.cjs scripts/xhs-rejection-messages.test.cjs scripts/xhs-note-links.test.cjs scripts/xhs-engagement-visibility.test.cjs scripts/sites-local-contract.test.mjs scripts/xhs-reader-removal.test.cjs scripts/xhs-whole-creator-ui.test.cjs scripts/xhs-subscription-ui.test.cjs scripts/xhs-task-recovery-ui.test.cjs scripts/storage-status-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/xhs-batch-subscription-ui.test.cjs scripts/xhs-combined-filter.test.cjs scripts/xhs-metric-sort.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs scripts/folder-member-picker.test.cjs scripts/deployed-export-adaptation.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/article-body-state.test.cjs scripts/feed-browse-state.test.cjs scripts/wechat-original-link.test.cjs scripts/feed-avatar-reading-ui.test.cjs scripts/wechat-source-metrics-ui.test.cjs scripts/export-article-batches.test.cjs scripts/export-interruption-ui.test.cjs
       - name: Existing maintenance status contract
         run: pnpm --filter server exec jest --runInBand --testPathPattern=startup-audit.spec --testNamePattern='existing status read'
+      - name: Selected recovery and folder interactions
+        run: node --test scripts/xhs-selected-media-ui.test.cjs scripts/xhs-folder-isolated-ui.test.cjs scripts/xhs-folder-query-refresh.test.cjs
+      - name: Folder ordering with browser and SQLite
+        if: runner.os == 'Windows'
+        run: |
+          node -e "if (!require('./scripts/offline-browser-fixture.cjs').browser) process.exit(1)"
+          node --test scripts/xhs-folder-sqlite-browser.test.cjs
       - name: Types
         run: |
           pnpm --filter server exec tsc --noEmit
           pnpm --filter web exec tsc --noEmit
       - name: Focused web lint and build
         run: |
-          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts
+          pnpm --filter web exec eslint src/pages/feeds/xiaohongshu.tsx src/components/XhsBatchSubscription.tsx src/utils/xhs-subscription-batch.ts src/provider/trpc.tsx src/components/XhsCombinedFilter.tsx src/utils/xhs-combined-filter.ts src/components/XhsCreatorAvatar.tsx src/utils/xhs-metric-sort.ts src/components/XhsWholeCreator.tsx src/components/XhsEngagement.tsx src/components/SubscriptionPrimitives.tsx src/components/XhsTaskRecovery.tsx src/components/StorageBackupStatus.tsx src/utils/startup-status.ts src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/manual-refresh-progress.tsx src/provider/trpc.tsx src/utils/xiaohongshu-subscription.ts src/utils/xhs-note-presentation.ts src/utils/operation-message.ts
           pnpm --filter web build
+          pnpm --filter server build

@@ -157,7 +157,7 @@ test('disabled menus and drops make no mutation; touch batch move remains availa
   mobile.find('select').props.onChange({ target: { value: 'g1' } });
   mobile.render();
   mobile
-    .find('Button', (p) => String(p.onPress).includes('onMove'))
+    .find('Button', (p) => p.children === '\u79fb\u52a8\u5df2\u9009')
     .props.onPress();
   await settle();
   assert.deepEqual(

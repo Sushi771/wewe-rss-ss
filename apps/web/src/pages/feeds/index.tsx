@@ -1,3 +1,4 @@
+import { Modal, Tooltip } from '@web/components/AppOverlays';
 import {
   ContentExportScope,
   SubscriptionSearch,
@@ -12,14 +13,12 @@ import OperationNotice, {
 import { exportArticleBatches } from '@web/utils/export-article-batches';
 import {
   Button,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
   ModalHeader,
   Switch,
   Textarea,
-  Tooltip,
   useDisclosure,
   Checkbox,
   Input,
@@ -550,6 +549,7 @@ const Feeds = () => {
     const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
     const exportNotices = new Set<string>();
     let ids = Array.from(articleSelectedIds);
+    let exportStarted = false;
     try {
       if (wholeScope)
         ids = await queryUtils.client.article.exportIds.query(
@@ -580,6 +580,7 @@ const Feeds = () => {
           `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
         );
       };
+      exportStarted = true;
       const receipt = await exportArticleBatches(
         ids,
         (batch, signal) =>
@@ -626,10 +627,19 @@ const Feeds = () => {
           current === batchSelection ? new Set() : current,
         );
     } catch {
-      toast.error('未能取得完整导出范围', {
-        description:
-          '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
-      });
+      if (exportStarted) {
+        const message = `导出中断，已停止：新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
+        setExportResult(message);
+        toast.warning(message, {
+          description: '部分结果尚未确认，请先检查保存目录；不会自动重试。',
+        });
+      } else {
+        setExportResult('未能取得完整导出范围');
+        toast.error('未能取得完整导出范围', {
+          description:
+            '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
+        });
+      }
     } finally {
       exportController.current = null;
       batchExporting.current = false;
@@ -976,7 +986,7 @@ const Feeds = () => {
             ? '部分内容已保存'
             : currentUpdate
               ? '已读取当前内容'
-              : '阅读本地存量';
+              : '查看已存目录';
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -1013,7 +1023,7 @@ const Feeds = () => {
   return (
     <>
       <div className="feed-workspace">
-        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+        <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
           <label className="min-w-0 flex-1 text-xs text-neutral-500">
             当前公众号
             <select
@@ -1059,8 +1069,18 @@ const Feeds = () => {
               setMobileSidebarOpen(!mobileSidebarOpen);
             }}
           >
-            {mobileSidebarOpen ? '收起管理' : '管理公众号'}
+            {mobileSidebarOpen ? '收起管理' : '管理与分组'}
           </Button>
+          {folderFilter !== 'all' && (
+            <span className="feed-active-group text-xs" role="status">
+              分组：
+              {folderFilter === 'ungrouped'
+                ? '未分组'
+                : folders.data?.items.find(
+                    (folder) => folder.id === folderFilter,
+                  )?.name}
+            </span>
+          )}
         </div>
         <div
           id="wechat-management-sidebar"

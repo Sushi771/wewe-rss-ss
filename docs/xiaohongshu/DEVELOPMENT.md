@@ -1,60 +1,45 @@
-# 小红书订阅开发与交接
+# 小红书开发、维护与发布
 
-有界验收先检查首次订阅后的自动列表行为。新检查使用会继续返回游标的合成来源：两页提交后不得调用第三页，重进读取不得派发，明确续跑只从持久游标追加；同时检查请求计数和无凭据输出。正式联网结果须另以实际平台回执、同实例计数差值及本地正文/图片证据验收，离线回归不能替代它。
+按[产品](PRODUCT.md)、[设计](DESIGN.md)、[接口与数据契约](TECHNICAL.md)和[验收](ACCEPTANCE.md)维护现有实现。本页记录开发顺序、发布状态和原始材料入口；其他页面不重复维护一份完成清单。
 
-## 当前版本和结果
+## 本次交付状态（2026-10-28）
 
-2026-10-24 固定公开源码 `9e1b81a8d095390bce968a137fd88d23ba5252df`。主负责人确认对应 r2 本机已上线、日常服务正常；本轮在隔离分支改进，不部署、不发真实请求、不读取凭据、不删除历史数据。
+- 已安装基线：`7e8fa196608d90d35149847449984976ec0ef3b7`，依据既有安装回执；这不是本次重新查询运行进程的结果。
+- 待交付源码：`9a5d3de7d2c9280254451a8bd65418a20ab3d349`。完整新包尚未生成，未完成新包运行验收或生产切换。本轮文档校订不改变该状态。
+- 该头CI终态为5成功、1失败。Windows push的`automatic-media-storage.spec.ts:114:3`在beforeEach超过40秒，来源套件684/685通过；[原始运行40707938595](https://github.com/Sushi771/wewe-rss-ss/actions/runs/40707938595)。先定位现有夹具的连接、迁移和seed耗时，保留失败，不以增加超时、跳过或换工作流掩盖。
+- 尚未取得本次完整新包的构建与运行回执；公开CI结果与包运行、安装及真实来源验收分别判定。本机故障时间线、登记状态和修复记录由维护者在私有材料中保存，不作为公共操作指南。
 
-| 工作 | 当前状态 |
+本次从7e8到9a的56项差异未改变依赖清单、lockfile、schema、迁移或`runtime.cjs`。这支持评估同schema更新和复用有效输入，不能替代旧任务document、队列及运行包兼容验证；旧版已存在scope/build-only/compact保护。
+
+公开复核入口如下；运行回执和私人审计材料留在获准的本地证据区，不在此列出文件名或内部标识。
+
+| 要核对的合同 | 项目内源码或合成测试入口 |
 | --- | --- |
-| 解析确认、列表/详情分离、分组/搜索/日期、共享前端、持久检查点及分批ZIP | 已实现；既有合成与浏览器证据见 [验收记录](ACCEPTANCE.md) |
-| 严格主页parser、DPAPI、安全媒体 | 已集成；两种入口同作者复用订阅、32候选、3篇12图归档及重复保存零额外请求已核验 |
-| 请求30返回32 | 公开修复接受最多60条响应；32全部保留、61整页拒绝已有合成反例 |
-| 本机运行 | r2已上线；候选已纳入3处通用包装差异和单源组包，未再次部署 |
-| 完整历史、持续更新 | 尚未验收 |
-| 新改进 | 后台发现/核对/恢复关联、包装维护、6项独立正文图片检查及200b1b2整包恢复已通过；前端最终接线、真实HTTP恢复联调和备份状态现有界面对接已完成 |
+| 任务、累计额度及派发屏障 | `apps/server/src/collection/xhs-subscription.spec.ts`、`apps/server/src/collection/xhs-whole-source-fence.spec.ts` |
+| 媒体保存及事务恢复 | `apps/server/src/collection/saved-media-writeback.spec.ts`、[事务恢复说明](../MEDIA_TRANSACTION_RECOVERY.md) |
+| 组合筛选、排序与响应式布局 | `scripts/xhs-combined-filter.test.cjs`、`scripts/xhs-metric-sort.test.cjs`、`scripts/responsive-layout-browser.test.cjs` |
+| 构建配对与保留更新 | `scripts/local-release/verify-source.cjs`、`scripts/local-release/reproducible-release.test.cjs`、`scripts/local-release/preserving-restart.test.cjs` |
 
-## 维护入口
+测试入口说明可复验的方法，不代替某次安装或真实来源的运行回执。CI原件使用本节公开链接核对。
 
-阅读 [产品标准](PRODUCT.md#深入改进的产品标准)、[交互设计](DESIGN.md)、[技术证据](TECHNICAL.md#原始证据与独立核对)及 [验收反例](ACCEPTANCE.md#深入改进反例与判定)。沿根AGENTS、[开发规范](../../DEVELOPMENT.md)和[前端原则](../UI_DEVELOPMENT_PRINCIPLES.md)，只改划归文件。
+## 最小开发与独立复核
 
-接口变动同步共享类型与前端，再更新技术表；尚在设计的任务发现/核对接口不提前写成已发布。复用模型、保存器、事务准入与共享组件；不把网络工作包入事务，不用自动重放掩盖回执丢失。
+先绑定基线SHA和候选文件哈希，围绕一个真实失败建立最小反例，再修改受影响实现。复用现有Jest/Node、临时SQLite和浏览器夹具，按[验收](ACCEPTANCE.md)选择相关合同及必要共享回归；不把所有故障场景扩成每次发布的固定全量任务，不以测试总数替代覆盖。
 
-## 方法、工具与最小反例
+受影响的API同步后台、共享类型和前端调用；优先使用已有契约，避免另写一份手工类型掩盖差异。诊断先保留固定错误和动作结果，不用新工具链替代修复与交付。
 
-| 方法与工具 | 本轮用途 | 必须保留的判定 |
-| --- | --- | --- |
-| Git固定SHA、diff及源码到包清单 | 区分公开源码、运行r2和改进候选 | 每处差异有来源；干净重建不依赖手工补文件 |
-| Jest故障注入、临时Prisma/SQLite | 终态persist拒绝、写成后丢应答、取消收尾 | 分开验证执行器释放与持久状态核对，不因释放锁就重发 |
-| Node合成请求计数及浏览器动作 | 页面刷新找回、状态失败、显式继续 | 原任务可追踪，查询不产生详情/下载请求 |
-| 独立SQLite检查、正文比较器、图片解码器 | 原始内容到库、Markdown、图片的对照 | 不复用被测解析器生成期望；正文只允许转义/空白 |
-| 独立临时目录及隔离端口恢复 | 从来源明确的包和合成恢复点启动 | 数据、任务及文图可用；没有新真实来源请求 |
+## 发布与回退
 
-基线反例已执行：把服务实现固定为 `9e1b81a`，沿真实临时SQLite及原保存器完成文件后使终态persist拒绝，pending未释放，断言失败；还原候选实现后同场景通过。独立用例又覆盖“恢复事务已写成但客户端未收到响应”和“初始入队写入失败而客户端无任务ID”，直接查SQLite行、旧新关联及来源计数，不能用一个内存状态替代这些证据。
+单一整合者冻结源码、前端资源、后端JS、完整SQL迁移和构建清单。源码哈希与包哈希分别正确仍不足，必须逐文件验证源码→构建配对，特别核SQL逐字节一致。记录同头CI结果、测试环境及未执行项；旧头绿灯不覆盖新差异。
 
-页面反例按“提交→刷新→查询暂时失败→找回原任务→显式继续→终态后新选择”重现；同时观察任务ID、目标集合和请求计数。组包反例从缺少手工补件的干净副本启动，须定位缺失输入，不能借用运行目录文件让测试通过。实施窗口提供准确失败/修复命令后，父线程回填 [验收表](ACCEPTANCE.md)。
+先分清纯代码覆盖与数据迁移：恢复路径有效且覆盖范围已核实的同schema更新，可复用现有一致性恢复点，不因少量代码或文档修改机械复制整库。迁移、恢复逻辑变化或覆盖证据不足时，按[事务恢复说明](../MEDIA_TRANSACTION_RECOVERY.md)补相应一致副本/隔离演练，遵循现有空间策略；线上仅作有界短查询，连接在finally关闭。
 
-## 针对性回归入口
+构建入口及模式见[隔离构建](../ISOLATED_RELEASE_BUILD.md)和[保留更新合同](../PRESERVING_UPDATE.md)。只生成隔离输出不授权安装；先形成完整包及所需兼容证据，再审查安装和切换。真实旧ledger/adopted保持可追溯，不手改hash、清unknown或伪造空历史。新增安全guard须说明动作、对象与真实风险，不能因项目自建限制而无限扩建机制。
 
-以下命令仅在隔离工作区和合成数据库运行，Prisma生成不能覆盖其他窗口依赖：
+构建不调用`installPair`；安装阶段才按真实目录清单核对其既有`adoptLegacy`接口是否适用。不得猜测现场库存、虚列归属冲突或将安装前置倒灌给构建。
 
-```sh
-pnpm --filter server exec jest --runInBand xhs- xiaohongshu-contract xiaohongshu.service management-groups xiaohongshu-ui article-local-save
-node --test scripts/xhs-subscription-ui.test.cjs scripts/manual-refresh-progress-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/feed-export-date-ui.test.cjs scripts/folder-navigation-ui.test.cjs scripts/article-date-shortcuts.test.cjs scripts/xiaohongshu-refresh-ui.test.cjs
-pnpm --filter server exec prisma generate
-pnpm build:server
-pnpm build:web
-```
+安装核源码/运行包身份、前端实际资源、迁移、启动健康和数据/用户文件保护，再分别安排获准的最小真实验收。二进制回退保留新增表、账本和用户文件；不做破坏性down迁移，不删journal/锁文件或清unknown换取启动。恢复失败、清理超时或结果未知保持暂停，明确下一步证据缺口，不自动重放来源。
 
-共享组件同时回归公众号与小红书。测试工具代理每次渲染变化、查询丢失、取消收尾和终态新选择；先复现失败再验证修复，不用总通过数量代替覆盖。恢复与组包新命令由负责窗口确认后加入 [本机维护入口](../LOCAL_RELEASE_REHEARSAL.md)。
+## 维护交接
 
-## 交付和待回填
-
-每项实现交接准确SHA、文件、接口、原始合成输入、失败反例、修复后结果与独立检查。公开文档只保留去敏材料类别及结论，不提交用户身份、原文、签名链接、私有路径、真实回执或本机审计。
-
-本轮后台、独立内容检查及200b1b2整包恢复证据已回填 [验收表](ACCEPTANCE.md)；前端结果与真实HTTP契约检查已补齐，整包恢复证据仍限定200b1b2。主负责人统一发布draft PR；禁止因文档写“r2已上线”而再次部署或恢复采集。当前周期备份暂停及发布恢复点的状态见 [维护说明](../LOCAL_RELEASE_REHEARSAL.md#当前本机状态与深入改进维护边界2026-10-24)。
-
-独立内容检查只需运行 `pnpm --filter server exec jest --runInBand xhs-content-integrity.spec`。测试需要Python和Pillow，解释器可由 `XHS_TEST_PYTHON` 指定；缺失解码器会失败，不跳过或退化成只读图片头。XHS专用Windows/Linux CI沿既有 `actions/setup-python@v5` 约定选择Python3.12，通过官方PyPI安装固定 `Pillow==12.1.1`，仅用于测试；本机已用Python3.14/Pillow12.1.1执行6项通过，远端矩阵结果仍需发布后确认。源码未新增生产依赖。
-
-最终联调使用真实@trpc/client通过随机loopback端口调用实际路由，临时SQLite承担持久化；仅外部来源使用合成adapter。它先复现“核对后仍被前端未知代码阻挡”的失败，再确认未知时不执行、核对后显式继续、旧新关联、取消重进不重放。维护只读状态检查与storage-status-ui测试进入同一Windows/Linux CI。
+每项记录需求→实现位置→反例/命令→原始证据类别→结论及边界，标为已实现、待验证或待开发。固定错误与实际HTTP数值可公开说明；真实用户身份/内容、token、凭证、绝对路径、私有账本及本机审计仅留获准私有材料。公共文档写通用标准和合成例子，不复制私人验收过程。

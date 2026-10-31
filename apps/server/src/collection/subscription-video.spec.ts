@@ -6,8 +6,10 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { PrismaClient } from '@prisma/client';
 import axios from 'axios';
+import { load } from 'cheerio';
 import { inspectCachedMp4, XhsVerifiedVideoCache } from '../xhs-video-download';
 import { LocalArticleStore } from '../article-local-save';
+import { freezeCachedXhsSelection, saveFrozenXhsCache } from '../xhs-cached-local-export';
 import {
   XiaohongshuService,
   XhsSource,
@@ -394,16 +396,22 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       kind: 'video',
       video: metadata,
     });
-    const bodyRead = jest.spyOn(prisma.xhsNote, 'findFirst');
-    const body = await api.body('creator', videoKey);
-    expect(bodyRead.mock.calls[0][0]?.select).not.toHaveProperty('videoBytes');
-    expect(body).toMatchObject({
-      text: fixture().note.text,
-      images: [fixture().note.images[0].inlineData],
-      kind: 'video',
-      video: metadata,
-    });
-    expect(JSON.stringify({ notes, body })).not.toContain('videoBytes');
+    expect('body' in api).toBe(false);
+    const $ = load(cached.contentHtml!);
+    expect(
+      $('#js_content')
+        .find('p')
+        .toArray()
+        .map((p) => $(p).text())
+        .join('\n'),
+    ).toBe(fixture().note.text);
+    expect(
+      $('#js_content')
+        .find('img')
+        .toArray()
+        .map((img) => $(img).attr('src')),
+    ).toEqual([fixture().note.images[0].inlineData]);
+    expect(JSON.stringify(notes)).not.toContain('videoBytes');
     const output = join(root, 'save-output');
     const store = new LocalArticleStore(join(root, 'preferences.json'), output);
     const prepared = await api.prepareLocalDownload('creator', videoKey);
@@ -414,7 +422,7 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       alreadySaved: false,
     });
     const markdown = await fs.readFile(saved.markdownPath, 'utf8');
-    expect(saved.markdownPath.endsWith('正文.md')).toBe(true);
+    expect(saved.markdownPath.endsWith(fixture().note.title+'.md')).toBe(true);
     expect(markdown).toContain(fixture().note.text);
     expect(markdown).toContain('image/image_');
     expect(markdown).toContain('video/video_' + hash(mp4()) + '.mp4');
@@ -437,6 +445,17 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     expect(await fs.readFile(saved.markdownPath, 'utf8')).toContain(
       'local annotation',
     );
+  });
+  it('exports a complete cached video through the frozen cache publisher without source access', async () => {
+    const api = service(); await api.refresh('creator');
+    const frozen = await freezeCachedXhsSelection(prisma, [{id: videoKey, creatorId:'creator'}]);
+    const output = join(root, 'cached-video-output');
+    const store = new LocalArticleStore(join(root, 'cached-video-preferences.json'), output, true);
+    const receipt = await saveFrozenXhsCache(frozen, store, output, (creator,id) => api.prepareLocalDownload(creator,id));
+    expect(receipt.results).toHaveLength(1);expect(receipt.results[0].error).toBeUndefined();
+    const markdownPath = receipt.results[0].saved!.markdownPath;const markdown = await fs.readFile(markdownPath,'utf8');
+    expect(markdown).toContain('video/video_' + hash(mp4()) + '.mp4');
+    expect(await fs.readFile(join(dirname(markdownPath),'video','video_' + hash(mp4()) + '.mp4'))).toEqual(mp4());
   });
   it('retains complete image/video archives on duplicates and promotes only missing skipped video data without changing identity/time', async () => {
     const api = service([videoNote(), videoNote('old-skipped')]);
@@ -506,12 +525,19 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     const id = JSON.stringify(['xiaohongshu', 'note', 'empty-caption']);
     const cached = await prisma.xhsNote.findUniqueOrThrow({ where: { id } });
     expect(cached.contentHtml).toContain('data-wewe-empty-video-caption');
-    expect(await api.body('creator', id)).toMatchObject({
-      text: '',
-      images: [],
-      kind: 'video',
-      video: { decoded: false },
-    });
+    const $ = load(cached.contentHtml!);
+    expect(
+      $('#js_content')
+        .find('p')
+        .not(
+          '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
+        )
+        .text(),
+    ).toBe('');
+    expect($('#js_content').find('img').length).toBe(0);
+    expect(
+      (await api.notes('creator')).items.find((note) => note.id === id),
+    ).toMatchObject({ kind: 'video', video: { decoded: false } });
     const store = new LocalArticleStore(
       join(root, 'empty-preferences.json'),
       join(root, 'empty-video'),
@@ -611,9 +637,11 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     await expect(
       api.prepareLocalDownload('other-creator', videoKey),
     ).rejects.toThrow();
-    await expect(api.body('other-creator', videoKey)).rejects.toMatchObject({
-      code: 'PRECONDITION_FAILED',
-    });
+    expect(
+      (await api.notes('other-creator')).items.some(
+        (note) => note.id === videoKey,
+      ),
+    ).toBe(false);
     await prisma.xhsNote.update({
       where: { id: videoKey },
       data: { creatorId: 'other-creator' },
@@ -654,16 +682,44 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       data: { videoExpectedBytes: 25_000_001 },
     });
     const read = jest.spyOn(prisma.xhsNote, 'findFirst');
+    const listRead = jest.spyOn(prisma.xhsNote, 'findMany');
+    const temporary = jest.spyOn(fs, 'mkdtemp');
+    const directory = jest.spyOn(fs, 'mkdir');
+    const write = jest.spyOn(fs, 'writeFile');
+    const prepare = jest.spyOn(api, 'prepareLocalDownload');
+    const packZip = jest.spyOn(
+      jest.requireMock('../offline-archive'),
+      'archiveDirectory',
+    );
     await expect(api.export('creator', [videoKey])).rejects.toMatchObject({
       code: 'PRECONDITION_FAILED',
     });
-    expect(read).not.toHaveBeenCalled();
+    // The current baseline preflights metadata + cached text before the byte gate.
+    // No implicit full-row read or video BLOB may occur before rejection.
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls[0][0]?.select).toMatchObject({
+      contentHtml: true,
+      videoExpectedBytes: true,
+    });
+    for (const options of [...read.mock.calls, ...listRead.mock.calls].map(
+      ([options]) => options,
+    )) {
+      expect(options?.select).toBeDefined();
+      expect(options?.select).not.toHaveProperty('videoBytes');
+    }
+    expect(temporary).not.toHaveBeenCalled();
+    expect(directory).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(packZip).not.toHaveBeenCalled();
     await prisma.xhsNote.update({
       where: { id: videoKey },
       data: { videoExpectedBytes: mp4().length },
     });
     const result = await api.export('creator', [videoKey]);
     expect(result.notes).toBe(1);
+    expect(packZip).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
     const zip = join(root, 'video.zip');
     await fs.writeFile(zip, Buffer.from(result.base64, 'base64'));
     const inspect = spawnSync(

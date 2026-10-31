@@ -77,7 +77,9 @@ describe('verified read endpoint and private access context (synthetic only)', (
       url: request.url,
       body: { raw: 'synthetic-secret-not-for-errors' },
     }));
-    await expect(api.getUserInfo(author.id)).rejects.toThrow('verification');
+    await expect(api.getUserInfo(author.id)).rejects.toThrow(
+      'unknown_rejection',
+    );
     expect(transport).toHaveBeenCalledTimes(2);
   });
   it('does not dispatch an already cancelled request', async () => {
@@ -266,7 +268,7 @@ describe('restricted cookie-free short-link resolution (synthetic redirects only
     await expect(
       new XhsShortLinkResolver(transport).resolve('https://xhslink.com/a/one'),
     ).rejects.toThrow('XHS_SHORT_LINK_REJECTED');
-    transport.mockImplementation(async (url) => ({
+    transport.mockImplementation(async () => ({
       status: 302,
       url: 'https://evil.test',
       location: author.profileUrl,

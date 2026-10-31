@@ -1,10 +1,12 @@
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
+import { callProcedure } from '@trpc/server';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 import axios from 'axios';
+import { load } from 'cheerio';
 import { spawnSync } from 'node:child_process';
 import { XiaohongshuService, XhsSource } from './xiaohongshu.service';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
@@ -197,20 +199,39 @@ describe('production XHS router/service → additive SQLite and original export 
       platform: { url: '' },
       feed: { updateDelayTime: 0 },
     });
-    const api = new TrpcRouter(
+    const router = new TrpcRouter(
       new TrpcService(prisma as any, config, {} as any, {} as any),
       prisma as any,
       config,
       {} as any,
       {} as any,
       service,
-    ).appRouter.createCaller({ errorMsg, isLocal: true });
+    ).appRouter;
+    const api = router.createCaller({ errorMsg, isLocal: true });
     // Legacy normalized cache seam is tested directly; public refresh now queues metadata only.
     return {
       xiaohongshu: api.xiaohongshu,
+      procedures: router._def.procedures,
       legacyRefresh: ({ id }: { id: string }) => service.refresh(id),
     };
   }
+  it('reorders XHS groups through the protected route without moving creators', async () => {
+    const api = caller().xiaohongshu;
+    const first = await api.saveGroup({ name: 'First synthetic group' });
+    const second = await api.saveGroup({ name: 'Second synthetic group' });
+    await api.moveCreators({ ids: [creatorId], groupId: first.id });
+    const original = (await api.groups()).items.map((group) => group.id);
+    const reversed = [...original].reverse();
+    await expect(caller(undefined, 'not signed in').xiaohongshu.reorderGroups({ ids: reversed, expectedIds: original })).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    await api.reorderGroups({ ids: reversed, expectedIds: original });
+    expect((await api.groups()).items.map((group) => group.id)).toEqual(reversed);
+    await expect(api.reorderGroups({ ids: original, expectedIds: original })).rejects.toMatchObject({ code: 'CONFLICT' });
+    await expect(api.reorderGroups({ ids: [first.id, first.id], expectedIds: reversed })).rejects.toBeDefined();
+    const foreign = await prisma.managementGroup.create({ data: { id: 'synthetic-wechat-group', platform: 'wechat', name: 'Other platform', order: 0 } });
+    await expect(api.reorderGroups({ ids: [first.id, foreign.id], expectedIds: reversed })).rejects.toBeDefined();
+    expect((await prisma.xhsCreator.findUniqueOrThrow({ where: { id: creatorId } })).groupId).toBe(first.id);
+    expect((await api.groups()).items.map((group) => group.id)).toEqual(reversed);
+  });
   it('uses protected real routes, persists pending creators, refuses unconfigured refresh/download', async () => {
     await expect(
       caller(undefined, '未登录').xiaohongshu.list(),
@@ -234,6 +255,21 @@ describe('production XHS router/service → additive SQLite and original export 
     expect((await api.legacyRefresh({ id: creatorId })).status).toBe('paused');
     await api.xiaohongshu.remove({ id: creatorId });
     expect((await api.xiaohongshu.list()).items).toHaveLength(0);
+  });
+  it('removes the platform reader route and service method without reading cached body data', async () => {
+    const read = jest.spyOn(prisma.xhsNote, 'findFirst');
+    expect('body' in XiaohongshuService.prototype).toBe(false);
+    await expect(async () =>
+      callProcedure({
+        procedures: caller().procedures,
+        path: 'xiaohongshu.body',
+        type: 'query',
+        ctx: { errorMsg: null, isLocal: true },
+        rawInput: { creatorId, noteId: 'synthetic' },
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+    expect(read).not.toHaveBeenCalled();
+    read.mockRestore();
   });
   it.each([
     'http://127.0.0.1/private',
@@ -259,9 +295,23 @@ describe('production XHS router/service → additive SQLite and original export 
     const list = await api.xiaohongshu.notes({ creatorId });
     expect(list.items).toHaveLength(2);
     const note = list.items.find((n) => n.status === 'complete')!;
-    const body = await api.xiaohongshu.body({ creatorId, noteId: note.id });
-    expect(body.text).toBe(candidate().text);
-    expect(body.images).toEqual(['data:image/png;base64,' + png]);
+    const cached = await prisma.xhsNote.findFirstOrThrow({
+      where: { creatorId, id: note.id },
+    });
+    const $ = load(cached.contentHtml!);
+    expect(
+      $('#js_content')
+        .find('p')
+        .toArray()
+        .map((p) => $(p).text())
+        .join('\n'),
+    ).toBe(candidate().text);
+    expect(
+      $('#js_content')
+        .find('img')
+        .toArray()
+        .map((img) => $(img).attr('src')),
+    ).toEqual(['data:image/png;base64,' + png]);
     const before = await prisma.xhsNote.findMany();
     expect((await api.legacyRefresh({ id: creatorId })).added).toBe(0);
     expect(await prisma.xhsNote.findMany()).toEqual(before);
@@ -470,7 +520,7 @@ describe('production XHS router/service → additive SQLite and original export 
     const destination = path.join(root, 'direct-save');
     await fs.mkdir(destination, { recursive: true });
     await fs.writeFile(
-      path.join(root, '.article-download-settings.json'),
+      path.join(root, '.xiaohongshu-download-settings.json'),
       JSON.stringify({ directory: destination, askEveryTime: false }),
     );
     const module = await Test.createTestingModule({
@@ -523,9 +573,9 @@ describe('production XHS router/service → additive SQLite and original export 
         imageCount: 1,
         alreadySaved: false,
       });
-      expect(path.basename(first.body.markdownPath)).toBe('正文.md');
+      expect(path.basename(first.body.markdownPath)).toBe(note.title+'.md');
       expect(path.relative(destination, first.body.directory)).toMatch(
-        /^\d{4}-\d{2}-\d{2}[\\/]/,
+        /^\d{4}-\d{2}-\d{2}_未分组[\\/]/,
       );
       const md = await fs.readFile(first.body.markdownPath, 'utf8');
       expect(md).toContain('完整合成正文');
@@ -543,15 +593,15 @@ describe('production XHS router/service → additive SQLite and original export 
       expect(await fs.readFile(first.body.markdownPath, 'utf8')).toContain(
         '用户本地笔记',
       );
-      await post('/download/article/settings', { askEveryTime: true });
+      await post('/download/article/settings?target=xiaohongshu', { askEveryTime: true });
       expect((await post()).status).toBe(409);
       jest.spyOn(picker, 'pickArticleDirectory').mockResolvedValue(null);
       expect(
-        (await post('/download/article/directory', {})).body.cancelled,
+        (await post('/download/article/directory?target=xiaohongshu', {})).body.cancelled,
       ).toBe(true);
       expect((await post()).status).toBe(409);
       jest.mocked(picker.pickArticleDirectory).mockResolvedValue(destination);
-      const picked = await post('/download/article/directory', {});
+      const picked = await post('/download/article/directory?target=xiaohongshu', {});
       expect(
         (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
           .status,
@@ -560,7 +610,7 @@ describe('production XHS router/service → additive SQLite and original export 
         (await post(undefined, { creatorId, pickToken: picked.body.pickToken }))
           .status,
       ).toBe(409);
-      await post('/download/article/settings', { askEveryTime: false });
+      await post('/download/article/settings?target=xiaohongshu', { askEveryTime: false });
       process.env.WEWE_ACCEPTANCE_MODE = '1';
       expect((await post()).status).toBe(409);
       delete process.env.WEWE_ACCEPTANCE_MODE;

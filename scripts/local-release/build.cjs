@@ -42,6 +42,8 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'lib.cjs',
   'runtime.cjs',
   'engine-audit.cjs',
+  'project-writer-gate.cjs',
+  'legacy-maintenance-loader.cjs',
   'inspect-sqlite.py',
   'prepare-start.py',
   'startup-sqlite.cjs',
@@ -485,6 +487,8 @@ function build(options = {}) {
     let failure;
     try {
       if (reusable) {
+        if (shared.policy.preservingUpdate)
+          throw new Error('RELEASE_PRESERVING_REUSE_FORBIDDEN');
         console.log(
           JSON.stringify({
             release: reusable.directory,

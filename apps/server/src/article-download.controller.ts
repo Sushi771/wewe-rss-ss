@@ -1,4 +1,10 @@
 import {
+  freezeCachedXhsSelection,
+  saveFrozenXhsCache,
+  XHS_CACHED_SCOPE_LIMIT,
+  XhsCachedTarget,
+} from './xhs-cached-local-export';
+import {
   Body,
   Controller,
   Get,
@@ -14,10 +20,13 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Request as Req, Response as Res } from 'express';
-import { dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { ArticleDownloadError, downloadArticleUrl } from './article-download';
-import { LocalArticleStore } from './article-local-save';
+import {
+  DEFAULT_ARTICLE_DIRECTORY,
+  LocalArticleStore,
+} from './article-local-save';
 import { PreparedArticle, ArticlePreparation } from './article-local-save';
 import { exportSourceFromFeed } from './article-export-source';
 import { pickArticleDirectory } from './article-folder-picker';
@@ -69,41 +78,34 @@ export class ArticleDownloadController implements OnModuleDestroy {
           process.env.WEWE_ACCEPTANCE_MODE === '1'
         )
           throw new ArticleDownloadError('本地保存暂不可用。', 409);
-        const settings = await this.localStore().read();
-        if (
-          settings.askEveryTime &&
-          (!this.pickerGrant || this.pickerGrant !== pickToken)
-        )
-          throw new ArticleDownloadError('请先选择本次保存目录。', 409);
-        this.pickerGrant = undefined;
-        return settings.directory;
+        this.running = true;
+        try {
+          const settings = await this.localStore('xiaohongshu').read();
+          if (settings.askEveryTime && (!this.xhsPickerGrant || this.xhsPickerGrant !== pickToken))
+            throw new ArticleDownloadError('请先选择本次保存目录。', 409, { code: 'DIRECTORY_PICK_REQUIRED' });
+          this.xhsPickerGrant = undefined;
+          this.xhsConfirmedGrant = undefined;
+          return settings.directory;
+        } finally { this.running = false; }
       },
       async (creator, noteId, directory) => {
         if (this.running || this.pickerRunning)
           throw new ArticleDownloadError('本地保存正在使用。', 409);
         this.running = true;
         try {
+          const store = this.localStore('xiaohongshu');
+          if (directory !== (await store.read()).directory)
+            throw new ArticleDownloadError(
+              '小红书保存目标已改变，请重新确认目录后开始任务。',
+              409,
+              { code: 'XHS_RESUME_DIRECTORY_CHANGED' },
+            );
           const prepare = await this.xiaohongshu!.prepareLocalDownload(
             creator.id,
             noteId,
           );
-          const group = creator.groupId
-            ? await this.prisma!.managementGroup.findUnique({
-                where: { id: creator.groupId },
-              })
-            : null;
-          const source = {
-            feedId: creator.id,
-            feedName: creator.displayName,
-            groupId: group?.id,
-            groupName: group?.name,
-          };
-          const withSource = async (stage: string) => ({
-            ...(await prepare(stage)),
-            exportSource: source,
-          });
-          return await this.localStore().save(
-            withSource,
+          return await this.localStore('xiaohongshu').save(
+            prepare,
             new Date(),
             directory,
           );
@@ -162,6 +164,9 @@ export class ArticleDownloadController implements OnModuleDestroy {
   private pickerRunning = false;
   private store?: LocalArticleStore;
   private pickerGrant?: string;
+  private xhsPickerGrant?: string;
+  private xhsConfirmedGrant?: string;
+  private xhsStore?: LocalArticleStore;
   private readonly logger = new Logger(ArticleDownloadController.name);
 
   private authorized(req: Req, res: Res, mutation: boolean) {
@@ -196,7 +201,30 @@ export class ArticleDownloadController implements OnModuleDestroy {
     return true;
   }
 
-  private localStore() {
+  private exportTarget(req: Req): 'wechat' | 'xiaohongshu' {
+    const target = req.query.target;
+    if (target === undefined || target === 'wechat') return 'wechat';
+    if (target === 'xiaohongshu') return 'xiaohongshu';
+    throw new ArticleDownloadError('无效的导出平台。', 400);
+  }
+
+  private localStore(target: 'wechat' | 'xiaohongshu' = 'wechat') {
+    if (target === 'xiaohongshu') {
+      if (!this.xhsStore) {
+        const raw = process.env.DATABASE_URL || '';
+        const database = raw.startsWith('file:')
+          ? decodeURIComponent(raw.slice(5).split('?')[0])
+          : '';
+        if (!isAbsolute(database))
+          throw new ArticleDownloadError('需要本地数据库配置。', 409);
+        this.xhsStore = new LocalArticleStore(
+          join(dirname(database), '.xiaohongshu-download-settings.json'),
+          join(dirname(DEFAULT_ARTICLE_DIRECTORY), '小红书的内容（待分类）'),
+          true,
+        );
+      }
+      return this.xhsStore;
+    }
     if (!this.store) {
       const raw = process.env.DATABASE_URL || '';
       const database = raw.startsWith('file:')
@@ -305,7 +333,7 @@ export class ArticleDownloadController implements OnModuleDestroy {
     if (!this.authorized(req, res, false)) return;
     res.setHeader('Cache-Control', 'private, no-store');
     try {
-      return res.json(await this.localStore().read());
+      return res.json(await this.localStore(this.exportTarget(req)).read());
     } catch (error) {
       return this.failure(error, res);
     }
@@ -331,13 +359,41 @@ export class ArticleDownloadController implements OnModuleDestroy {
       )
         throw new ArticleDownloadError('路径询问设置无效。', 400);
       return res.json(
-        await this.localStore().setAskEveryTime(body.askEveryTime),
+        await this.localStore(this.exportTarget(req)).setAskEveryTime(
+          body.askEveryTime,
+        ),
       );
     } catch (error) {
       return this.failure(error, res);
     } finally {
       this.running = false;
     }
+  }
+
+  // Confirm only the already configured XHS directory; never accept a new path here.
+  @Post('article/directory-confirm')
+  @HttpCode(200)
+  async confirmXhsDirectory(@Body() body: { directory?: unknown }, @Request() req: Req, @Response() res: Res) {
+    if (!this.authorized(req, res, true)) return;
+    if (this.exportTarget(req) !== 'xiaohongshu' || privateOnlineMode() || process.env.WEWE_ACCEPTANCE_MODE === '1')
+      return res.status(409).json({ message: '当前模式不能确认小红书保存目录。' });
+    if (this.running || this.pickerRunning) return res.status(409).json({ message: '请等待当前本地操作完成。' });
+    this.running = true;
+    this.xhsPickerGrant = undefined;
+    this.xhsConfirmedGrant = undefined;
+    try {
+      if (!body || Array.isArray(body) || Object.keys(body).some(key => key !== 'directory') || typeof body.directory !== 'string')
+        throw new ArticleDownloadError('保存目录确认无效。', 400);
+      const settings = await this.localStore('xiaohongshu').read();
+      if (body.directory !== settings.directory)
+        throw new ArticleDownloadError('保存目录已改变，请重新确认。', 409, { code: 'XHS_RESUME_DIRECTORY_CHANGED' });
+      const token = randomUUID();
+      this.xhsPickerGrant = token;
+      this.xhsConfirmedGrant = token;
+      res.setHeader('Cache-Control', 'private, no-store');
+      return res.json({ ...settings, pickToken: token });
+    } catch (error) { return this.failure(error, res); }
+    finally { this.running = false; }
   }
 
   @Post('article/directory')
@@ -347,23 +403,40 @@ export class ArticleDownloadController implements OnModuleDestroy {
     if (this.running || this.pickerRunning)
       return res.status(409).json({ message: '请等待当前操作完成。' });
     this.pickerRunning = true;
-    this.pickerGrant = undefined;
+    const controller = new AbortController();
+    const onAborted = () => controller.abort();
+    const onClosed = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    req.once('aborted', onAborted);
+    res.once('close', onClosed);
+    if (req.aborted || res.destroyed) controller.abort();
     try {
-      const store = this.localStore();
+      const xhs = this.exportTarget(req) === 'xiaohongshu';
+      if (xhs) { this.xhsPickerGrant = undefined; this.xhsConfirmedGrant = undefined; }
+      else this.pickerGrant = undefined;
+      const store = this.localStore(this.exportTarget(req));
       const selected = await pickArticleDirectory(
         (await store.read()).directory,
+        { platform: xhs ? 'xiaohongshu' : 'wechat', signal: controller.signal },
       );
+      if (controller.signal.aborted) return;
       if (selected === null) return res.json({ cancelled: true });
       const settings = await store.rememberPickedDirectory(selected);
-      this.pickerGrant = randomUUID();
+      if (controller.signal.aborted) return;
+      const token = randomUUID();
+      if (xhs) this.xhsPickerGrant = token;
+      else this.pickerGrant = token;
       return res.json({
         ...settings,
-        pickToken: this.pickerGrant,
+        pickToken: token,
         cancelled: false,
       });
     } catch (error) {
-      return this.failure(error, res);
+      if (!controller.signal.aborted) return this.failure(error, res);
     } finally {
+      req.removeListener('aborted', onAborted);
+      res.removeListener('close', onClosed);
       this.pickerRunning = false;
     }
   }
@@ -618,6 +691,114 @@ export class ArticleDownloadController implements OnModuleDestroy {
     });
   }
 
+  @Post('article/xiaohongshu/cache-export')
+  @HttpCode(200)
+  async exportXhsCachedSelection(
+    @Body() body: unknown,
+    @Request() req: Req,
+    @Response() res: Res,
+  ) {
+    if (!this.authorized(req, res, true)) return;
+    if (
+      privateOnlineMode() ||
+      process.env.WEWE_ACCEPTANCE_MODE === '1' ||
+      !this.xiaohongshu ||
+      !this.prisma
+    )
+      return res.status(409).json({ message: '当前模式不能保存本地缓存。' });
+    if (this.running || this.pickerRunning)
+      return res.status(409).json({ message: '请等待当前本地操作完成。' });
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const close = () => {
+      if (!res.writableEnded) controller.abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', close);
+    if (req.aborted || res.destroyed) controller.abort();
+    this.running = true;
+    try {
+      const items = (body as { items?: unknown })?.items;
+      const confirmedToken = (body as { pickToken?: unknown })?.pickToken;
+      if (
+        !body ||
+        Array.isArray(body) ||
+        (confirmedToken !== undefined && confirmedToken !== this.xhsConfirmedGrant) ||
+        Object.keys(body).some((key) => !['items', 'pickToken'].includes(key)) ||
+        ((body as { pickToken?: unknown }).pickToken !== undefined && typeof (body as { pickToken?: unknown }).pickToken !== 'string') ||
+        !Array.isArray(items) ||
+        !items.length ||
+        items.length > XHS_CACHED_SCOPE_LIMIT ||
+        items.some(
+          (item) =>
+            !item ||
+            typeof item !== 'object' ||
+            Array.isArray(item) ||
+            Object.keys(item).some(
+              (key) => !['id', 'creatorId'].includes(key),
+            ) ||
+            typeof item.id !== 'string' ||
+            !item.id ||
+            item.id.length > 300 ||
+            typeof item.creatorId !== 'string' ||
+            !item.creatorId ||
+            item.creatorId.length > 128,
+        )
+      )
+        throw new ArticleDownloadError('所选归档范围无效。', 400, {
+          code: 'XHS_CACHED_SCOPE_INVALID',
+        });
+      // Freeze membership and trusted metadata before the single native selection.
+      // This request grants only these IDs at its selected XHS target; no reusable token.
+      const frozen = await freezeCachedXhsSelection(
+        this.prisma,
+        items as XhsCachedTarget[],
+      );
+      if (controller.signal.aborted) return;
+      const store = this.localStore('xiaohongshu');
+      const settings = await store.read();
+      let directory = settings.directory;
+      if (settings.askEveryTime) {
+        const token = (body as { pickToken?: string }).pickToken;
+        if (token) {
+          if (token !== this.xhsPickerGrant)
+            throw new ArticleDownloadError('请先确认本次保存目录。', 409, { code: 'DIRECTORY_PICK_REQUIRED' });
+        } else {
+          // Older clients retain the original explicit native-picker flow.
+          this.xhsPickerGrant = undefined;
+          this.xhsConfirmedGrant = undefined;
+          this.pickerRunning = true;
+          const selected = await pickArticleDirectory(directory, { platform: 'xiaohongshu', count: frozen.length, signal: controller.signal });
+          if (controller.signal.aborted) return;
+          if (selected === null) return res.json({ results: [], cancelled: true });
+          directory = (await store.rememberPickedDirectory(selected)).directory;
+          this.pickerRunning = false;
+        }
+      }
+      this.xhsPickerGrant = undefined;
+      this.xhsConfirmedGrant = undefined;
+      if (controller.signal.aborted) return;
+      const receipt = await saveFrozenXhsCache(
+        frozen,
+        store,
+        directory,
+        (creator, id) => this.xiaohongshu!.prepareLocalDownload(creator, id),
+        () => controller.signal.aborted,
+      );
+      if (!controller.signal.aborted) {
+        res.setHeader('Cache-Control', 'private, no-store');
+        return res.json(receipt);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) return this.failure(error, res);
+    } finally {
+      req.removeListener('aborted', abort);
+      res.removeListener('close', close);
+      this.pickerRunning = false;
+      this.running = false;
+    }
+  }
+
   @Post('article/xiaohongshu/:noteId/save')
   @HttpCode(200)
   async saveXhsNote(
@@ -683,6 +864,8 @@ export class ArticleDownloadController implements OnModuleDestroy {
     let savedCount = 0;
     let alreadySavedCount = 0;
     let videoCount = 0;
+    let snapshotSavedCount = 0;
+    const snapshotFiles: string[] = [];
     this.running = true;
     try {
       if (
@@ -703,10 +886,10 @@ export class ArticleDownloadController implements OnModuleDestroy {
         (body.pickToken !== undefined && typeof body.pickToken !== 'string')
       )
         throw new ArticleDownloadError('请选择1至100篇完整缓存笔记。', 400);
-      const store = this.localStore();
+      const store = this.localStore('xiaohongshu');
       if (
         (await store.read()).askEveryTime &&
-        (!this.pickerGrant || body.pickToken !== this.pickerGrant)
+        (!this.xhsPickerGrant || body.pickToken !== this.xhsPickerGrant)
       )
         throw new ArticleDownloadError('请先选择本次保存路径。', 409);
       // Validate every selected identity and cached body before creating files.
@@ -720,18 +903,25 @@ export class ArticleDownloadController implements OnModuleDestroy {
         );
       // One native selection grants this bounded batch in the remembered folder.
       // The same global lock also excludes picker and preference changes.
-      this.pickerGrant = undefined;
+      this.xhsPickerGrant = undefined;
+      this.xhsConfirmedGrant = undefined;
       for (const prepare of prepared) {
         const result = await store.save(prepare);
         if (result.alreadySaved) alreadySavedCount++;
         else savedCount++;
         videoCount += result.videoCount || 0;
+        if (result.supplement) {
+          snapshotFiles.push(basename(result.supplement.path));
+          if (result.supplement.status !== 'retained') snapshotSavedCount++;
+        }
       }
       res.setHeader('Cache-Control', 'private, no-store');
       return res.status(200).json({
         saved: true,
         savedCount,
         alreadySavedCount,
+        snapshotSavedCount,
+        snapshotFiles,
         videoCount,
         ...(videoCount
           ? { videoDecoded: false, videoVerification: 'container-and-bytes' }
@@ -810,13 +1000,14 @@ export class ArticleDownloadController implements OnModuleDestroy {
             code: 'XHS_SINGLE_SOURCE_UNCONFIGURED',
           },
         );
-      const store = this.localStore();
+      const store = this.localStore('xiaohongshu');
       if (
         (await store.read()).askEveryTime &&
-        (!this.pickerGrant || body.pickToken !== this.pickerGrant)
+        (!this.xhsPickerGrant || body.pickToken !== this.xhsPickerGrant)
       )
         throw new ArticleDownloadError('请先选择本次保存路径。', 409);
-      this.pickerGrant = undefined;
+      this.xhsPickerGrant = undefined;
+      this.xhsConfirmedGrant = undefined;
       const prepare = prepareXhsSingleDownload(
         url,
         await this.xhsSingleSource.read(url),
@@ -869,13 +1060,15 @@ export class ArticleDownloadController implements OnModuleDestroy {
       this.running = true;
       locked = true;
       if (verified) return this.wechat2RssOnly(res);
-      const store = this.localStore();
+      const store = this.localStore(cachedPrepare ? 'xiaohongshu' : 'wechat');
+      const grant = cachedPrepare ? this.xhsPickerGrant : this.pickerGrant;
       if (
         (await store.read()).askEveryTime &&
-        (!this.pickerGrant || body.pickToken !== this.pickerGrant)
+        (!grant || body.pickToken !== grant)
       )
         return res.status(409).json({ message: '请先选择本次保存路径。' });
-      this.pickerGrant = undefined;
+      if (cachedPrepare) { this.xhsPickerGrant = undefined; this.xhsConfirmedGrant = undefined; }
+      else this.pickerGrant = undefined;
       let prepare = cachedPrepare;
       if (!prepare) {
         try {

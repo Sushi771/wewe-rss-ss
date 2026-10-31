@@ -1,8 +1,8 @@
+import { Modal } from '@web/components/AppOverlays';
 import { FailureNotice } from '@web/components/OperationNotice';
 import {
   Button,
   Input,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,

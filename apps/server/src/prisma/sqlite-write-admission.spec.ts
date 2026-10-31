@@ -1,5 +1,6 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { PrismaClient } from '@prisma/client';
@@ -13,6 +14,7 @@ describe('real application Prisma admission with actual Python backup and SQLite
 
   beforeAll(async () => {
     root = await mkdtemp(path.join(base, 'sqlite-coordinated-test-'));
+    await writeFile(path.join(root,'test.db'),'',{flag:'wx'});
     process.env.DATABASE_URL = `file:${path.join(root, 'test.db').replace(/\\/g, '/')}?connection_limit=1`;
     prisma = new PrismaService();
     await prisma.onModuleInit();

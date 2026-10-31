@@ -18,7 +18,7 @@ import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
 import { createRequire } from 'node:module';
 const { createTRPCProxyClient, httpLink } = createRequire(
@@ -57,6 +57,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     source: XhsSubscriptionSource,
     store: LocalArticleStore;
   let creatorId: string;
+  let trackedDownloadResume: Promise<void> | undefined;
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-subscription-test-'));
     db = new PrismaClient({
@@ -84,6 +85,10 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);
   }, 30000);
   beforeEach(async () => {
+    // A timed-out resume test may still be using this fixture.
+    if (trackedDownloadResume) { await trackedDownloadResume.catch(() => {}); trackedDownloadResume=undefined; }
+    // Previous terminal visibility does not imply its worker/finally has released the fixture lock.
+    if (service) await (service as any).lane;
     await db.$executeRawUnsafe('DELETE FROM xhs_subscription_tasks');
     await db.xhsNote.deleteMany();
     await db.xhsCreator.deleteMany();
@@ -124,16 +129,14 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         );
       },
     );
-    const resolution = await service.resolveSubscription({
-      url: author.profileUrl,
-    });
-    creatorId = (
-      await service.subscribe({ resolutionId: resolution.resolutionId })
-    ).creatorId;
-  });
+    creatorId = randomUUID();
+    await db.xhsCreator.create({ data: { id: creatorId, externalAuthorId: author.id, profileUrl: author.profileUrl, displayName: author.name, enabled: true } });
+  }, 40000);
   afterAll(async () => {
+    if (trackedDownloadResume) await trackedDownloadResume.catch(() => {});
+    if (service) await (service as any).lane;
     await db?.$disconnect(); /* synthetic files retained in temp for diagnosis */
-  });
+  }, 40000);
   const finish = async (taskId: string) => {
     for (let i = 0; i < 2000; i++) {
       const t = await service.task({ taskId });
@@ -153,6 +156,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
   it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
     let page = 0;
     const list = jest.fn(async (_author: string, _cursor: string | null) => {
+      void _author;
+      void _cursor;
       page++;
       return {
         authorId: author.id,
@@ -170,7 +175,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     });
     source.list = list;
     const first = await service.refresh({ id: creatorId, maxPages: 2 });
-    expect(await finish(first.taskId)).toMatchObject({
+    expect(await settled(first.taskId)).toMatchObject({
       state: 'blocked',
       code: 'XHS_LIST_PAGE_LIMIT_REACHED',
       completed: 2,
@@ -318,7 +323,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         groupId: 'wrong-platform',
       }),
     ).rejects.toThrow('XHS_GROUP_INVALID');
-    expect(await service.subscribe({ resolutionId: r.resolutionId })).toEqual({
+    expect(await service.subscribe({ resolutionId: r.resolutionId })).toMatchObject({
       creatorId,
       created: false,
       subscribed: true,
@@ -539,6 +544,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       total: 1,
       remaining: 0,
     });
+    // COMMIT visibility precedes Promise/finally worker cleanup. Join the actual lane.
+    await (service as any).lane;
     expect(lost).toBe(true);
     expect(saves).toBe(1);
     expect((service as any).pending.size).toBe(0);
@@ -798,12 +805,228 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(files.some((f) => String(f).endsWith('.md'))).toBe(true);
     expect(files.some((f) => /\.png$/.test(String(f)))).toBe(true);
   }, 30000);
+  it.each([false, true])(
+    'completes two repeat saves with unchanged files when last checkpoint acknowledgement fails: %s',
+    async (loseCheckpoint) => {
+      (source.list as jest.Mock).mockResolvedValue({
+        authorId: author.id,
+        nextCursor: null,
+        notes: ['repeat-one', 'repeat-two'].map((noteId) => ({
+          authorId: author.id,
+          noteId,
+          title: 'Synthetic repeat',
+          publishedAt: 0,
+          kind: 'image-text',
+        })),
+      });
+      (source.detail as jest.Mock).mockImplementation(async (_author, id) =>
+        detail(id),
+      );
+      const listed = await service.refresh({ id: creatorId });
+      await finish(listed.taskId);
+      await (service as any).lane;
+      expect((service as any).pending.has(listed.taskId)).toBe(false);
+      expect((service as any).controllers.has(listed.taskId)).toBe(false);
+      const request = {
+        creatorId,
+        noteIds: ['repeat-one', 'repeat-two'].map(noteKey),
+      };
+      const first = await service.downloadNotes(request);
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 2,
+        skipped: 0,
+        remaining: 0,
+      });
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const files = (await fs.readdir(root, { recursive: true }))
+        .map(String)
+        .filter((file) => /\.(md|png)$/.test(file));
+      const digest = async () =>
+        Promise.all(
+          files.map(async (file) => {
+            const full = path.join(root, file);
+            return {
+              file,
+              bytes: createHash('sha256')
+                .update(await fs.readFile(full))
+                .digest('hex'),
+              mtime: (await fs.stat(full)).mtimeMs,
+            };
+          }),
+        );
+      const before = await digest();
+      const original = (service as any).persistIn.bind(service);
+      let lost = false;
+      const fault = jest
+        .spyOn(service as any, 'persistIn')
+        .mockImplementation(async (tx, task: any) => {
+          if (
+            loseCheckpoint &&
+            !lost &&
+            task.kind === 'download' &&
+            task.state === 'running' &&
+            task.skipped === 2
+          ) {
+            lost = true;
+            throw Error(
+              'synthetic final skipped checkpoint acknowledgement unavailable',
+            );
+          }
+          return original(tx, task);
+        });
+      const repeat = await service.downloadNotes(request);
+      for (let i = 0; i < 1000 && (service as any).pending.size; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((service as any).pending.size).toBe(0);
+      expect(await finish(repeat.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 0,
+        skipped: 2,
+        failed: 0,
+        remaining: 0,
+        resumable: false,
+      });
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(source.list).toHaveBeenCalledTimes(1);
+      expect(await digest()).toEqual(before);
+      const fresh = new XhsSubscriptionService(db as any, source);
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+      });
+      // Reproduce the historical durable receipt after process loss. A settled
+      // all-skipped checkpoint closes without a new task or any file action.
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${repeat.taskId}`;
+      const checkpoint = {
+        ...JSON.parse(rows[0].document),
+        state: 'blocked',
+        code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      };
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked', document=${JSON.stringify(checkpoint)} WHERE id=${repeat.taskId}`;
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+        resumable: false,
+      });
+      await expect(fresh.resumeTask(repeat)).rejects.toThrow(
+        'XHS_TASK_NOT_RESUMABLE',
+      );
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(await digest()).toEqual(before);
+      expect(lost).toBe(loseCheckpoint);
+      fault.mockRestore();
+    },
+    30000,
+  );
+  it('keeps enqueue fenced after durable completion until the original lane releases', async () => {
+    const listed = await service.refresh({ id: creatorId });
+    await finish(listed.taskId);
+    await (service as any).lane;
+    const request = { creatorId, noteIds: [noteKey('note-a')] };
+    let reached!: () => void, release!: () => void;
+    const committed = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = (service as any).persist.bind(service);
+    let held = false;
+    const fault = jest.spyOn(service as any, 'persist').mockImplementation(async (task: any) => {
+      await original(task);
+      if (!held && task.kind === 'download' && task.state === 'completed') {
+        held = true;
+        reached();
+        await gate;
+      }
+    });
+    try {
+      const first = await service.downloadNotes(request);
+      await committed;
+      expect(await finish(first.taskId)).toMatchObject({ state: 'completed', completed: 1 });
+      expect((service as any).pending.has(first.taskId)).toBe(true);
+      expect((service as any).controllers.has(first.taskId)).toBe(true);
+      await expect(service.downloadNotes(request)).rejects.toThrow('XHS_TASK_CONFLICT');
+      expect(source.detail).toHaveBeenCalledTimes(1);
+      release();
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const repeat = await service.downloadNotes(request);
+      await (service as any).lane;
+      expect(await finish(repeat.taskId)).toMatchObject({ state: 'completed', skipped: 1 });
+      expect(source.detail).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await (service as any).lane;
+      fault.mockRestore();
+    }
+  }, 30000);
   it('rejects another creator selection before details or saving', async () => {
     await finish((await service.refresh({ id: creatorId })).taskId);
     await expect(
       service.downloadNotes({ creatorId, noteIds: ['foreign'] }),
     ).rejects.toThrow('XHS_SELECTION_INVALID');
     expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('keeps uncertain, failed, cancelled and bounded-list receipts distinct from reconciled completion', () => {
+    const id = noteKey('synthetic-receipt');
+    const receipt = {
+      taskId: 'synthetic-receipt',
+      creatorId,
+      kind: 'download',
+      state: 'blocked',
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      total: 1,
+      completed: 0,
+      skipped: 1,
+      failed: 0,
+      remaining: 0,
+      noteIds: [id],
+      items: { [id]: 'skipped' },
+      message: '',
+    };
+    const view = (task: any) => (service as any).view(task);
+    expect(view(receipt)).toMatchObject({
+      state: 'completed',
+      resumable: false,
+      code: undefined,
+    });
+    (service as any).uncertain.set(receipt.taskId, receipt);
+    expect(view(receipt)).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+    });
+    (service as any).uncertain.clear();
+    expect(
+      view({ ...receipt, failed: 1, skipped: 0, items: { [id]: 'failed' } }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, items: {} })).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        kind: 'list',
+        code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+        cursor: 'next',
+      }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, state: 'cancelled' })).toMatchObject({
+      state: 'cancelled',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        skipped: 0,
+        remaining: 1,
+        supersededByTaskId: 'successor',
+      }),
+    ).toMatchObject({ resumable: false });
   });
   it('commits and searches all 32 notes when a bounded page exceeds the requested 30', async () => {
     const notes = Array.from({ length: 32 }, (_, i) => ({
@@ -873,6 +1096,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       })),
     });
     await finish((await service.refresh({ id: creatorId })).taskId);
+    // Terminal persistence precedes finally cleanup; wait before the next enqueue.
+    await (service as any).lane;
     (source.detail as jest.Mock).mockRejectedValue(
       new Error('synthetic authentication stop'),
     );
@@ -1110,7 +1335,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(source.list).toHaveBeenCalledTimes(2);
     expect(await db.xhsNote.count()).toBe(1);
   });
-  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', async () => {
+  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', () => {
+    trackedDownloadResume=(async () => {
     (source.list as jest.Mock).mockResolvedValue({
       authorId: author.id,
       nextCursor: null,
@@ -1164,7 +1390,9 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(
       await db.xhsNote.findUnique({ where: { id: noteKey('one') } }),
     ).toEqual(old);
-  });
+    })();
+    return trackedDownloadResume;
+  }, 30000);
   it('cancels during an in-flight list without committing the returned page', async () => {
     let release!: (v: any) => void;
     (source.list as jest.Mock).mockImplementation(

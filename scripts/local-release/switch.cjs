@@ -197,13 +197,32 @@ async function waitReady(
   throw new Error(`服务 ${port} 启动或 RSS 冒烟超时`);
 }
 
-async function stopOwned(child) {
+async function stopOwned(child, identity) {
   require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
-  if (!child || child.exitCode !== null) return;
+  if (!child) return;
+  if(identity){
+    if(identity.pid!==child.pid)throw Error('OWNED_PROCESS_IDENTITY_CHANGED');
+    if(child.exitCode!==null||typeof child.signalCode==='string')return {...identity,stopped:true};
+    try{return processIdentity('OwnedStop',child.pid,identity.port,identity);}
+    catch(error){await new Promise(setImmediate);if(child.exitCode!==null||typeof child.signalCode==='string')return {...identity,stopped:true};throw error;}
+  }
+  if (child.exitCode !== null) return;
   const closed = once(child, 'close');
   child.kill();
   await closed;
+}
+
+function observeProjectWriters(roots,port){
+  if(!Array.isArray(roots)||!roots.length||roots.length>16||roots.some(pid=>!Number.isSafeInteger(pid)||pid<1))throw Error('LEGACY_MAINTENANCE_PROJECT_ROOTS_UNPROVEN');
+  const started=performance.now(),active=new Map();let queries=0;
+  for(const pid of new Set(roots)){
+    const fact=processIdentity('Tree',pid,port);queries++;
+    if(fact.complete!==true||!Array.isArray(fact.active)||!Array.isArray(fact.portOwners))throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+    for(const row of fact.active)active.set(row.pid,row);
+    for(const row of fact.portOwners)active.set(Number(row.OwningProcess),{pid:Number(row.OwningProcess),listener:true});
+  }
+  return {complete:true,active:[...active.values()],queries,durationMs:performance.now()-started};
 }
 
 function loadProductionEnvironment() {
@@ -652,5 +671,6 @@ module.exports = {
   unusedPort,
   waitReady,
   stopOwned,
+  observeProjectWriters,
   loadProductionEnvironment,
 };

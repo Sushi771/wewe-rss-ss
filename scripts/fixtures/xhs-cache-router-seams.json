@@ -1,0 +1,57 @@
+[
+  {
+    "name": "configureSourceRequestBudget",
+    "before": "configureSourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            scope: z.discriminatedUnion('purpose', [\n              z.object({ purpose: z.literal('resolution') }).strict(),\n              z\n                .object({\n                  purpose: z.literal('original-link'),\n                  creatorId: z.string().min(1).max(128),\n                })\n                .strict(),\n            ]),\n            totalLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          configureXhsSourceBudget(\n            this.prismaService,\n            input.scope,\n            input.totalLimit,\n            input.intervalMs,\n          ),\n        );\n      })",
+    "after": "configureSourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            scope: z.discriminatedUnion('purpose', [\n              z.object({ purpose: z.literal('resolution') }).strict(),\n              z\n                .object({\n                  purpose: z.literal('original-link'),\n                  creatorId: z.string().min(1).max(128),\n                })\n                .strict(),\n            ]),\n            totalLimit: z.number().int().min(1).max(100000).default(100000),\n            intervalMs: z.number().int().min(1000).max(60000).default(5000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          configureXhsSourceBudget(\n            this.prismaService,\n            input.scope,\n            input.totalLimit,\n            input.intervalMs,\n          ),\n        );\n      })"
+  },
+  {
+    "name": "prepareWholeCreatorGeneration",
+    "before": "prepareWholeCreatorGeneration: this.trpcService.protectedProcedure\n      .input(z.object({ jobId:z.string().min(1).max(128), profileUrl:z.string().min(1).max(8192), confirmUnknown:z.literal(true),\n        phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict() }).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareGeneration(input));})",
+    "after": "prepareWholeCreatorGeneration: this.trpcService.protectedProcedure\n      .input(z.object({ jobId:z.string().min(1).max(128), profileUrl:z.string().min(1).max(8192), confirmUnknown:z.literal(true),\n        phaseLimits:z.object({profile:z.number().int().nonnegative(),list:z.number().int().nonnegative(),detail:z.number().int().nonnegative(),media:z.number().int().nonnegative(),metrics:z.number().int().nonnegative()}).strict().default({profile:100000,list:100000,detail:100000,media:100000,metrics:100000}) }).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareGeneration(input));})"
+  },
+  {
+    "name": "startWholeCreator",
+    "before": "startWholeCreator: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorId: z.string().min(1).max(128),\n            requestLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsWhole!.start(input);\n      })",
+    "after": "startWholeCreator: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorId: z.string().min(1).max(128),\n            requestLimit: z.number().int().min(1).max(100000).default(100000),\n            intervalMs: z.number().int().min(1000).max(60000).default(5000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsWhole!.start(input);\n      })"
+  },
+  {
+    "name": "prepareWholeCreatorHistoryGrant",
+    "before": "prepareWholeCreatorHistoryGrant: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorId: z.string().min(1).max(128),\n            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),\n            jobId: z.string().uuid().optional(),\n            requestLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n            phaseLimits: z\n              .object({\n                profile: z.number().int().nonnegative(),\n                list: z.number().int().nonnegative(),\n                detail: z.number().int().nonnegative(),\n                media: z.number().int().nonnegative(),\n                metrics: z.number().int().nonnegative(),\n              })\n              .strict(),\n            confirmHistoryGrant: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareHistoryGrant(input),\n        );\n      })",
+    "after": "prepareWholeCreatorHistoryGrant: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorId: z.string().min(1).max(128),\n            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),\n            jobId: z.string().uuid().optional(),\n            requestLimit: z.number().int().min(1).max(100000).default(100000),\n            intervalMs: z.number().int().min(1000).max(60000).default(5000),\n            phaseLimits: z\n              .object({\n                profile: z.number().int().nonnegative(),\n                list: z.number().int().nonnegative(),\n                detail: z.number().int().nonnegative(),\n                media: z.number().int().nonnegative(),\n                metrics: z.number().int().nonnegative(),\n              })\n              .strict().default({profile:100000,list:100000,detail:100000,media:100000,metrics:100000}),\n            confirmHistoryGrant: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareHistoryGrant(input),\n        );\n      })"
+  },
+  {
+    "name": "refreshFull",
+    "before": null,
+    "after": "refreshFull: this.trpcService.protectedProcedure\n      .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSubscriptions!.refreshFull({ ...input, scope: input.scope === 'selected' ? 'selected' : 'all', basicOnly: true, reuseCompleteCache: true });\n      })"
+  },
+  {
+    "name": "refreshMissingBasic",
+    "before": null,
+    "after": "refreshMissingBasic: this.trpcService.protectedProcedure\n      .input(z.object({id:z.string().min(1).max(128),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSubscriptions!.refreshMissingBasic(input);})"
+  },
+  {
+    "name": "reorderGroups",
+    "before": null,
+    "after": "reorderGroups: this.trpcService.protectedProcedure\n      .input(z.object({\n        ids: z.array(z.string().min(1).max(128)).min(1).max(1000),\n        expectedIds: z.array(z.string().min(1).max(128)).min(1).max(1000),\n      }).strict())\n      .mutation(({ input }) => this.xhs.reorderGroups(input))"
+  },
+  {
+    "name": "resumeWholeCreatorMedia",
+    "before": null,
+    "after": "resumeWholeCreatorMedia: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.resumeMedia(input));})"
+  },
+  {
+    "name": "resumeWholeCreatorMissingBasic",
+    "before": null,
+    "after": "resumeWholeCreatorMissingBasic: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),noteIds:z.array(z.string().min(1).max(300)).min(1).max(1000),bounded:z.literal(true).optional()}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.resumeMissingBasic(input));})"
+  },
+  {
+    "name": "prepareWholeCreatorReviewedContext",
+    "before": null,
+    "after": "prepareWholeCreatorReviewedContext: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),excludedNoteId:z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),confirmUnknownRetry:z.literal(true)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareReviewedContext(input));})"
+  },
+  {
+    "name": "executeWholeCreatorReviewedContext",
+    "before": null,
+    "after": "executeWholeCreatorReviewedContext: this.trpcService.protectedProcedure\n      .input(z.object({jobId:z.string().min(1).max(128),contextId:z.string().regex(/^[a-f0-9]{64}$/),confirmUnknownRetry:z.literal(true)}).strict())\n      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.executeReviewedContext(input));})"
+  }
+]

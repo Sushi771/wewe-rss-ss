@@ -1,3 +1,18 @@
+import { toast } from 'sonner';
+import XhsBatchSubscription from '@web/components/XhsBatchSubscription';
+import type { BatchApi } from '@web/utils/xhs-subscription-batch';
+import XhsCombinedFilter from '@web/components/XhsCombinedFilter';
+import {
+  compileFilter,
+  filterNotes,
+  emptyCombinedFilter,
+  conditionLabel,
+} from '@web/utils/xhs-combined-filter';
+import type { CombinedFilter } from '@web/utils/xhs-combined-filter';
+import { nextMetricOrder, nextTimeOrder, orderNotes } from '@web/utils/xhs-metric-sort';
+import type { MetricKey, MetricOrder } from '@web/utils/xhs-metric-sort';
+import XhsCreatorAvatar from '@web/components/XhsCreatorAvatar';
+import XhsWholeCreator from '@web/components/XhsWholeCreator';
 import {
   ContentExportScope,
   ContentLoadMore,
@@ -5,8 +20,6 @@ import {
   SubscriptionMore,
   SubscriptionToolbar,
   SubscriptionDialog,
-  ContentSortControls,
-  ContentSelectionHeader,
   SubscriptionProgress,
 } from '@web/components/SubscriptionPrimitives';
 import {
@@ -14,7 +27,6 @@ import {
   Checkbox,
   Chip,
   Input,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
@@ -24,7 +36,16 @@ import {
 } from '@nextui-org/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ArticleDateFilter from '@web/components/ArticleDateFilter';
-import ArticleReader from '@web/components/ArticleReader';
+import { noteArchiveStatus } from '@web/utils/xhs-note-presentation';
+import XhsOriginalLink from '@web/components/XhsOriginalLink';
+import type { PrepareXhsLink } from '@web/components/XhsOriginalLink';
+import {
+  XhsMetricLine,
+  XhsNumericFilter,
+  XhsNumericFilterValue,
+  XhsCreatorMetricRefresh,
+} from '@web/components/XhsEngagement';
+import type { XhsCreatorMetric } from '@wewe-rss/shared';
 import type { ArticleDateSelection } from '@web/utils/article-date-selection';
 import { dateSelectionFilter } from '@web/utils/article-date-selection';
 import {
@@ -39,9 +60,10 @@ import { serverOriginUrl } from '@web/utils/env';
 import {
   exportArchiveGroups,
   toggleLoadedSelection,
-  selectedImageNotes,
-  noteReaderHtml,
   taskFinished,
+  canContinueCreatorQueue,
+  withCachedExportSummary,
+  batchVideoWarning,
   mayResumeTask,
   preferredRecoveredTask,
   canAdoptRecoveredTask,
@@ -64,12 +86,17 @@ type DirectoryChoice = SaveSettings & {
   cancelled?: boolean;
   pickToken?: string;
 };
-const localApi = async <T,>(endpoint: string, payload?: object): Promise<T> => {
+const localApi = async <T,>(
+  endpoint: string,
+  payload?: object,
+  signal?: AbortSignal,
+): Promise<T> => {
   const auth = getAuthCode();
   const response = await fetch(
-    `${serverOriginUrl || ''}/download/article${endpoint}`,
+    `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' || endpoint === '/directory-confirm' ? '?target=xiaohongshu' : ''}`,
     {
       method: payload ? 'POST' : 'GET',
+      signal,
       credentials: 'include',
       headers: {
         ...(auth ? { authorization: auth } : {}),
@@ -108,20 +135,37 @@ export default function Xiaohongshu() {
   const disconnectConnection = trpc.xiaohongshu.disconnectSession.useMutation({
     retry: false,
   });
-  const creators = trpc.xiaohongshu.list.useQuery(undefined, { retry: false });
+  const [creatorMetricFilter, setCreatorMetricFilter] = useState<
+    Omit<XhsNumericFilterValue, 'metric'> & { metric?: XhsCreatorMetric }
+  >({});
+  const [noteConditions, setNoteConditions] =
+    useState<CombinedFilter>(emptyCombinedFilter);
+  const compiledConditions = useMemo(
+    () => compileFilter(noteConditions),
+    [noteConditions],
+  );
+  const validCreatorRange =
+    creatorMetricFilter.min === undefined ||
+    creatorMetricFilter.max === undefined ||
+    creatorMetricFilter.min <= creatorMetricFilter.max;
+  const validNoteRange = compiledConditions.valid;
+  const creators = trpc.xiaohongshu.list.useQuery(creatorMetricFilter, {
+    retry: false,
+    enabled: validCreatorRange,
+  });
+  const allCreators = trpc.xiaohongshu.list.useQuery(undefined, { retry: false });
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
-  const [readingCreatorId, setReadingCreatorId] = useState('');
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false);
+  const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
   const queuedDownloads = useRef<
-    Array<{ creatorId: string; noteIds: string[] }>
+    Array<{ creatorId: string; noteIds: string[]; confirmedDirectory?: string }>
   >([]);
+  const batchPartialCreators = useRef<string[]>([]);
   const nextDownloadRef = useRef<
-    (job: { creatorId: string; noteIds: string[] }) => Promise<void>
+    (job: { creatorId: string; noteIds: string[]; confirmedDirectory?: string }) => Promise<void>
   >(async () => {});
   const [taskCreatorId, setTaskCreatorId] = useState('');
-  const [noteId, setNoteId] = useState('');
-  const [readerFindOpen, setReaderFindOpen] = useState(false);
-  useEffect(() => setReaderFindOpen(false), [noteId]);
   const [loadedCount, setLoadedCount] = useState(20);
   const [exportOpen, setExportOpen] = useState(false);
   const [exportScope, setExportScope] = useState<
@@ -150,18 +194,56 @@ export default function Xiaohongshu() {
     () => utils.client.xiaohongshu,
     [utils.client],
   );
-  const taskApiRef = useRef({ subscriptionApi, utils });
-  taskApiRef.current = { subscriptionApi, utils };
+  // Adapt the in-development cache collection contract at one boundary.
+  const fullCollectionApi = subscriptionApi as typeof subscriptionApi & {
+    refreshFull: { mutate: (input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[] }) => Promise<TaskReceipt> };
+    refreshMissingBasic: { mutate: (input: { id:string; noteIds:string[] }) => Promise<TaskReceipt | {state:'nothing-missing'}> };
+  };
+  const prepareOriginalLink = useCallback<PrepareXhsLink>(
+    (input) => {
+      const client = subscriptionApi as typeof subscriptionApi & {
+        prepareOriginalLink: {
+          mutate: (input: {
+            noteId: string;
+            refreshContext?: boolean;
+          }) => ReturnType<PrepareXhsLink>;
+        };
+      };
+      return client.prepareOriginalLink.mutate({
+        noteId: input.noteId,
+        ...(input.refreshContext ? { refreshContext: true } : {}),
+      });
+    },
+    [subscriptionApi],
+  );
+  const showSourceSettings = () => {
+    if (sourceSettingsRef.current) {
+      sourceSettingsRef.current.open = true;
+      sourceSettingsRef.current.scrollIntoView({ block: 'nearest' });
+    }
+  };
+  const taskApiRef = useRef({ subscriptionApi, utils, fullCollectionApi, taskCreatorId });
+  taskApiRef.current = { subscriptionApi, utils, fullCollectionApi, taskCreatorId };
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
   const [operationError, setOperationError] = useState('');
   const [busy, setBusy] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [batchOpen, setBatchOpen] = useState(false);
   const [managing, setManaging] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [folderFilter, setFolderFilter] = useState('all');
   const [selectedCreators, setSelectedCreators] = useState<string[]>([]);
-  const [direction, setDirection] = useState<'asc' | 'desc'>('desc');
+  const [metricOrder, setMetricOrder] = useState<MetricOrder>(null);
+  const sortMetric = (metric: MetricKey) => {
+    if (!active.current) {
+      setMetricOrder((value) => nextMetricOrder(value, metric));
+      setTimeOrder(null);
+      setLoadedCount(20);
+    }
+  };
+  const [timeOrder, setTimeOrder] = useState<'asc' | 'desc' | null>(null);
+  const direction = timeOrder ?? 'desc';
   const [search, setSearch] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [dateSelection, setDateSelection] = useState<ArticleDateSelection>({
@@ -172,12 +254,12 @@ export default function Xiaohongshu() {
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !noteId && !adding && !exportOpen)
+      if (event.key === 'Escape' && !adding && !exportOpen)
         setSearchOpen(false);
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [noteId, adding, exportOpen]);
+  }, [adding, exportOpen]);
   const parsedDates = useMemo(
     () => articleFilterSchema.safeParse(dateSelectionFilter(dateSelection)),
     [dateSelection],
@@ -186,39 +268,69 @@ export default function Xiaohongshu() {
     ? undefined
     : parsedDates.error.issues[0]?.message;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [xhsExportFormat, setXhsExportFormat] = useState<'obsidian' | 'zip'>('obsidian');
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
+  const [confirmDirectory, setConfirmDirectory] = useState<string | null>(null);
+  const directoryConfirm = useRef<((confirmed: boolean) => void) | null>(null);
+  useEffect(() => () => { directoryConfirm.current?.(false); directoryConfirm.current = null; }, []);
+  const authorizeConfirmedDirectory = async (directory: string) => {
+    const result = await localApi<DirectoryChoice>('/directory-confirm', { directory });
+    setSaveSettings({ directory: result.directory, askEveryTime: result.askEveryTime });
+    setDirectory(result.directory);
+    return { pickToken: result.pickToken };
+  };
+  const chooseConfirmedDirectory = async (): Promise<{ cancelled?: boolean; pickToken?: string }> => {
+    const settings = await localApi<SaveSettings>('/settings');
+    if (directoryConfirm.current) throw new Error('已有保存目录确认正在进行。');
+    const confirmed = await new Promise<boolean>(resolve => { directoryConfirm.current = resolve; setConfirmDirectory(settings.directory); });
+    if (!confirmed) return { cancelled: true };
+    return authorizeConfirmedDirectory(settings.directory);
+  };
+  const finishDirectoryConfirmation = (confirmed: boolean) => {
+    const resolve = directoryConfirm.current;
+    directoryConfirm.current = null;
+    setConfirmDirectory(null);
+    resolve?.(confirmed);
+  };
+  const cacheExportController = useRef<AbortController | null>(null);
+  const cacheExportSummary = useRef('');
+  const [cacheExporting, setCacheExporting] = useState(false);
+  useEffect(() => () => cacheExportController.current?.abort(), []);
   const active = useRef(false);
 
   const [recoveredTasks, setRecoveredTasks] = useState<RecoveredTask[]>([]);
   const [recoveryLoading, setRecoveryLoading] = useState(true);
   const [recoveryError, setRecoveryError] = useState(false);
-  const [recoveryOpen, setRecoveryOpen] = useState(true);
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
   const activityGeneration = useRef(0);
   const recoveryAttempted = useRef(false);
   const recoveryRequest = useRef(0);
   const readRecentRef = useRef<() => Promise<void>>(async () => {});
-  const adoptRecoveredTask = useCallback((record: RecoveredTask) => {
-    if (active.current) return;
-    activityGeneration.current++;
-    recoveryAttempted.current = true;
-    queuedCreators.current = [];
-    queuedDownloads.current = [];
-    lastTaskId.current = record.taskId;
-    setTaskCreatorId(record.creatorId);
-    setTask(record);
-    setZipProgress(null);
-    setOperationError('');
-    setProgressOpen(true);
-    cancelPending.current = false;
-    setCancelling(false);
-    const watching = !taskFinished(record) || taskSettling(record);
-    taskRunning.current = watching;
-    active.current = watching;
-    setBusy(watching);
-    setTaskId(watching ? record.taskId : '');
-    setMessage('已找回本地任务记录。继续未完成内容需要明确点击。');
-  }, []);
+  const adoptRecoveredTask = useCallback(
+    (record: RecoveredTask, expand = true) => {
+      if (active.current) return;
+      activityGeneration.current++;
+      recoveryAttempted.current = true;
+      queuedCreators.current = [];
+      queuedDownloads.current = [];
+      lastTaskId.current = record.taskId;
+      setTaskCreatorId(record.creatorId);
+      setTask(record);
+      setZipProgress(null);
+      setOperationError('');
+      setProgressOpen(expand);
+      cancelPending.current = false;
+      setCancelling(false);
+      const watching = !taskFinished(record) || taskSettling(record);
+      taskRunning.current = watching;
+      active.current = watching;
+      setBusy(watching);
+      setTaskId(watching ? record.taskId : '');
+      setMessage('已找回本地任务记录。继续未完成内容需要明确点击。');
+    },
+    [],
+  );
   const readRecentTasks = useCallback(async () => {
     const request = ++recoveryRequest.current;
     const generation = activityGeneration.current;
@@ -241,7 +353,7 @@ export default function Xiaohongshu() {
         })
       ) {
         recoveryAttempted.current = true;
-        if (chosen) adoptRecoveredTask(chosen);
+        if (chosen) adoptRecoveredTask(chosen, false);
       }
     } catch {
       if (request === recoveryRequest.current) setRecoveryError(true);
@@ -278,7 +390,7 @@ export default function Xiaohongshu() {
     }
   };
   const startTask = useCallback(
-    (receipt: TaskReceipt, kind: 'list' | 'download', total = 0) => {
+    (receipt: TaskReceipt, kind: 'list' | 'download', total = 0, collecting = false) => {
       if (!receipt.taskId)
         throw new Error('未收到任务编号，请重新读取页面确认操作结果。');
       activityGeneration.current++;
@@ -293,6 +405,7 @@ export default function Xiaohongshu() {
         skipped: 0,
         failed: 0,
         remaining: total,
+        ...(collecting ? { collectDetails: true, collectionStage: 'listing' as const } : {}),
       });
       setProgressOpen(true);
       setTaskCreatorId(receipt.creatorId || '');
@@ -337,55 +450,32 @@ export default function Xiaohongshu() {
     ...dateSelectionFilter(dateSelection),
   };
   const notes = trpc.xiaohongshu.notes.useQuery(notesInput, {
-    enabled: !dateError,
+    enabled: !dateError && validNoteRange,
     retry: false,
   });
-  const body = trpc.xiaohongshu.body.useQuery(
-    { creatorId: readingCreatorId, noteId },
-    { enabled: !!readingCreatorId && !!noteId, retry: false },
-  );
-  const readerHtml = useMemo(
-    () => (body.data ? noteReaderHtml(body.data) : ''),
-    [body.data],
-  );
   const visibleNotes = useMemo(
     () =>
-      dateError
+      dateError || !validNoteRange
         ? []
-        : [...(notes.data?.items || [])].sort((a, b) => {
-            if (!a.publishTime || !b.publishTime)
-              return a.publishTime
-                ? -1
-                : b.publishTime
-                  ? 1
-                  : a.id.localeCompare(b.id);
-            return (
-              (direction === 'asc'
-                ? a.publishTime - b.publishTime
-                : b.publishTime - a.publishTime) || a.id.localeCompare(b.id)
-            );
-          }),
-    [dateError, notes.data, direction],
+        : orderNotes(
+            filterNotes(notes.data?.items || [], compiledConditions),
+            metricOrder,
+            direction,
+          ),
+    [
+      dateError,
+      validNoteRange,
+      notes.data,
+      metricOrder,
+      direction,
+      compiledConditions,
+    ],
   );
   const loadedNotes = visibleNotes.slice(0, loadedCount);
-  const selectableNotes = loadedNotes.filter(
-    (note) => note.kind === 'image-text' || note.status === 'complete',
-  );
-  const selectedNotes = selectedImageNotes(visibleNotes, selectedIds);
+  const selectableNotes = loadedNotes;
   const selectedArchives = visibleNotes.filter(
     (note) => selectedIds.has(note.id) && note.status === 'complete',
   );
-  const noteStatus = (note: {
-    status: string;
-    kind: 'image-text' | 'video';
-  }) =>
-    note.status === 'complete'
-      ? note.kind === 'video'
-        ? '视频已保存（播放未验证）'
-        : '图文已保存'
-      : note.kind === 'video' || note.status === 'video-skipped'
-        ? '视频未归档'
-        : '正文或图片未归档';
   const allArchiveNotes = trpc.xiaohongshu.notes.useQuery(
     { creatorId: creatorId || undefined },
     { enabled: exportOpen && exportScope === 'all', retry: false },
@@ -397,6 +487,10 @@ export default function Xiaohongshu() {
           ? allArchiveNotes.data?.items
           : visibleNotes
         )?.filter((note) => note.status === 'complete').length;
+  const savePreviewNotes = (exportScope === 'selected' ? visibleNotes.filter(note => selectedIds.has(note.id)) :
+    exportScope === 'all' ? allArchiveNotes.data?.items : visibleNotes)?.filter(note => note.kind === 'image-text' || note.status === 'complete');
+  const savePreviewCount = savePreviewNotes?.length;
+  const effectiveExportCount = xhsExportFormat === 'obsidian' ? savePreviewCount : exportPreviewCount;
   const allSelected =
     selectableNotes.length > 0 &&
     selectableNotes.every((note) => selectedIds.has(note.id));
@@ -404,11 +498,12 @@ export default function Xiaohongshu() {
   const remove = trpc.xiaohongshu.remove.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation({ retry: false });
+  const reorderGroups = trpc.xiaohongshu.reorderGroups.useMutation({ retry: false });
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
   useEffect(() => {
     if (!taskId) return;
-    const { subscriptionApi, utils } = taskApiRef.current;
+    const { subscriptionApi, utils, fullCollectionApi, taskCreatorId } = taskApiRef.current;
     const controller = new AbortController();
     void watchSubscriptionTask({
       taskId,
@@ -419,7 +514,7 @@ export default function Xiaohongshu() {
         setOperationError('');
         if (taskFinished(next) && !taskSettling(next)) {
           const nextDownload =
-            next.state === 'completed'
+            canContinueCreatorQueue(next) && next.state === 'completed'
               ? queuedDownloads.current.shift()
               : undefined;
           if (nextDownload) {
@@ -429,30 +524,33 @@ export default function Xiaohongshu() {
               active.current = false;
               setTaskId('');
               setBusy(false);
-              setOperationError(
-                failureMessage(cause, '下一位博主的保存未开始。'),
-              );
+              setOperationError(failureMessage(cause, '下一位博主的保存未开始。'));
+              setMessage(withCachedExportSummary(cacheExportSummary.current, '后续保存未开始，请检查任务状态。'));
+              cacheExportSummary.current = '';
             });
             void utils.xiaohongshu.notes.invalidate();
             return;
           }
           queuedDownloads.current = [];
+          const videoPartial = next.state === 'partial' && next.collectionStage === 'details' && next.code === 'XHS_VIDEO_CACHE_UNAVAILABLE';
+          if (videoPartial && queuedCreators.current.length) batchPartialCreators.current.push(taskCreatorId);
           const nextCreator =
-            next.state === 'completed'
+            canContinueCreatorQueue(next)
               ? queuedCreators.current.shift()
               : undefined;
           if (nextCreator) {
-            void subscriptionApi.refresh
-              .mutate({ id: nextCreator, maxPages: 2 })
-              .then((receipt) => startTask(receipt, 'list'))
+            void fullCollectionApi.refreshFull
+              .mutate({ id: nextCreator, scope: 'recent' })
+              .then((receipt) => startTask(receipt, 'list', 0, true))
               .catch((cause) => {
                 queuedCreators.current = [];
                 taskRunning.current = false;
                 active.current = false;
                 setBusy(false);
-                setOperationError(
-                  failureMessage(cause, '下一位博主列表更新未开始。'),
-                );
+                setOperationError(failureMessage(cause, '下一位博主采集未开始。'));
+                setMessage(batchVideoWarning(batchPartialCreators.current.length));
+                batchPartialCreators.current = [];
+
               });
             void utils.xiaohongshu.list.invalidate();
             void utils.xiaohongshu.notes.invalidate();
@@ -465,7 +563,10 @@ export default function Xiaohongshu() {
           cancelPending.current = false;
           setCancelling(false);
           setBusy(false);
-          setMessage(taskText(next));
+          const partialCount = batchPartialCreators.current.length;
+          setMessage(withCachedExportSummary(cacheExportSummary.current, [taskText(next), batchVideoWarning(partialCount)].filter(Boolean).join(' ')));
+          cacheExportSummary.current = '';
+          batchPartialCreators.current = [];
           void readRecentRef.current();
           void utils.xiaohongshu.list.invalidate();
           void utils.xiaohongshu.notes.invalidate();
@@ -484,18 +585,10 @@ export default function Xiaohongshu() {
     run(async () => {
       if (!task || !mayResumeTask(task) || !lastTaskId.current) return;
       let pickToken: string | undefined;
-      if (task.kind === 'download' && saveSettings?.askEveryTime) {
-        const chosen = await localApi<DirectoryChoice>('/directory', {});
-        if (chosen.cancelled) {
-          setMessage('已取消续跑目录选择，原任务保留。');
-          return;
-        }
+      if (task.kind === 'download') {
+        const chosen = await chooseConfirmedDirectory();
+        if (chosen.cancelled) { setMessage('已取消保存，原任务未改变。'); return; }
         pickToken = chosen.pickToken;
-        setSaveSettings({
-          directory: chosen.directory,
-          askEveryTime: chosen.askEveryTime,
-        });
-        setDirectory(chosen.directory);
       }
       const previousTaskId = lastTaskId.current;
       const receipt = await subscriptionApi.resumeTask
@@ -531,7 +624,7 @@ export default function Xiaohongshu() {
       setRecoveredTasks((previous) =>
         previous.filter((record) => record.taskId !== previousTaskId),
       );
-      startTask(receipt, task.kind, task.total);
+      startTask(receipt, task.kind, task.total, task.collectDetails === true || !!task.collectionStage);
       void readRecentRef.current();
     });
   const handleCancelTask = async () => {
@@ -559,7 +652,6 @@ export default function Xiaohongshu() {
       !creators.data.items.some((creator) => creator.id === creatorId)
     ) {
       setCreatorId('');
-      setNoteId('');
       setSelectedIds(new Set());
     }
   }, [creators.data, creatorId]);
@@ -576,10 +668,9 @@ export default function Xiaohongshu() {
         queuedCreators.current = [];
         queuedDownloads.current = [];
       }
-      setMessage(
-        failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') +
-          '已有归档保留。',
-      );
+      setMessage(withCachedExportSummary(cacheExportSummary.current,
+        failureMessage(cause, '操作未完成，请检查服务设置或本机保存目录。') + '已有归档保留。'));
+      cacheExportSummary.current = '';
       setOperationError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       if (!taskRunning.current) {
@@ -591,7 +682,6 @@ export default function Xiaohongshu() {
   const selectCreator = (id: string) => {
     if (active.current) return;
     setCreatorId(id);
-    setNoteId('');
     setLoadedCount(20);
     setExportOpen(false);
     setZipProgress(null);
@@ -622,12 +712,24 @@ export default function Xiaohongshu() {
       return next;
     });
   };
-  const updateCreator = async (id: string) => {
-    setSelectedIds(new Set());
-    startTask(
-      await subscriptionApi.refresh.mutate({ id, maxPages: 2 }),
-      'list',
-    );
+  const updateCreator = async (id: string, scope: 'recent' | 'all' | 'selected' = 'recent', noteIds?: string[]) => {
+    const receipt = await fullCollectionApi.refreshFull.mutate({ id, scope, ...(scope === 'selected' ? { noteIds } : {}) });
+    startTask(receipt, 'list', 0, true);
+  };
+  const handleScopedUpdate = (scope: 'all' | 'selected') => {
+    if (!current || !current.enabled) { setMessage('请先选择并启用博主。'); return; }
+    if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('来源尚未就绪，请在来源设置中恢复会话或处理平台限制后再更新。'); return; }
+    const ids = visibleNotes.filter(note => note.creatorId === current.id && selectedIds.has(note.id)).map(note => note.id);
+    if (scope === 'selected' && !ids.length) { setMessage('请先选择要更新的笔记。'); return; }
+    if (ids.length > 1000) { setMessage('所选笔记超过单次上限，请缩小范围。'); return; }
+    void run(async () => { await updateCreator(current.id, scope, scope === 'selected' ? ids : undefined); });
+  };
+  const handleMissingBasic = () => {
+    if (!current || !current.enabled) { setMessage('请先选择已启用的账号。'); return; }
+    if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('请先核对来源会话及平台限制。'); return; }
+    const ids=visibleNotes.filter(note=>note.creatorId===current.id && selectedIds.has(note.id)).map(note=>note.id);
+    if (!ids.length || ids.length>1000) { setMessage('请选择不超过 1000 篇笔记。'); return; }
+    void run(async()=>{const receipt=await fullCollectionApi.refreshMissingBasic.mutate({id:current.id,noteIds:ids});if('taskId' in receipt)startTask(receipt,'list',0,true);else setMessage('所选笔记的基础字段已齐全，未发起采集。');});
   };
   const handleRefreshAll = () =>
     run(async () => {
@@ -635,6 +737,7 @@ export default function Xiaohongshu() {
         .filter((creator) => creator.enabled)
         .map((creator) => creator.id);
       if (!ids.length) return;
+      batchPartialCreators.current = [];
       queuedCreators.current = ids.slice(1);
       await updateCreator(ids[0]);
     });
@@ -658,30 +761,18 @@ export default function Xiaohongshu() {
         ...(subscriptionGroup && !resolution.existingCreatorId
           ? { groupId: subscriptionGroup }
           : {}),
-      });
-      if (result.subscribed !== true)
-        throw new Error('订阅尚未确认，请重新读取博主列表。');
-      setMessage(
-        result.created
-          ? '订阅成功，正在读取笔记列表。'
-          : '已订阅此博主，可更新笔记列表。',
-      );
-      await utils.xiaohongshu.list.invalidate();
-      setCreatorId(result.creatorId);
-      setNoteId('');
-      setSelectedIds(new Set());
-      setFolderFilter('all');
-      setProfileUrl('');
-      setResolution(null);
-      setAdding(false);
-      if (result.created) {
-        try {
-          await updateCreator(result.creatorId);
-        } catch (cause) {
-          setMessage('订阅已保存，笔记列表暂未读取。可稍后更新列表。');
-          setOperationError(failureMessage(cause, '列表更新未开始。'));
-        }
+      }) as Awaited<ReturnType<typeof subscriptionApi.subscribe.mutate>> & { collection?: TaskReceipt; collectionError?: string };
+      if (result.subscribed !== true) throw new Error('订阅尚未确认，请重新读取博主列表。');
+      setCreatorId(result.creatorId); setSelectedIds(new Set()); setFolderFilter('all');
+      setProfileUrl(''); setResolution(null); setAdding(false);
+      if (result.collection?.taskId) {
+        setMessage('已订阅，正在采集内容。');
+        startTask(result.collection, 'list', 0, true);
+      } else {
+        setMessage('订阅已保存，采集尚未开始，请检查来源状态后更新本号。');
+        if (result.collectionError) setOperationError(failureMessage(new Error(result.collectionError), '采集未开始。'));
       }
+      await utils.xiaohongshu.list.invalidate().catch(() => setOperationError('博主列表暂未刷新，请稍后重试。'));
     });
   const handleDownload = () =>
     run(async () => {
@@ -691,7 +782,13 @@ export default function Xiaohongshu() {
       const allScope = { creatorId: creatorId || undefined };
       const scope = exportScope;
       const selectedSnapshot = [...selectedArchives];
-      const filterSnapshot = { ...notesInput };
+      const combinationSnapshot = compiledConditions;
+      const filterSnapshot = {
+        ...notesInput,
+        ...(notes.data?.queryVersion
+          ? { queryVersion: notes.data.queryVersion }
+          : {}),
+      };
       setExportOpen(false);
       setTask(null);
       setProgressOpen(true);
@@ -699,14 +796,23 @@ export default function Xiaohongshu() {
       let completed = 0;
       let total = 0;
       try {
+        const exportFilter = scope === 'all' ? allScope : filterSnapshot;
+        const freshScope =
+          scope === 'selected'
+            ? undefined
+            : await utils.client.xiaohongshu.notes.query(exportFilter);
+        const exportSnapshot = {
+          ...exportFilter,
+          ...(freshScope?.queryVersion
+            ? { queryVersion: freshScope.queryVersion }
+            : {}),
+        };
         const candidates =
           scope === 'selected'
             ? selectedSnapshot
-            : (
-                await utils.client.xiaohongshu.notes.query(
-                  scope === 'all' ? allScope : filterSnapshot,
-                )
-              ).items;
+            : scope === 'filtered'
+              ? filterNotes(freshScope!.items, combinationSnapshot)
+              : freshScope!.items;
         if (controller.signal.aborted) {
           setZipProgress({ completed, total, state: 'cancelled' });
           return;
@@ -720,8 +826,10 @@ export default function Xiaohongshu() {
         const result = await exportArchiveGroups({
           notes: candidates.filter((note) => note.status === 'complete'),
           signal: controller.signal,
-          send: (creatorId, noteIds) =>
-            exportNotes.mutateAsync({ creatorId, noteIds }),
+          // The owner partitions filenames; the query version belongs to the
+          // entire confirmed scope, including a mixed-author selection.
+          send: (_creatorId, noteIds) =>
+            exportNotes.mutateAsync({ ...exportSnapshot, noteIds }),
           save: (receipt, part, parts, authorId, authors) => {
             const bytes = Uint8Array.from(atob(receipt.base64), (char) =>
               char.charCodeAt(0),
@@ -770,27 +878,15 @@ export default function Xiaohongshu() {
   const startDownloadJob = async (job: {
     creatorId: string;
     noteIds: string[];
+    confirmedDirectory?: string;
   }) => {
     if (!saveSettings) throw new Error('请先读取本机保存设置。');
-    let pickToken: string | undefined;
-    if (saveSettings.askEveryTime) {
-      const chosen = await localApi<DirectoryChoice>('/directory', {});
-      if (chosen.cancelled) {
-        queuedDownloads.current = [];
-        taskRunning.current = false;
-        active.current = false;
-        setTaskId('');
-        setBusy(false);
-        setMessage('已取消目录选择，未开始后续保存。');
-        return;
-      }
-      pickToken = chosen.pickToken;
-      setSaveSettings({
-        directory: chosen.directory,
-        askEveryTime: chosen.askEveryTime,
-      });
-      setDirectory(chosen.directory);
+    const chosen = job.confirmedDirectory ? await authorizeConfirmedDirectory(job.confirmedDirectory) : await chooseConfirmedDirectory();
+    if ('cancelled' in chosen && chosen.cancelled) {
+      queuedDownloads.current = []; taskRunning.current = false; active.current = false;
+      setTaskId(''); setBusy(false); setMessage('已取消保存，未开始下载。'); return;
     }
+    const pickToken = chosen.pickToken;
     const receipt = await subscriptionApi.downloadNotes.mutate({
       creatorId: job.creatorId,
       noteIds: job.noteIds,
@@ -799,10 +895,106 @@ export default function Xiaohongshu() {
     startTask(receipt, 'download', job.noteIds.length);
   };
   nextDownloadRef.current = startDownloadJob;
-  const handleLocalSave = (archivedOnly = false) =>
+  const handleLocalSave = (archivedOnly = false, scope: 'selected' | 'filtered' | 'all' = 'selected', confirmedDirectory?: string, confirmedIds?: string[]) =>
     run(async () => {
-      const targets = archivedOnly ? selectedArchives : selectedNotes;
+      cacheExportSummary.current = '';
+      let targets = archivedOnly ? selectedArchives : visibleNotes.filter(note => selectedIds.has(note.id) && (note.kind === 'image-text' || note.status === 'complete'));
+      if (!archivedOnly && scope !== 'selected') {
+        const result = await utils.client.xiaohongshu.notes.query(scope === 'all' ? { creatorId: creatorId || undefined } : notesInput);
+        const matching = scope === 'filtered' ? filterNotes(result.items, compiledConditions) : result.items;
+        targets = matching.filter(note => note.kind === 'image-text' || note.status === 'complete');
+      }
+      if (confirmedIds && (targets.length !== confirmedIds.length || targets.some(note => !confirmedIds.includes(note.id)))) throw Error('导出范围已变化，请重新确认。');
       if (!saveSettings || !targets.length) return;
+      if (archivedOnly || targets.some(note => note.status === 'complete')) {
+        const cachedTargets = archivedOnly ? targets : targets.filter(note => note.status === 'complete');
+        let cacheFailed = false;
+        const items = cachedTargets.map((note) => ({
+          id: note.id,
+          creatorId: note.creatorId,
+        }));
+        if (items.length > 5000)
+          throw Error('单次最多导出 5000 篇，请缩小所选范围。');
+        const chosen = confirmedDirectory ? await authorizeConfirmedDirectory(confirmedDirectory) : await chooseConfirmedDirectory();
+        if ('cancelled' in chosen && chosen.cancelled) { setMessage('已取消保存，未开始导出。'); return; }
+        const controller = new AbortController();
+        cacheExportController.current = controller;
+        setCacheExporting(true);
+        setMessage(`正在保存 ${items.length} 篇已选归档，仅使用缓存。`);
+        try {
+          const receipt = await localApi<{
+            results: Array<{
+              id: string;
+              saved?: { alreadySaved: boolean; status?: string };
+              error?: string;
+            }>;
+            cancelled: boolean;
+          }>('/xiaohongshu/cache-export', { items, pickToken: chosen.pickToken }, controller.signal);
+          if (
+            !receipt ||
+            typeof receipt.cancelled !== 'boolean' ||
+            !Array.isArray(receipt.results) ||
+            receipt.results.length > items.length ||
+            receipt.results.some(
+              (result, index) =>
+                result.id !== items[index].id ||
+                (!result.saved && !result.error) ||
+                Boolean(result.saved && result.error) ||
+                (result.error && typeof result.error !== 'string') ||
+                (result.saved &&
+                  (typeof result.saved.alreadySaved !== 'boolean' ||
+                    (result.saved.status !== undefined &&
+                      !['new', 'skipped', 'repaired'].includes(result.saved.status)))),
+            ) ||
+            (!receipt.cancelled && receipt.results.length !== items.length)
+          )
+            throw Error('缓存保存回执不完整，请先检查目录；不会自动重试。');
+          const saved = receipt.results.filter(
+            (result) => result.saved && !result.error,
+          );
+          const failed = receipt.results.filter((result) => result.error);
+          cacheFailed = receipt.cancelled || failed.length > 0;
+          if (!cacheFailed && !archivedOnly && targets.length > cachedTargets.length) cacheExportSummary.current = `已确认缓存阶段 ${saved.length}/${items.length} 篇。`;
+          const missing = failed.filter((result) =>
+            [
+              'XHS_CACHED_ARTICLE_UNAVAILABLE',
+              'VERIFIED_ARTICLE_UNAVAILABLE',
+              'XHS_CACHED_VIDEO_UNAVAILABLE',
+              'XHS_CACHED_VIDEO_INVALID',
+            ].includes(result.error!),
+          ).length;
+          setMessage(
+            `${receipt.cancelled ? '已取消：' : ''}新增 ${saved.filter((result) => !result.saved!.alreadySaved && result.saved!.status !== 'repaired').length} · 跳过 ${saved.filter((result) => result.saved!.alreadySaved && result.saved!.status !== 'repaired').length} · 补齐 ${saved.filter((result) => result.saved!.status === 'repaired').length} · 失败 ${failed.length}${missing ? `（${missing} 篇缓存正文或图片不完整）` : ''}。已有文件保留。`,
+          );
+          if (failed.length)
+            setOperationError(
+              failed
+                .map(
+                  (result) =>
+                    `${cachedTargets.find((note) => note.id === result.id)?.title || '笔记'}：${['XHS_CACHED_ARTICLE_UNAVAILABLE', 'VERIFIED_ARTICLE_UNAVAILABLE', 'XHS_CACHED_VIDEO_UNAVAILABLE', 'XHS_CACHED_VIDEO_INVALID'].includes(result.error!) ? '缓存正文或图片不完整' : '保存未完成，请检查本机目录或磁盘空间'}`,
+                )
+                .join('；'),
+            );
+        } catch (error) {
+          cacheFailed = true;
+          setMessage(
+            controller.signal.aborted
+              ? '已停止后续保存；本次结果未完全确认，请检查目录，不会自动重试。'
+              : '保存回执未确认，请先检查目录；不会自动重试。',
+          );
+          if (!controller.signal.aborted)
+            setOperationError(
+              error instanceof Error ? error.message : String(error),
+            );
+        } finally {
+          if (cacheExportController.current === controller)
+            cacheExportController.current = null;
+          setCacheExporting(false);
+        }
+        if (archivedOnly || cacheFailed) return;
+        targets = targets.filter(note => note.status !== 'complete');
+        if (!targets.length) return;
+      }
       const byAuthor = new Map<string, string[]>();
       for (const note of targets) {
         const ids = byAuthor.get(note.creatorId) || [];
@@ -812,6 +1004,7 @@ export default function Xiaohongshu() {
       const jobs = [...byAuthor].map(([creatorId, noteIds]) => ({
         creatorId,
         noteIds,
+        ...(confirmedDirectory ? { confirmedDirectory } : {}),
       }));
       queuedDownloads.current = jobs.slice(1);
       await startDownloadJob(jobs[0]);
@@ -858,7 +1051,6 @@ export default function Xiaohongshu() {
     });
   const invalidateFolders = async () => {
     setSelectedIds(new Set());
-    setNoteId('');
     await Promise.all([
       utils.xiaohongshu.groups.invalidate(),
       utils.xiaohongshu.list.invalidate(),
@@ -867,7 +1059,16 @@ export default function Xiaohongshu() {
   };
   return (
     <main className="feed-workspace" aria-label="小红书博主与笔记管理">
-      <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+      <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
+        {current && (
+          <XhsCreatorAvatar
+            url={
+              (current as typeof current & { avatarUrl?: string | null })
+                .avatarUrl
+            }
+            name={current.displayName}
+          />
+        )}
         <label className="min-w-0 flex-1 text-xs text-neutral-500">
           当前博主
           <select
@@ -900,8 +1101,17 @@ export default function Xiaohongshu() {
             if (!active.current) setMobileSidebarOpen(!mobileSidebarOpen);
           }}
         >
-          {mobileSidebarOpen ? '收起管理' : '管理博主'}
+          {mobileSidebarOpen ? '收起管理' : '管理与分组'}
         </Button>
+        {folderFilter !== 'all' && (
+          <span className="feed-active-group text-xs" role="status">
+            分组：
+            {folderFilter === 'ungrouped'
+              ? '未分组'
+              : groups.data?.items.find((folder) => folder.id === folderFilter)
+                  ?.name}
+          </span>
+        )}
       </div>
       <aside
         id="xiaohongshu-management-sidebar"
@@ -947,6 +1157,7 @@ export default function Xiaohongshu() {
         </div>
         <ManagementFolders
           folders={groups.data?.items || []}
+          members={allCreators.data?.items.map((creator) => ({ id: creator.id, name: creator.displayName, groupId: creator.groupId }))}
           filter={folderFilter}
           selectedIds={selectedCreators}
           dragType="application/x-wewe-xiaohongshu"
@@ -955,7 +1166,6 @@ export default function Xiaohongshu() {
             if (active.current) return;
             setFolderFilter(filter);
             setCreatorId('');
-            setNoteId('');
             setLoadedCount(20);
             setSelectedIds(new Set());
             setSelectedCreators([]);
@@ -963,6 +1173,22 @@ export default function Xiaohongshu() {
           onBusyChange={(value) => {
             active.current = value;
             setBusy(value);
+          }}
+          onReorder={async (ids, expectedIds) => {
+            await utils.xiaohongshu.groups.cancel();
+            const saved = await reorderGroups.mutateAsync({ ids, expectedIds });
+            await utils.xiaohongshu.groups.cancel();
+            const orders = new Map(saved.ids.map((id, order) => [id, order]));
+            utils.xiaohongshu.groups.setData(undefined, (previous) => {
+              if (!previous) return previous;
+              return { ...previous, items: previous.items
+                .map((folder) => ({ ...folder, order: orders.get(folder.id) ?? folder.order }))
+                .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id)) };
+            });
+            void groups.refetch().then(
+              (result) => { if (result.error) toast.warning('文件夹排序已保存，列表刷新失败，请稍后刷新页面核对'); },
+              () => toast.warning('文件夹排序已保存，列表刷新失败，请稍后刷新页面核对'),
+            );
           }}
           onSave={async (input) => {
             await utils.xiaohongshu.groups.cancel();
@@ -991,15 +1217,32 @@ export default function Xiaohongshu() {
             await invalidateFolders();
           }}
           onMove={async (ids, groupId) => {
-            await moveCreators.mutateAsync({ ids, groupId });
+            await utils.xiaohongshu.list.cancel();
+            const saved = await moveCreators.mutateAsync({ ids, groupId });
+            await utils.xiaohongshu.list.cancel();
+            const moved = new Set(saved.ids);
+            const update = (previous: typeof creators.data) => previous && ({
+              ...previous,
+              items: previous.items.map((creator) => moved.has(creator.id) ? { ...creator, groupId: saved.groupId } : creator),
+            });
+            utils.xiaohongshu.list.setData(creatorMetricFilter, update);
+            utils.xiaohongshu.list.setData(undefined, update);
             setSelectedCreators([]);
-            await invalidateFolders();
+            setSelectedIds(new Set());
+            void Promise.all([
+              utils.xiaohongshu.groups.invalidate(undefined, undefined, { throwOnError: true }),
+              utils.xiaohongshu.list.invalidate(undefined, undefined, { throwOnError: true }),
+              utils.xiaohongshu.notes.invalidate(undefined, undefined, { throwOnError: true }),
+            ]).catch(() => toast.warning('分类已保存，列表刷新失败，请稍后刷新页面核对'));
           }}
         />
         {groups.error && (
           <p role="alert" className="px-4 text-sm">
             文件夹读取失败，请重新读取页面。
           </p>
+        )}
+        {allCreators.error && (
+          <p role="alert" className="px-4 text-sm">完整博主列表读取失败，暂无法添加订阅到文件夹。</p>
         )}
         {creators.error && (
           <p role="alert" className="px-4 text-sm">
@@ -1037,11 +1280,28 @@ export default function Xiaohongshu() {
         >
           全部笔记
         </Button>
+        <XhsNumericFilter
+          disabled={busy}
+          creator
+          value={creatorMetricFilter}
+          onChange={(value) => {
+            setCreatorMetricFilter(value as typeof creatorMetricFilter);
+            setSelectedCreators([]);
+            setSelectedIds(new Set());
+          }}
+        />
+        {current && (
+          <XhsCreatorMetricRefresh
+            key={current.id}
+            creatorId={current.id}
+            enabled={!busy && capability.data?.canRefresh === true}
+          />
+        )}
         <ul>
           {visibleCreators.map((creator) => (
             <li
               key={creator.id}
-              className={`mac-sidebar-item ${creatorId === creator.id && !managing ? 'active' : ''}`}
+              className={`mac-sidebar-item !h-auto min-h-[48px] py-1 ${creatorId === creator.id && !managing ? 'active' : ''}`}
               draggable={!busy}
               onDragStart={(event) => {
                 if (active.current) {
@@ -1073,11 +1333,26 @@ export default function Xiaohongshu() {
               <button
                 type="button"
                 disabled={busy}
+                title={creator.displayName}
                 aria-pressed={creatorId === creator.id}
-                className="min-w-0 flex-1 truncate text-left text-sm"
+                className="min-w-0 flex-1 break-words text-left text-sm"
                 onClick={() => selectCreator(creator.id)}
               >
-                {creator.displayName}
+                <XhsCreatorAvatar
+                  url={
+                    (creator as typeof creator & { avatarUrl?: string | null })
+                      .avatarUrl
+                  }
+                  name={creator.displayName}
+                />
+                <span className="xhs-creator-name">{creator.displayName}</span>
+                <span className="block min-w-0 break-words">
+                  <XhsMetricLine
+                    snapshot={creator.metrics}
+                    creator
+                    showUpdatedAt={false}
+                  />
+                </span>
               </button>
               <span className="shrink-0 text-xs opacity-60">
                 {creator._count.notes}
@@ -1110,6 +1385,15 @@ export default function Xiaohongshu() {
             '已保存的博主任务'
           }
         />
+        {cacheExporting && (
+          <Button
+            size="sm"
+            variant="light"
+            onPress={() => cacheExportController.current?.abort()}
+          >
+            停止后续缓存保存
+          </Button>
+        )}
         {zipProgress && (
           <SubscriptionProgress
             ariaLabel="ZIP 导出进度"
@@ -1201,6 +1485,12 @@ export default function Xiaohongshu() {
             <p className="py-1 text-xs text-neutral-500">
               {taskNextStep(task)}
             </p>
+            {task.mediaSummary && <p role="status" className="py-1 text-xs text-neutral-500">
+              图片清单覆盖 {task.mediaSummary.manifestNotes} 篇，发现 {task.mediaSummary.declaredImages} 项；记录已保存 {task.mediaSummary.recordedSavedImages} 项，待处理 {task.mediaSummary.pendingImages} 项。
+              {task.mediaSummary.needsReviewNotes > 0 && ` ${task.mediaSummary.needsReviewNotes} 篇图片清单待核对。`}
+              {task.mediaSummary.blockedNotes > 0 && ` ${task.mediaSummary.blockedNotes} 篇请求结果待核对，已停止。`}
+              {task.mediaSummary.needsDetailRefreshNotes > 0 && ` ${task.mediaSummary.needsDetailRefreshNotes} 篇需核对后刷新详情；不会自动重试。`}
+            </p>}
           </SubscriptionProgress>
         )}
         <SubscriptionToolbar>
@@ -1209,10 +1499,11 @@ export default function Xiaohongshu() {
               {current?.displayName ||
                 (folderFilter === 'all' ? '全部笔记' : '分组笔记')}
             </h1>
+            {current && <XhsMetricLine snapshot={current.metrics} creator />}
             <span role="status" className="text-xs text-neutral-500">
               {capability.data?.canRefresh
-                ? '每次更新最多读取 2 页，更多需明确继续'
-                : '阅读本地存量'}
+                ? '默认采集来源返回的前 30 篇。'
+                : '管理已有目录'}
             </span>
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1227,39 +1518,32 @@ export default function Xiaohongshu() {
               size="sm"
               color="primary"
               variant="flat"
-              isDisabled={busy || !saveSettings || !selectedNotes.length}
-              onPress={() => handleLocalSave()}
-            >
-              下载图文到本地 ({selectedNotes.length})
-            </Button>
-            <Button
-              size="sm"
-              variant="light"
               isDisabled={busy}
-              onPress={() => {
-                setExportScope(
-                  selectedArchives.length ? 'selected' : 'filtered',
-                );
-                setExportOpen(true);
-              }}
+              onPress={() => { setExportScope(selectedIds.size ? 'selected' : 'filtered'); setXhsExportFormat('obsidian'); setExportOpen(true); }}
             >
-              导出已保存 ZIP
+              导出笔记
             </Button>
             <Button
               size="sm"
               className="mac-btn-outline"
-              isDisabled={
-                busy || !current?.enabled || !capability.data?.canRefresh
-              }
-              onPress={() =>
-                run(async () => {
-                  if (current) await updateCreator(current.id);
-                })
-              }
+              isDisabled={busy || !creators.data?.items.some(creator => creator.enabled)}
+              onPress={() => {
+                if (!capability.data?.canRefresh) { showSourceSettings(); setMessage('来源尚未就绪，请在来源设置中恢复会话或处理平台限制后再更新。'); return; }
+                if (current) {
+                  if (!current.enabled) { setMessage('该博主已暂停，请先启用后再更新。'); return; }
+                  void run(async () => { await updateCreator(current.id); });
+                } else handleRefreshAll();
+              }}
             >
-              更新笔记列表
+              {current ? '更新本号' : '更新全部'}
             </Button>
             <SubscriptionMore key={creatorId}>
+              {current && <Button size="sm" variant="light" isDisabled={busy} onPress={() => handleScopedUpdate('all')}>更新本号全部内容</Button>}
+              {current && <Button size="sm" variant="light" isDisabled={busy || !selectedIds.size} onPress={() => handleScopedUpdate('selected')}>更新所选内容</Button>}
+              {current && <Button size="sm" variant="light" isDisabled={busy || !selectedIds.size} onPress={handleMissingBasic}>仅补所选基础缺项</Button>}
+              {current && selectedIds.size > 0 && <Button size="sm" variant="light" isDisabled={busy} onPress={() => setDiagnosticOpen(true)}>补所选图片</Button>}
+              <Button size="sm" variant="light" isDisabled={busy} onPress={() => setBatchOpen(true)}>批量订阅</Button>
+              <Button size="sm" variant="light" onPress={() => setDiagnosticOpen(true)}>来源诊断</Button>
               <Button
                 size="sm"
                 variant="light"
@@ -1284,18 +1568,6 @@ export default function Xiaohongshu() {
                   启用更新
                 </Switch>
               )}
-              <Button
-                size="sm"
-                variant="light"
-                isDisabled={
-                  busy ||
-                  !capability.data?.canRefresh ||
-                  !creators.data?.items.some((creator) => creator.enabled)
-                }
-                onPress={handleRefreshAll}
-              >
-                更新全部列表
-              </Button>
               {current && managing && (
                 <Button
                   size="sm"
@@ -1325,7 +1597,10 @@ export default function Xiaohongshu() {
             {message}
           </p>
         )}
-        <details className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700">
+        <details
+          ref={sourceSettingsRef}
+          className="feed-reading-details shrink-0 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-700"
+        >
           <summary className="cursor-pointer text-neutral-500">
             来源与本机保存设置{operationError ? ' · 有错误待查看' : ''}
           </summary>
@@ -1337,17 +1612,31 @@ export default function Xiaohongshu() {
                   : !connection.data
                     ? '正在读取本机连接状态…'
                     : !connection.data.liveEnabled
-                      ? '真实访问尚未启用，可继续阅读和导出本地内容。'
-                      : connection.data.code?.startsWith('XHS_SOURCE_')
-                        ? '当前连接已暂停，请在本机安全工具中处理登录、验证或访问限制后重新连接。'
-                        : connection.data.code === 'XHS_DISCONNECT_INCOMPLETE'
-                          ? '连接已断开，但受保护记录清理未确认，请重新读取状态。'
-                          : !connection.data.connected
-                            ? '尚未连接，请通过本机安全连接工具完成连接。'
-                            : connection.data.verified
-                              ? '本机会话可用。'
-                              : '本机会话已就绪，平台验证尚未完成。'}
+                      ? '真实访问尚未启用，可查看已存数据和导出本地内容。'
+                      : connection.data.code ===
+                          'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED'
+                        ? '来源 API 拒绝了请求，原因尚不明确；采集已停止。网页可访问不代表此接口可用，请先核查来源状态。'
+                        : connection.data.code ===
+                            'XHS_SOURCE_VERIFICATION_BLOCKED'
+                          ? '来源明确提示需要验证，但当前没有可确认的验证入口；采集已停止，请先核查来源状态。'
+                          : connection.data.code?.startsWith('XHS_SOURCE_')
+                            ? '来源请求已暂停，请核查采集会话与来源状态后再明确连接。'
+                            : connection.data.code ===
+                                'XHS_DISCONNECT_INCOMPLETE'
+                              ? '连接已断开，但受保护记录清理未确认，请重新读取状态。'
+                              : !connection.data.connected
+                                ? '尚未连接，请通过本机安全连接工具完成连接。'
+                                : connection.data.verified
+                                  ? '本机会话可用。'
+                                  : '本机会话已就绪，平台验证尚未完成。'}
               </p>
+              {connection.data && (
+                <p className="text-default-500 text-xs" role="status">
+                  {connection.data.riskCode
+                    ? '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
+                    : '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。'}
+                </p>
+              )}
               {connection.data?.requestAttempts && (
                 <p className="text-default-500 text-xs">
                   本进程请求尝试：作者{' '}
@@ -1477,107 +1766,144 @@ export default function Xiaohongshu() {
             </details>
           </div>
         </details>
-        <fieldset disabled={busy} className="disabled:opacity-60">
-          <ArticleDateFilter
-            value={dateSelection}
-            error={dateError}
-            onChange={(value) => {
-              if (active.current) return;
-              setLoadedCount(20);
-              setExportOpen(false);
-              setDateSelection(value);
-              setSelectedIds(new Set());
-            }}
-          />
-        </fieldset>
-        {searchOpen && (
-          <div id="xhs-search-panel" className="px-4 py-2">
-            <Input
-              autoFocus
-              isClearable
-              onClear={() => handleSearch('')}
-              maxLength={200}
-              aria-label="搜索笔记标题或正文"
-              placeholder="搜索标题或已保存正文…"
-              value={search}
-              onValueChange={handleSearch}
-              isDisabled={busy}
-            />
+        <div className="xhs-filter-bar">
+          <div className="xhs-active-filters" aria-label="已选条件">
+            {creatorMetricFilter.metric && (
+              <span>
+                博主 · {creatorMetricFilter.metric === 'fans' ? '粉丝' : '关注'}{' '}
+                {creatorMetricFilter.min ?? '不限'}–
+                {creatorMetricFilter.max ?? '不限'}
+              </span>
+            )}
+            {noteConditions.conditions.map((condition) => (
+              <span key={condition.id}>{conditionLabel(condition)}</span>
+            ))}
+            <span>
+              {metricOrder
+                ? {
+                    likes: '点赞',
+                    collects: '收藏',
+                    shares: '分享',
+                    comments: '评论',
+                  }[metricOrder.metric] +
+                  (metricOrder.direction === 'desc' ? ' ↓' : ' ↑')
+                : '按时间' + (direction === 'desc' ? ' ↓' : ' ↑')}
+            </span>
+            {(noteConditions.conditions.length > 0 ||
+              creatorMetricFilter.metric ||
+              search ||
+              dateSelection.start) && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setNoteConditions(emptyCombinedFilter());
+                  setCreatorMetricFilter({});
+                  setSearch('');
+                  setDateSelection({ mode: 'day', start: '', end: '' });
+                  setLoadedCount(20);
+                  setSelectedIds(new Set());
+                }}
+              >
+                清除筛选
+              </button>
+            )}
           </div>
-        )}
-        {!searchOpen && search !== '' && (
-          <div className="min-w-0 shrink-0 px-4 py-2">
-            <Chip
+          <fieldset disabled={busy} className="disabled:opacity-60">
+            <ArticleDateFilter
+              value={dateSelection}
+              error={dateError}
+              onChange={(value) => {
+                if (active.current) return;
+                setLoadedCount(20);
+                setExportOpen(false);
+                setDateSelection(value);
+                setSelectedIds(new Set());
+              }}
+            />
+          </fieldset>
+          {searchOpen && (
+            <div id="xhs-search-panel" className="px-4 py-2">
+              <Input
+                autoFocus
+                isClearable
+                onClear={() => handleSearch('')}
+                maxLength={200}
+                aria-label="搜索笔记标题或正文"
+                placeholder="搜索标题或已保存正文…"
+                value={search}
+                onValueChange={handleSearch}
+                isDisabled={busy}
+              />
+            </div>
+          )}
+          {!searchOpen && search !== '' && (
+            <div className="min-w-0 shrink-0 px-4 py-2">
+              <Chip
+                size="sm"
+                variant="flat"
+                title={`搜索：${search}`}
+                aria-label={`搜索：${search}；清除关键词`}
+                isDisabled={busy}
+                onClose={() => handleSearch('')}
+                classNames={{
+                  base: 'max-w-full',
+                  content: 'min-w-0 truncate',
+                  closeButton: 'shrink-0',
+                }}
+              >
+                搜索：{search}
+              </Chip>
+            </div>
+          )}
+          {search.trim() && (
+            <p role="status" className="px-4 py-1 text-xs text-neutral-500">
+              搜索当前范围的标题、博主名与已保存正文；未下载的正文不在搜索范围内。搜索不会联网取文。
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
+            <Button
               size="sm"
-              variant="flat"
-              title={`搜索：${search}`}
-              aria-label={`搜索：${search}；清除关键词`}
-              isDisabled={busy}
-              onClose={() => handleSearch('')}
-              classNames={{
-                base: 'max-w-full',
-                content: 'min-w-0 truncate',
-                closeButton: 'shrink-0',
+              variant="light"
+              isDisabled={busy || !visibleNotes.length}
+              onPress={() => {
+                if (!active.current)
+                  setSelectedIds(
+                    new Set(
+                      visibleNotes.map((note) => note.id),
+                    ),
+                  );
               }}
             >
-              搜索：{search}
-            </Chip>
+              选择当前筛选全部
+            </Button>
+            <Button
+              size="sm"
+              variant="light"
+              isDisabled={busy || !selectedIds.size}
+              onPress={() => {
+                if (!active.current) setSelectedIds(new Set());
+              }}
+            >
+              清空选择
+            </Button>
           </div>
-        )}
-        {search.trim() && (
-          <p role="status" className="px-4 py-1 text-xs text-neutral-500">
-            搜索当前范围的标题、博主名与已保存正文；未下载的正文不在搜索范围内。搜索不会联网取文。
-          </p>
-        )}
-        <div className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
-          <Button
-            size="sm"
-            variant="light"
-            isDisabled={busy || !visibleNotes.length}
-            onPress={() => {
-              if (!active.current)
-                setSelectedIds(
-                  new Set(
-                    visibleNotes
-                      .filter(
-                        (note) =>
-                          note.kind === 'image-text' ||
-                          note.status === 'complete',
-                      )
-                      .map((note) => note.id),
-                  ),
-                );
+          <XhsCombinedFilter
+            disabled={busy}
+            value={noteConditions}
+            onChange={(value) => {
+              setNoteConditions(value);
+              setSelectedIds(new Set());
+              setLoadedCount(20);
+              setExportOpen(false);
             }}
-          >
-            选择当前筛选全部
-          </Button>
-          <Button
-            size="sm"
-            variant="light"
-            isDisabled={busy || !selectedIds.size}
-            onPress={() => {
-              if (!active.current) setSelectedIds(new Set());
-            }}
-          >
-            清空选择
-          </Button>
+          />
+
         </div>
-        <ContentSortControls
-          sort="publishTime"
-          onSortChange={() => {}}
-          direction={direction}
-          onDirectionChange={(value) => {
-            setLoadedCount(20);
-            setDirection(value);
-            setSelectedIds(new Set());
-          }}
-          options={[{ value: 'publishTime', label: '发布时间' }]}
-          disabled={busy}
-        />
-        <div className="px-3 py-1 text-xs text-neutral-500">
-          当前{search ? '筛选' : '博主'} {visibleNotes.length} 篇；已选择{' '}
-          {selectedNotes.length}{' '}
-          篇图文。全选勾选已加载内容；可继续加载并追加选择。
+        <div className="xhs-list-caption text-xs text-neutral-500">
+          当前范围 {visibleNotes.length} 条目录 · 完整归档{' '}
+          {visibleNotes.filter((note) => note.status === 'complete').length} 篇
+          · 已选 {selectedIds.size} 篇 · — 表示未采集，0 为真实数值。
           {search && '修改搜索会清空选择。'}
         </div>
         {notes.error && (
@@ -1591,66 +1917,159 @@ export default function Xiaohongshu() {
           aria-label="笔记列表"
           tabIndex={0}
         >
-          <div className="compact-list">
-            <ContentSelectionHeader
-              title={<>笔记标题 · {visibleNotes.length} 篇</>}
-              selected={allSelected}
-              indeterminate={!allSelected && selectedIds.size > 0}
-              disabled={busy || !selectableNotes.length}
-              onChange={(value) => {
-                if (!active.current)
-                  setSelectedIds(
-                    value
-                      ? toggleLoadedSelection(
-                          selectedIds,
-                          selectableNotes.map((note) => note.id),
-                          true,
-                        )
-                      : toggleLoadedSelection(
-                          selectedIds,
-                          selectableNotes.map((note) => note.id),
-                          false,
-                        ),
-                  );
-              }}
-            />
+          <div
+            className="compact-list xhs-note-list"
+            role="table"
+            aria-label="笔记数据"
+          >
+            <div className="xhs-note-head xhs-note-row" role="row">
+              <Checkbox
+                size="sm"
+                aria-label="全选已加载"
+                isSelected={allSelected}
+                isIndeterminate={!allSelected && selectedIds.size > 0}
+                isDisabled={busy || !selectableNotes.length}
+                onValueChange={(value) => {
+                  if (!active.current)
+                    setSelectedIds(
+                      value
+                        ? toggleLoadedSelection(
+                            selectedIds,
+                            selectableNotes.map((note) => note.id),
+                            true,
+                          )
+                        : toggleLoadedSelection(
+                            selectedIds,
+                            selectableNotes.map((note) => note.id),
+                            false,
+                          ),
+                    );
+                }}
+              />
+              <span>笔记标题 · {visibleNotes.length} 篇</span>
+              <span role="columnheader" aria-sort={metricOrder || !timeOrder ? 'none' : timeOrder === 'asc' ? 'ascending' : 'descending'}>
+                <button type="button" disabled={busy} aria-label={`发布时间排序：${metricOrder || !timeOrder ? '从早到晚' : timeOrder === 'asc' ? '从晚到早' : '恢复默认'}`} onClick={() => { if (!active.current) { setMetricOrder(null); setTimeOrder(nextTimeOrder(timeOrder, !!metricOrder)); setLoadedCount(20); } }}>
+                  发布时间{!metricOrder && timeOrder ? timeOrder === 'asc' ? ' ↑' : ' ↓' : ' ↕'}
+                </button>
+              </span>
+              {(['likes', 'collects', 'shares', 'comments'] as const).map(
+                (metric) => (
+                  <span
+                    key={metric}
+                    role="columnheader"
+                    aria-sort={
+                      metricOrder?.metric === metric
+                        ? metricOrder.direction === 'desc'
+                          ? 'descending'
+                          : 'ascending'
+                        : 'none'
+                    }
+                  >
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => sortMetric(metric)}
+                      aria-label={
+                        {
+                          likes: '点赞',
+                          collects: '收藏',
+                          shares: '分享',
+                          comments: '评论',
+                        }[metric] +
+                        '排序：' +
+                        (metricOrder?.metric !== metric
+                          ? '从高到低'
+                          : metricOrder.direction === 'desc'
+                            ? '从低到高'
+                            : '恢复时间排序')
+                      }
+                    >
+                      {
+                        {
+                          likes: '点赞',
+                          collects: '收藏',
+                          shares: '分享',
+                          comments: '评论',
+                        }[metric]
+                      }
+                      {metricOrder?.metric === metric
+                        ? metricOrder.direction === 'desc'
+                          ? ' ↓'
+                          : ' ↑'
+                        : ' ↕'}
+                    </button>
+                  </span>
+                ),
+              )}
+              <span>状态</span>
+            </div>
             {loadedNotes.map((note) => (
               <div
                 key={note.id}
-                className="compact-row article-row !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center"
+                className="content-article-row xhs-note-row"
+                role="row"
               >
-                <div className="compact-col-check">
+                <div className="compact-col-check xhs-note-check">
                   <Checkbox
                     size="sm"
                     aria-label={`选择笔记 ${note.title}`}
-                    isDisabled={
-                      busy ||
-                      (note.kind !== 'image-text' && note.status !== 'complete')
-                    }
+                    isDisabled={busy}
                     isSelected={selectedIds.has(note.id)}
                     onValueChange={(value) => selectNote(note.id, value)}
                   />
                 </div>
-                <button
-                  type="button"
-                  disabled={busy || note.status !== 'complete'}
-                  className="compact-title min-w-0 !whitespace-normal break-words text-left text-[15px] hover:text-[#007AFF] disabled:text-neutral-500 md:!whitespace-nowrap"
-                  onClick={() => {
-                    if (!active.current) {
-                      setReadingCreatorId(note.creatorId);
-                      setNoteId(note.id);
-                    }
-                  }}
+                <XhsOriginalLink
+                  key={`original:${note.creatorId}:${note.id}`}
+                  creatorId={note.creatorId}
+                  noteId={note.id}
+                  title={note.title}
+                  author={!creatorId ? note.creatorName : undefined}
+                  prepare={prepareOriginalLink}
+                  onConfigure={showSourceSettings}
+                />
+                <time
+                  className="xhs-note-date"
+                  title={formatShanghaiPublicationTime(note.publishTime)}
                 >
-                  {note.title}
-                </button>
-                <div className="col-start-2 flex min-w-0 shrink-0 flex-col items-start gap-1 py-1 text-xs text-neutral-500 md:ml-auto md:items-end">
-                  <span>{formatShanghaiPublicationTime(note.publishTime)}</span>
-                  <span className="whitespace-normal text-left md:max-w-[150px] md:text-right">
-                    {!creatorId && <span>{note.creatorName} · </span>}
-                    {noteStatus(note)}
-                  </span>
-                </div>
+                  {note.publishTime
+                    ? formatShanghaiPublicationTime(note.publishTime)
+                    : '时间未知'}
+                </time>
+                {(['likes', 'collects', 'shares', 'comments'] as const).map(
+                  (metric) => {
+                    const value = note.metrics?.values[metric];
+                    const label = {
+                      likes: '点赞',
+                      collects: '收藏',
+                      shares: '分享',
+                      comments: '评论',
+                    }[metric];
+                    return (
+                      <span
+                        key={metric}
+                        className="xhs-note-metric"
+                        data-metric={metric}
+                        data-label={label}
+                        title={`${label}：${value == null ? '未采集' : value.toLocaleString('zh-CN')}`}
+                        aria-label={`${label}：${value == null ? '未采集' : value}`}
+                      >
+                        {value == null
+                          ? '—'
+                          : new Intl.NumberFormat('zh-CN', {
+                              notation: value >= 10000 ? 'compact' : 'standard',
+                              maximumFractionDigits: 1,
+                            }).format(value)}
+                      </span>
+                    );
+                  },
+                )}
+                <span
+                  className="xhs-note-status"
+                  title={noteArchiveStatus(note)}
+                >
+                  {{ pending: '尚未尝试', complete: '基础数据已取得', missing: '基础字段未取得', skipped: '已跳过', needs_review: '需核对' }[note.basicStatus] ?? '尚未尝试'}
+                  {' · '}{note.status === 'complete' ? '已归档' : '媒体未归档'}
+                </span>
               </div>
             ))}
             {loadedNotes.length < visibleNotes.length && (
@@ -1679,6 +2098,32 @@ export default function Xiaohongshu() {
           </div>
         </div>
       </section>
+      <XhsBatchSubscription
+        open={batchOpen}
+        onClose={() => setBatchOpen(false)}
+        api={subscriptionApi as typeof subscriptionApi & BatchApi}
+        groups={groups.data?.items || []}
+        budget={null}
+        onSubscribed={() => {
+          void utils.xiaohongshu.list.invalidate();
+        }}
+      />
+      <SubscriptionDialog isOpen={diagnosticOpen} onClose={() => setDiagnosticOpen(false)}>
+        <ModalContent><ModalHeader>来源诊断</ModalHeader><ModalBody>
+          <p>来源访问受限或需要验证时，采集会暂停。请检查来源状态后再继续。</p>
+          {creatorId && <XhsWholeCreator creatorId={creatorId} selectedNoteIds={[...selectedIds]} />}
+        </ModalBody><ModalFooter><Button onPress={() => setDiagnosticOpen(false)}>关闭</Button></ModalFooter></ModalContent>
+      </SubscriptionDialog>
+      <SubscriptionDialog isOpen={confirmDirectory !== null} onClose={() => finishDirectoryConfirmation(false)}>
+        <ModalContent>
+          <ModalHeader>确认保存位置</ModalHeader>
+          <ModalBody><p>本次内容将保存到：</p><p className="break-all" aria-label="保存目录">{confirmDirectory}</p></ModalBody>
+          <ModalFooter>
+            <Button variant="light" onPress={() => finishDirectoryConfirmation(false)}>取消</Button>
+            <Button color="primary" onPress={() => finishDirectoryConfirmation(true)}>确认保存</Button>
+          </ModalFooter>
+        </ModalContent>
+      </SubscriptionDialog>
       <SubscriptionDialog
         isOpen={exportOpen}
         onClose={() => {
@@ -1686,7 +2131,7 @@ export default function Xiaohongshu() {
         }}
       >
         <ModalContent>
-          <ModalHeader>导出已保存笔记</ModalHeader>
+          <ModalHeader>导出笔记</ModalHeader>
           <ModalBody>
             <p aria-label="导出对象" className="text-sm">
               范围：
@@ -1699,8 +2144,8 @@ export default function Xiaohongshu() {
               options={[
                 {
                   value: 'selected',
-                  label: `选中笔记（${selectedArchives.length} 篇完整归档）`,
-                  disabled: !selectedArchives.length,
+                  label: `选中笔记（${xhsExportFormat === 'obsidian' ? (savePreviewCount ?? 0) : selectedArchives.length} 篇）`,
+                  disabled: !(xhsExportFormat === 'obsidian' ? (savePreviewCount ?? 0) : selectedArchives.length),
                 },
                 {
                   value: 'filtered',
@@ -1717,13 +2162,13 @@ export default function Xiaohongshu() {
               onChange={setExportScope}
               disabled={busy}
             />
-            <p className="text-xs text-neutral-500">
-              只导出已完整保存的正文与媒体；视频归档可一起导出。超过 100
-              篇自动分批生成 ZIP，开始后范围固定。
-            </p>
-            <p role="status">
-              范围内完整归档：{exportPreviewCount ?? '读取中'} 篇。
-            </p>
+            <label className="flex flex-col gap-2 text-sm">导出方式
+              <select aria-label="导出方式" className="bg-background rounded border p-2" value={xhsExportFormat} onChange={event => setXhsExportFormat(event.target.value as 'obsidian' | 'zip')}>
+                <option value="obsidian">保存到 Obsidian 目录</option><option value="zip">下载 ZIP 文件</option>
+              </select>
+            </label>
+            {xhsExportFormat === 'obsidian' ? <div><p className="break-all text-sm">保存目录：{saveSettings?.directory || '正在读取'}</p><p className="text-xs text-neutral-500">此入口保存图文和已完整缓存的视频。</p></div> : <p className="text-xs text-neutral-500">ZIP 仅包含已完整归档的笔记及媒体。</p>}
+            <p role="status">本次范围：{effectiveExportCount ?? '读取中'} 篇。</p>
             {exportScope === 'all' && allArchiveNotes.error && (
               <p role="alert">范围读取失败，请关闭后重新打开。</p>
             )}
@@ -1736,12 +2181,13 @@ export default function Xiaohongshu() {
               color="primary"
               isDisabled={
                 busy ||
-                !exportPreviewCount ||
+                !effectiveExportCount ||
+                (xhsExportFormat === 'obsidian' && !saveSettings) ||
                 (exportScope === 'filtered' && !!dateError)
               }
-              onPress={handleDownload}
+              onPress={() => { if (xhsExportFormat === 'zip') handleDownload(); else { setExportOpen(false); handleLocalSave(false, exportScope, saveSettings?.directory, savePreviewNotes?.map(note => note.id)); } }}
             >
-              开始导出
+              开始导出 {effectiveExportCount ?? ''} 篇
             </Button>
           </ModalFooter>
         </ModalContent>
@@ -1837,52 +2283,6 @@ export default function Xiaohongshu() {
           </ModalFooter>
         </ModalContent>
       </SubscriptionDialog>
-      <Modal
-        isOpen={!!noteId}
-        isKeyboardDismissDisabled={readerFindOpen}
-        onClose={() => {
-          if (!active.current) {
-            setReaderFindOpen(false);
-            setNoteId('');
-          }
-        }}
-        size="4xl"
-        scrollBehavior="inside"
-        classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
-      >
-        <ModalContent>
-          <ModalHeader className="min-w-0 break-words pr-10">
-            {body.data?.title || '读取已保存正文'}
-          </ModalHeader>
-          <ModalBody>
-            <p className="text-sm text-neutral-500">
-              这里可阅读已保存的正文和图片；视频笔记仅显示封面。
-            </p>
-            {body.isLoading ? (
-              <Spinner />
-            ) : body.error ? (
-              <p role="alert">正文读取失败，请稍后重试。</p>
-            ) : (
-              body.data && (
-                <article className="space-y-3">
-                  {body.data.kind === 'video' && body.data.video && (
-                    <p className="text-sm text-neutral-500">
-                      已缓存视频 {body.data.video.bytes.toLocaleString()}{' '}
-                      字节。播放尚未验证，请保存到本机后检查。
-                    </p>
-                  )}
-                  <ArticleReader
-                    key={`${readingCreatorId}:${noteId}`}
-                    contentHtml={readerHtml}
-                    findOpen={readerFindOpen}
-                    onFindOpenChange={setReaderFindOpen}
-                  />
-                </article>
-              )
-            )}
-          </ModalBody>
-        </ModalContent>
-      </Modal>
     </main>
   );
 }

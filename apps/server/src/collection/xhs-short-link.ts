@@ -5,17 +5,31 @@ export function xhsPublicInputUrl(raw: string) {
     if (
       typeof raw !== 'string' ||
       raw.length > 8192 ||
-      /[\\\s\x00-\x1f\x7f]/.test(raw) ||
-      /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(raw)
+      /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(raw)
     )
       throw Error();
-    const url = new URL(raw);
+    let input = raw;
+    if (/\s/.test(raw)) {
+      const links = raw.match(/https?:\/\/[^\s<>"']+/gi) ?? [];
+      if (links.length !== 1) throw Error();
+      if (links[0].includes('?') && /[，。！？）】,;!?)]+$/u.test(links[0]))
+        throw Error();
+      input = links[0].replace(/[，。！？）】,;!?)]+$/u, '');
+    }
+    if (/[\\\s\x00-\x1f\x7f]/.test(input) || /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(input))
+      throw Error();
+    const url = new URL(input);
     if (
       url.protocol !== 'https:' ||
       url.username ||
       url.password ||
       url.port ||
-      url.hash
+      (url.hash &&
+        !(
+          url.hash === '#comment-section' &&
+          url.hostname === 'www.xiaohongshu.com' &&
+          /^\/(?:explore|discovery\/item)\//.test(url.pathname)
+        ))
     )
       throw Error();
     if (url.hostname === 'xhslink.com') {
@@ -23,6 +37,9 @@ export function xhsPublicInputUrl(raw: string) {
         !/^\/(?:a\/)?[a-zA-Z0-9_-]{1,128}\/?$/.test(url.pathname) ||
         url.search
       )
+        throw Error();
+    } else if (url.hostname === 'xhslink.cn') {
+      if (!/^\/o\/[a-zA-Z0-9_-]{1,128}\/?$/.test(url.pathname) || url.search)
         throw Error();
     } else if (
       url.hostname !== 'www.xiaohongshu.com' ||
@@ -70,7 +87,11 @@ export class XhsShortLinkResolver {
   async resolve(raw: string) {
     let url = xhsPublicInputUrl(raw);
     const seen = new Set<string>();
-    for (let hop = 0; url.hostname === 'xhslink.com'; hop++) {
+    for (
+      let hop = 0;
+      ['xhslink.com', 'xhslink.cn'].includes(url.hostname);
+      hop++
+    ) {
       if (!this.transport)
         throw new XhsSubscriptionError('XHS_SHORT_LINK_UNAVAILABLE');
       if (hop >= 5 || seen.has(url.href))

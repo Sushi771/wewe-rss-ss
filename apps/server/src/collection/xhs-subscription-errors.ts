@@ -1,5 +1,7 @@
+import { ArticleDownloadError } from '../article-download';
 import { TRPCError } from '@trpc/server';
 import { RedbookPauseError } from './redbook-client';
+import { XhsMediaError } from './xhs-media-error';
 /** Public fixed codes only. Never expose provider errors, URLs, tokens or bodies. */
 export class XhsSubscriptionError extends Error {
   constructor(readonly code: string) {
@@ -7,11 +9,55 @@ export class XhsSubscriptionError extends Error {
   }
 }
 const codes = new Set([
+  'XHS_LOCAL_PROGRAM_ERROR',
+  'XHS_LOCAL_OPERATION_FAILED',
+  'XHS_RESUME_DIRECTORY_CHANGED',
+  'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED',
+  'XHS_STORAGE_FAILED',
+  'XHS_BATCH_INPUT_INVALID',
+  'XHS_GROUP_INVALID',
+  'XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE',
+  'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
+  'XHS_ORIGINAL_LINK_NOT_READY',
+  'XHS_SOURCE_RISK_UNAVAILABLE',
+  'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+  'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+  'XHS_BUDGET_SCOPE_MISMATCH',
   'XHS_LIST_INVALID',
+  'XHS_TASK_STATE_CHANGED',
+  'XHS_WHOLE_SOURCE_FENCE_BLOCKED',
+  'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED',
+  'XHS_DOWNLOAD_BLOCKED',
+  'XHS_TASK_NOT_RESUMABLE',
+  'XHS_TASK_NOT_FOUND',
+  'XHS_TASK_CANCELLED',
+  'XHS_TASK_INTERRUPTED',
+  'XHS_TASK_CONFLICT',
+  'XHS_LIST_INCOMPLETE',
+  'XHS_REQUEST_POLICY_INVALID',
+  'XHS_COMMENT_NO_PROGRESS',
+  'XHS_COMMENT_FETCH_FAILED',
+  'XHS_COMMENT_COLLECTION_DISABLED',
+  'XHS_COMMENT_ITEM_LIMIT',
+  'XHS_COMMENT_CURSOR_CYCLE',
+  'XHS_COMMENT_RECEIPT_UNCERTAIN',
+  'XHS_COMMENT_PAGE_LIMIT',
+  'XHS_MEDIA_OR_SUPPLEMENT_PENDING',
+  'XHS_LOCAL_SAVE_UNAVAILABLE',
+  'XHS_SOURCE_RESPONSE_BLOCKED',
+  'XHS_SOURCE_TRANSPORT_BLOCKED',
+  'XHS_SOURCE_CONFIGURATION_BLOCKED',
+
+  'XHS_ACCESS_CONTEXT_UNAVAILABLE',
+  'XHS_REQUEST_BUDGET_REQUIRED',
+  'XHS_REQUEST_BUDGET_EXHAUSTED',
+  'XHS_REQUEST_RATE_PAUSED',
   'XHS_LIST_PAGE_LIMIT_REACHED',
   'XHS_SELECTION_CHANGED',
   'XHS_NOTE_ID_INVALID',
   'XHS_DETAIL_INCOMPLETE',
+  'XHS_VIDEO_CACHE_UNAVAILABLE',
+  'XHS_VIDEO_SOURCE_UNVERIFIED',
   'XHS_SUBSCRIPTION_CHANGED',
   'XHS_SUBSCRIPTION_REQUIRED',
   'XHS_NOTE_OWNER_CONFLICT',
@@ -20,6 +66,7 @@ const codes = new Set([
   'XHS_TASK_SUPERSEDED',
   'XHS_SOURCE_AUTHENTICATION_BLOCKED',
   'XHS_SOURCE_VERIFICATION_BLOCKED',
+  'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
   'XHS_SOURCE_PERMISSION_BLOCKED',
   'XHS_SOURCE_SIGNATURE_BLOCKED',
   'XHS_SOURCE_RATE_LIMIT_BLOCKED',
@@ -40,13 +87,17 @@ const codes = new Set([
   'XHS_CURSOR_CYCLE',
   'XHS_LIST_NO_PROGRESS',
 ]);
+const safeMediaCode = (code: string) => /^XHS_MEDIA_HTTP_[1-5][0-9]{2}$/.test(code) || ['XHS_MEDIA_URL_REJECTED', 'XHS_MEDIA_REQUEST_REJECTED', 'XHS_MEDIA_RESPONSE_INVALID', 'XHS_MEDIA_TYPE_REJECTED', 'XHS_MEDIA_SIZE_REJECTED', 'XHS_MEDIA_EMPTY', 'XHS_MEDIA_BYTES_INVALID', 'XHS_MEDIA_TIMEOUT', 'XHS_MEDIA_ABORTED', 'XHS_MEDIA_TRANSPORT_FAILED'].includes(code);
 export function xhsPublicCode(error: unknown, fallback: string) {
+  if (error instanceof ArticleDownloadError && error.status === 409 && error.diagnostic.code === 'DIRECTORY_PICK_REQUIRED') return 'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED';
+  if ((error instanceof XhsMediaError || error instanceof XhsSubscriptionError) && safeMediaCode(error.code)) return error.code;
   if (
     error instanceof RedbookPauseError &&
     [
       'configuration',
       'authentication',
       'verification',
+      'unknown_rejection',
       'permission',
       'signature',
       'rate_limit',

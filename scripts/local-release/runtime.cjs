@@ -168,6 +168,7 @@ async function runtime() {
     throw new Error('必须明确指定已有数据库的绝对路径');
   const database = fs.realpathSync(values.database);
   if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');
+  if (command === 'start') require('./project-writer-gate.cjs').acquireWriter(database);
   const server = path.join(release, 'server');
   const compact = manifest.executionLayout === 'compact-cjs-v1';
   if (manifest.executionLayout && !compact)

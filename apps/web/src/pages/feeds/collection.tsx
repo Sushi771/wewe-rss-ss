@@ -1,9 +1,9 @@
+import { Modal } from '@web/components/AppOverlays';
 import { FailureNotice } from '@web/components/OperationNotice';
 import { useState } from 'react';
 import {
   Button,
   Input,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
@@ -146,6 +146,14 @@ export default function LocalCollection({
             <p className="text-default-500 text-sm">
               阅读、点赞、分享、评论、在看、收藏分别保存。源文件未提供的指标留空；分享不是收藏。“10万+”保留下限标记，数据文件时间不等于精确采集时间。
             </p>
+            {(preview.error || importer.error) && (
+              <div role="alert" className="text-sm text-red-600">
+                <FailureNotice
+                  error={preview.error || importer.error}
+                  fallback="文件处理未完成，请核对目录后重试。"
+                />
+              </div>
+            )}
             {preview.data && (
               <div
                 className="bg-default-100 rounded-lg p-3 text-sm"

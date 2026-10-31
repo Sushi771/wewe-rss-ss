@@ -1,15 +1,24 @@
 import * as https from 'node:https';
+import type { SafeSourceStage } from './xhs-source-receipt';
 import { IncomingMessage, ClientRequest } from 'node:http';
 import { Readable, Transform } from 'node:stream';
+import { XhsMediaError, mediaHttpError } from './xhs-media-error';
 import { RedbookPauseError, RedbookTransport } from './redbook-client';
 import {
+  redbookErrorSummary,
+  REDBOOK_ERROR_MAX_BYTES,
+} from './redbook-error-summary';
+import {
   allowedRedbookMediaUrl,
+  allowedRedbookVideoUrl,
   RedbookMediaTransport,
 } from './redbook-response';
 
 export type XhsHttpsRequest = typeof https.request;
 const API_HOST = 'edith.xiaohongshu.com';
 const METHODS: Record<string, string> = {
+  '/api/sns/web/v2/comment/page': 'GET',
+  '/api/sns/web/v2/comment/sub/page': 'GET',
   '/api/sns/web/v1/user/otherinfo': 'GET',
   '/api/sns/web/v1/user_posted': 'GET',
   '/api/sns/web/v1/feed': 'POST',
@@ -40,6 +49,7 @@ function contentLength(res: IncomingMessage, limit: number) {
  * may carry Cookie; no fallback endpoint, proxy, retry or ambient browser auth. */
 export function createRedbookHttpTransport(
   request: XhsHttpsRequest = https.request,
+  observe?: (stage: SafeSourceStage, status?: number, notSent?: boolean) => void,
 ): RedbookTransport {
   return (input) =>
     new Promise((resolve, reject) => {
@@ -81,6 +91,7 @@ export function createRedbookHttpTransport(
           throw stop();
         input.signal?.throwIfAborted();
       } catch {
+        observe?.('transport',undefined,true);
         reject(stop());
         return;
       }
@@ -90,6 +101,7 @@ export function createRedbookHttpTransport(
         done = false;
       const chunks: Buffer[] = [];
       let length = 0;
+      let errorStatus: number | undefined;
       const clear = () => {
         clearTimeout(timer);
         input.signal?.removeEventListener('abort', abort);
@@ -102,7 +114,11 @@ export function createRedbookHttpTransport(
         clear();
         res?.destroy();
         req?.destroy();
-        reject(stop());
+        // Once an HTTP rejection is known, preserve its stop semantics even if
+        // its optional diagnostic body is invalid, slow, interrupted or huge.
+        if (errorStatus !== undefined)
+          resolve({ status: errorStatus, url: input.url, body: {} });
+        else reject(stop());
       };
       const abort = () => fail();
       try {
@@ -116,17 +132,19 @@ export function createRedbookHttpTransport(
               return;
             }
             const status = res.statusCode ?? 502;
-            // Preserve only status for non-success responses; never retain platform
-            // error text, verification URLs or echoing request parameters.
-            if (status < 200 || status >= 300) {
-              done = true;
-              clear();
-              res.destroy();
-              resolve({ status, url: input.url, body: {} });
+            observe?.('response',status);
+            const rejected = status < 200 || status >= 300;
+            if (rejected) errorStatus = status;
+            // Redirects never need body inspection and are never followed.
+            if (status >= 300 && status < 400) {
+              fail();
               return;
             }
+            const limit = rejected
+              ? Math.min(input.maxResponseBytes, REDBOOK_ERROR_MAX_BYTES)
+              : input.maxResponseBytes;
             try {
-              contentLength(res, input.maxResponseBytes);
+              contentLength(res, limit);
               if (
                 !/^application\/json(?:;|$)/i.test(
                   String(res.headers['content-type'] ?? ''),
@@ -140,7 +158,7 @@ export function createRedbookHttpTransport(
             res.on('data', (part: Buffer) => {
               if (done) return;
               length += part.length;
-              if (length > input.maxResponseBytes) {
+              if (length > limit) {
                 part.fill(0);
                 fail();
                 return;
@@ -155,10 +173,15 @@ export function createRedbookHttpTransport(
               try {
                 input.signal?.throwIfAborted();
                 bytes = Buffer.concat(chunks);
+                observe?.('parse');
                 const body: unknown = JSON.parse(bytes.toString('utf8'));
                 done = true;
                 clear();
-                resolve({ status, url: input.url, body });
+                resolve({
+                  status,
+                  url: input.url,
+                  body: rejected ? redbookErrorSummary(body) : body,
+                });
               } catch {
                 fail();
               } finally {
@@ -168,12 +191,14 @@ export function createRedbookHttpTransport(
           },
         );
         req.on('error', fail);
+        req.once('finish', () => { if (!done) observe?.('sent'); });
         timer = setTimeout(fail, input.timeoutMs);
         timer.unref?.();
         input.signal?.addEventListener('abort', abort, { once: true });
         if (input.signal?.aborted) fail();
         else req.end(input.body);
       } catch {
+        if (!req) observe?.('transport',undefined,true);
         fail();
       }
     });
@@ -187,18 +212,30 @@ export function createXhsMediaTransport(
   return (url, options) =>
     new Promise((resolve, reject) => {
       try {
+        const video = options.headers.accept === 'video/mp4';
+        if ((video ? allowedRedbookVideoUrl(url.href).href : allowedRedbookMediaUrl(url.href).href) !== url.href)
+          throw stop();
+      } catch {
+        reject(new XhsMediaError('XHS_MEDIA_URL_REJECTED'));
+        return;
+      }
+      try {
         if (
-          allowedRedbookMediaUrl(url.href).href !== url.href ||
           options.redirect !== 'manual' ||
           options.credentials !== 'omit' ||
           Object.keys(options.headers).some((k) => k !== 'accept')
         )
           throw stop();
-        options.signal.throwIfAborted();
       } catch {
-        reject(stop());
+        reject(new XhsMediaError('XHS_MEDIA_REQUEST_REJECTED'));
         return;
       }
+      if (options.signal.aborted) {
+        reject(new XhsMediaError(options.signal.reason?.name === 'TimeoutError' ? 'XHS_MEDIA_TIMEOUT' : 'XHS_MEDIA_ABORTED'));
+        return;
+      }
+      const video = options.headers.accept === 'video/mp4';
+      const mediaLimit = video ? 100_000_000 : 10_000_000;
       let req: ClientRequest | undefined,
         res: IncomingMessage | undefined,
         limiter: Transform | undefined;
@@ -210,16 +247,16 @@ export function createXhsMediaTransport(
         clearTimeout(timer);
         options.signal.removeEventListener('abort', abort);
       };
-      const fail = () => {
+      const fail = (error = new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED')) => {
         if (ended) return;
         ended = true;
         cleanup();
         res?.destroy();
         req?.destroy();
-        limiter?.destroy(stop());
-        if (!returned) reject(stop());
+        limiter?.destroy(error);
+        if (!returned) reject(error);
       };
-      const abort = () => fail();
+      const abort = () => fail(new XhsMediaError(options.signal.reason?.name === 'TimeoutError' ? 'XHS_MEDIA_TIMEOUT' : 'XHS_MEDIA_ABORTED'));
       try {
         req = request(
           url,
@@ -235,17 +272,22 @@ export function createXhsMediaTransport(
               return;
             }
             try {
-              if (res.statusCode !== 200) throw stop();
-              contentLength(res, 10_000_000);
+              if (res.statusCode !== 200) throw mediaHttpError(res.statusCode ?? 0);
+              const rawLength = res.headers['content-length'];
+              if (rawLength !== undefined && !/^\d+$/.test(String(rawLength)))
+                throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+              if (rawLength !== undefined && Number(rawLength) > mediaLimit)
+                throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED');
               const mime = String(res.headers['content-type'] ?? '')
                 .split(';')[0]
                 .trim()
                 .toLowerCase();
-              if (!/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw stop();
+              if (video ? mime !== 'video/mp4' : !/^image\/(png|jpeg|gif|webp)$/.test(mime)) throw new XhsMediaError('XHS_MEDIA_TYPE_REJECTED');
+              if (video && rawLength === undefined) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
               limiter = new Transform({
                 transform(part: Buffer, _encoding, callback) {
                   length += part.length;
-                  if (length > 10_000_000) callback(stop());
+                  if (length > mediaLimit) callback(new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'));
                   else callback(null, part);
                 },
               });
@@ -262,29 +304,29 @@ export function createXhsMediaTransport(
                   cleanup();
                 }
               });
-              res.on('error', fail);
-              res.on('aborted', fail);
+              res.on('error', () => fail());
+              res.on('aborted', () => fail());
               res.on('end', () => {
                 ended = true;
                 cleanup();
               });
               const response = new Response(
                 Readable.toWeb(res.pipe(limiter)) as ReadableStream<Uint8Array>,
-                { status: 200, headers: { 'content-type': mime } },
+                { status: 200, headers: { 'content-type': mime, ...(rawLength === undefined ? {} : {'content-length': String(rawLength)}) } },
               );
               Object.defineProperty(response, 'url', { value: url.href });
               returned = true;
               resolve(response);
-            } catch {
-              fail();
+            } catch (error) {
+              fail(error instanceof XhsMediaError ? error : undefined);
             }
           },
         );
-        req.on('error', fail);
-        timer = setTimeout(fail, 10000);
+        req.on('error', () => fail());
+        timer = setTimeout(() => fail(new XhsMediaError('XHS_MEDIA_TIMEOUT')), 10000);
         timer.unref?.();
         options.signal.addEventListener('abort', abort, { once: true });
-        if (options.signal.aborted) fail();
+        if (options.signal.aborted) abort();
         else req.end();
       } catch {
         fail();

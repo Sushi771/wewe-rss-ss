@@ -1,3 +1,5 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
+import { XhsRequestBudget } from './xhs-request-budget';
 import { Test } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import {
@@ -13,6 +15,10 @@ import { TrpcRouter, isLocalXhsStatusRequest } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcModule } from '../trpc/trpc.module';
 import { RedbookTransport } from './redbook-client';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
+import { projectWriterGate } from './project-writer-boundary';
 
 const cookies = {
   a1: 'synthetic-a1-only',
@@ -100,7 +106,208 @@ function fixture() {
   });
   return { api, media };
 }
+it('rejects an unsafe counter boundary before reserve without resetting it', async () => {
+  const reserve = jest.fn(async () => true);
+  const budget = new XhsRequestBudget({ reserve, read: async id => ({ id, used: Number.MAX_SAFE_INTEGER, limit: 1, nextAt: 0, intervalMs: 0 }) });
+  await expect(budget.check('synthetic')).rejects.toThrow('XHS_REQUEST_BUDGET_EXHAUSTED');
+  expect(reserve).not.toHaveBeenCalled();
+});
+
 describe('default-off production source wiring with synthetic sessions only', () => {
+  it('reports the process stop while disabled and restores a session without clearing it or dispatching', async () => {
+    let enabled = true;
+    const storage = vault();
+    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+      async (request) => ({
+        status: 461,
+        url: request.url,
+        body: {},
+      }),
+    );
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => enabled,
+      vault: storage,
+      api,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toMatchObject({
+      reason: 'unknown_rejection',
+    });
+    expect(api).toHaveBeenCalledTimes(1);
+    enabled = false;
+    const disabled = await runtime.connectionStatus();
+    expect(disabled).toMatchObject({
+      liveEnabled: false,
+      connected: false,
+      sessionPresent: true,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      code: 'XHS_LIVE_ACCESS_DISABLED',
+    });
+    expect(storage.status).not.toHaveBeenCalled();
+    expect(storage.load).not.toHaveBeenCalled();
+    expect(JSON.stringify(disabled)).not.toContain(cookies.a1);
+    expect(JSON.stringify(disabled)).not.toContain(cookies.web_session);
+    enabled = true;
+    const restored = await runtime.restoreSession();
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    expect(restored).toMatchObject({
+      connected: true,
+      sessionPresent: true,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      code: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    expect(api).toHaveBeenCalledTimes(1);
+    await runtime.disconnectSession();
+    expect((await runtime.connectionStatus()).riskCode).toBe(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+      'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    );
+    expect(api).toHaveBeenCalledTimes(1);
+    runtime.onModuleDestroy();
+  });
+  it('charges context reconstruction, queued work and media before transport without an extra dispatch', async () => {
+    const injected = fixture();
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api: injected.api,
+      media: injected.media,
+      profileParser: () => author,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    function allowance(limit: number) {
+      let used = 0;
+      return {
+        budget: new XhsRequestBudget({
+          reserve: async () => {
+            if (used >= limit) return false;
+            used++;
+            return true;
+          },
+          read: async (id) => ({ id, used, limit, nextAt: 0, intervalMs: 0 }),
+        }),
+        used: () => used,
+      };
+    }
+    const first = allowance(1);
+    await expect(
+      runtime.withRequestBudget(first.budget, 'first', () =>
+        runtime.list(author.id, null),
+      ),
+    ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
+    expect(injected.api).toHaveBeenCalledTimes(1);
+    expect(first.used()).toBe(1);
+    const next = allowance(3);
+    await runtime.withRequestBudget(next.budget, 'next', async () => {
+      // Register a queued continuation inside the same admission scope.
+      await Promise.resolve().then(() => runtime.list(author.id, null));
+      await runtime.detail(author.id, 'synthetic-note');
+      await expect(
+        runtime.metrics(author.id, 'synthetic-note'),
+      ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
+    });
+    expect(next.used()).toBe(3);
+    expect(injected.api).toHaveBeenCalledTimes(3);
+    expect(injected.media).toHaveBeenCalledTimes(1);
+    runtime.onModuleDestroy();
+  });
+  it('keeps comment collection separately default-off without loading credentials or issuing a request', () => {
+    const storage = vault(),
+      api = jest.fn();
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      vault: storage,
+      api,
+    });
+    expect(runtime.capability().canCollectComments).toBe(false);
+    expect(() =>
+      runtime.comments('synthetic-author', 'synthetic-note', ''),
+    ).toThrow('XHS_COMMENT_COLLECTION_DISABLED');
+    expect(api).not.toHaveBeenCalled();
+    expect(storage.load).not.toHaveBeenCalled();
+    runtime.onModuleDestroy();
+  });
+  it('routes explicit top/reply pages through injected transport and stops without retries after signature rejection', async () => {
+    const base = fixture();
+    let rejectSignature = false;
+    const api = jest.fn(async (request: Parameters<RedbookTransport>[0]) => {
+      if (!new URL(request.url).pathname.includes('/comment/'))
+        return base.api(request);
+      if (rejectSignature)
+        return {
+          status: 406,
+          url: request.url,
+          body: { success: false, code: 300015 },
+        };
+      return {
+        status: 200,
+        url: request.url,
+        body: {
+          success: true,
+          code: 0,
+          data: {
+            comments: [
+              {
+                id: request.url.includes('/sub/page') ? 'reply' : 'root',
+                content: 'synthetic-only',
+                like_count: '0',
+                user_info: { nickname: 'Synthetic' },
+              },
+            ],
+            has_more: false,
+            cursor: '',
+          },
+        },
+      };
+    });
+    const runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      commentsEnabled: () => true,
+      api,
+      media: base.media,
+    });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    await runtime.resolve(noteUrl);
+    expect(
+      (await runtime.comments(author.id, 'synthetic-note', '')).comments[0],
+    ).toMatchObject({ id: 'root', rootId: null, likes: 0 });
+    expect(
+      (await runtime.comments(author.id, 'synthetic-note', '', 'root'))
+        .comments[0],
+    ).toMatchObject({ id: 'reply', rootId: 'root', parentId: null });
+    expect((await runtime.connectionStatus()).requestAttempts).toMatchObject({
+      comments: 1,
+      replies: 1,
+    });
+    rejectSignature = true;
+    await expect(
+      runtime.comments(author.id, 'synthetic-note', ''),
+    ).rejects.toThrow('signature');
+    const count = api.mock.calls.length;
+    await expect(
+      runtime.comments(author.id, 'synthetic-note', ''),
+    ).rejects.toThrow('XHS_SOURCE_SIGNATURE_BLOCKED');
+    expect(api).toHaveBeenCalledTimes(count);
+    expect(runtime.capability().canCollectComments).toBe(false);
+    runtime.onModuleDestroy();
+  });
   it('registers the production source alias and never treats a disabled source as refresh-ready', async () => {
     const providers = Reflect.getMetadata('providers', TrpcModule);
     expect(
@@ -157,6 +364,11 @@ describe('default-off production source wiring with synthetic sessions only', ()
   });
   it('keeps the normal host factory default off without inspecting credentials', async () => {
     const old = process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
+    const oldUrl = process.env.DATABASE_URL;
+    const dir = await fs.mkdtemp(path.join(tmpdir(), 'xhs-disabled-boundary-'));
+    const file = path.join(dir, 'synthetic.sqlite');
+    await fs.writeFile(file, '', { flag: 'wx' });
+    process.env.DATABASE_URL = 'file:' + file.replace(/\\/g, '/');
     delete process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
     try {
       const runtime = createLocalXhsSubscriptionRuntime();
@@ -167,6 +379,10 @@ describe('default-off production source wiring with synthetic sessions only', ()
       });
       runtime.onModuleDestroy();
     } finally {
+      projectWriterGate().writerForUrl(process.env.DATABASE_URL)?.close();
+      if (oldUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = oldUrl;
+      await fs.rm(dir, { recursive: true, force: true });
       if (old === undefined) delete process.env.XHS_SUBSCRIPTION_LIVE_ENABLED;
       else process.env.XHS_SUBSCRIPTION_LIVE_ENABLED = old;
     }
@@ -331,26 +547,31 @@ describe('default-off production source wiring with synthetic sessions only', ()
     );
     await expect(pending).rejects.toThrow('XHS_SESSION_CHANGED');
   });
-  it('stops the current session after verification/permission failures instead of dispatching again', async () => {
-    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
-      async (request) => ({ status: 471, url: request.url, body: {} }),
-    );
-    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
-    await runtime.connectSession({
-      a1: cookies.a1,
-      webSession: cookies.web_session,
-    });
-    await expect(runtime.resolve(noteUrl)).rejects.toThrow('verification');
-    expect(runtime.capability().canRefresh).toBe(false);
-    expect(await runtime.connectionStatus()).toMatchObject({
-      code: 'XHS_SOURCE_VERIFICATION_BLOCKED',
-      verified: false,
-    });
-    await expect(runtime.resolve(noteUrl)).rejects.toThrow(
-      'XHS_SOURCE_VERIFICATION_BLOCKED',
-    );
-    expect(api).toHaveBeenCalledTimes(1);
-  });
+  it.each([461, 471])(
+    'stops the current session after an unknown HTTP %s rejection instead of dispatching again',
+    async (status) => {
+      const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+        async (request) => ({ status, url: request.url, body: {} }),
+      );
+      const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+      await runtime.connectSession({
+        a1: cookies.a1,
+        webSession: cookies.web_session,
+      });
+      await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+        'unknown_rejection',
+      );
+      expect(runtime.capability().canRefresh).toBe(false);
+      expect(await runtime.connectionStatus()).toMatchObject({
+        code: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+        verified: false,
+      });
+      await expect(runtime.resolve(noteUrl)).rejects.toThrow(
+        'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+      );
+      expect(api).toHaveBeenCalledTimes(1);
+    },
+  );
   it('does not claim protected-record deletion when cleanup failed, while memory access remains disconnected', async () => {
     const storage = vault();
     storage.disconnect.mockRejectedValue(Error('synthetic filesystem failure'));
@@ -465,3 +686,62 @@ describe('default-off production source wiring with synthetic sessions only', ()
       expect(isLocalXhsStatusRequest({ ...local, ...change })).toBe(false);
   });
 });
+
+it.each([
+  [461, {}, 'unknown_rejection'],
+  [471, {}, 'unknown_rejection'],
+  [461, { msg: 'captcha required' }, 'verification'],
+  [471, { code: -100 }, 'authentication'],
+])(
+  'hard stops HTTP %s without retry, refund or expansion of the request budget',
+  async (status, body, reason) => {
+    const api: jest.MockedFunction<RedbookTransport> = jest.fn(
+      async (request) => ({ status: status as number, url: request.url, body }),
+    );
+    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+    await runtime.connectSession({
+      a1: cookies.a1,
+      webSession: cookies.web_session,
+    });
+    const state = {
+      id: 'synthetic-budget',
+      limit: 14,
+      used: 13,
+      nextAt: 0,
+      intervalMs: 0,
+    };
+    const reserve = jest.fn(async () => {
+      if (state.used >= state.limit) return false;
+      state.used++;
+      return true;
+    });
+    const budget = new XhsRequestBudget({
+      reserve,
+      read: async () => ({ ...state }),
+    });
+    await expect(
+      runtime.withRequestBudget(budget, state.id, () =>
+        runtime.resolve(noteUrl),
+      ),
+    ).rejects.toThrow(String(reason));
+    const code = `XHS_SOURCE_${String(reason).toUpperCase()}_BLOCKED`;
+    expect(await runtime.connectionStatus()).toMatchObject({
+      code,
+      verified: false,
+    });
+    expect(runtime.capability().canDownload).toBe(false);
+    await expect(
+      runtime.withRequestBudget(budget, state.id, () =>
+        runtime.resolve(noteUrl),
+      ),
+    ).rejects.toThrow(code);
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(reserve).toHaveBeenCalledTimes(1);
+    expect(state).toMatchObject({
+      limit: 14,
+      used: 14,
+      intervalMs: 0,
+      nextAt: 0,
+    });
+  },
+);

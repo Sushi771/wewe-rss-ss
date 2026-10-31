@@ -1,8 +1,14 @@
 import { z } from 'zod';
 import { articleFilterShape, orderedArticleDates } from './article-date-filter';
+import {
+  xhsNumericFilterShape,
+  xhsNumericRange,
+  XhsMetricSnapshot,
+} from './xhs-engagement';
 
 export const xhsNoteFilterSchema = z
   .object({
+    ...xhsNumericFilterShape,
     creatorId: z.string().min(1).max(128).optional(),
     groupId: z.string().min(1).max(128).nullable().optional(),
     search: articleFilterShape.search,
@@ -10,13 +16,15 @@ export const xhsNoteFilterSchema = z
     dateEnd: articleFilterShape.dateEnd,
   })
   .strict()
-  .refine(orderedArticleDates);
+  .refine(orderedArticleDates)
+  .refine(xhsNumericRange);
 export type XhsNoteFilter = z.infer<typeof xhsNoteFilterSchema>;
 export type XhsAuthor = {
   id: string;
   name: string;
   profileUrl: string;
   avatarUrl?: string;
+  metrics?: XhsMetricSnapshot;
 };
 export type XhsSubscriptionResolution = {
   resolutionId: string;
@@ -29,6 +37,9 @@ export type XhsSubscriptionTask = {
   taskId: string;
   creatorId: string;
   kind: 'list' | 'download';
+  collectionStage?: 'listing' | 'details';
+  collectionScope?: 'recent' | 'all' | 'selected';
+  collectionMode?: 'basic' | 'full';
   state:
     | 'queued'
     | 'running'
@@ -42,6 +53,8 @@ export type XhsSubscriptionTask = {
   skipped: number;
   failed: number;
   remaining: number;
+  snapshotsSaved?: number;
+  mediaSummary?: {manifestNotes:number;declaredImages:number;recordedSavedImages:number;pendingImages:number;needsReviewNotes:number;blockedNotes:number;needsDetailRefreshNotes:number};
   code?: string;
   message: string;
   resumable?: boolean;
@@ -56,9 +69,15 @@ export type XhsConnectionStatus = {
     details: number;
     media: number;
     shortLinks: number;
+    comments?: number;
+    replies?: number;
   };
   liveEnabled: boolean;
   connected: boolean;
+  /** In-memory state only; this does not inspect or decrypt the stored vault. */
+  sessionPresent?: boolean;
+  /** Current process stop; absence is not evidence that a past risk was lifted. */
+  riskCode?: string;
   stored: boolean | null;
   verified: boolean;
   canConnect: boolean;
@@ -66,4 +85,55 @@ export type XhsConnectionStatus = {
   restartRequiresReparse: true;
   code?: string;
   message: string;
+};
+
+export const xhsOriginalLinkCodes = [
+  'XHS_ORIGINAL_LINK_SOURCE_UNAVAILABLE',
+  'XHS_ORIGINAL_LINK_CONTEXT_UNAVAILABLE',
+  'XHS_ORIGINAL_LINK_NOT_READY',
+  'XHS_SOURCE_RISK_UNAVAILABLE',
+  'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+  'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+  'XHS_NOTE_ID_INVALID',
+  'XHS_SUBSCRIPTION_REQUIRED',
+  'XHS_BUDGET_SCOPE_MISMATCH',
+  'XHS_REQUEST_BUDGET_REQUIRED',
+  'XHS_REQUEST_BUDGET_EXHAUSTED',
+  'XHS_REQUEST_RATE_PAUSED',
+  'XHS_LIVE_ACCESS_DISABLED',
+  'XHS_SESSION_REQUIRED',
+  'XHS_SESSION_CHANGED',
+  'XHS_PROFILE_SCHEMA_UNRECOGNIZED',
+  'XHS_AUTHOR_MISMATCH',
+  'XHS_ACCESS_CONTEXT_EXPIRED',
+  'XHS_ACCESS_CONTEXT_UNAVAILABLE',
+  'XHS_CURSOR_CYCLE',
+  'XHS_SOURCE_CONFIGURATION_BLOCKED',
+  'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+  'XHS_SOURCE_VERIFICATION_BLOCKED',
+  'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+  'XHS_SOURCE_PERMISSION_BLOCKED',
+  'XHS_SOURCE_SIGNATURE_BLOCKED',
+  'XHS_SOURCE_RATE_LIMIT_BLOCKED',
+  'XHS_SOURCE_TRANSPORT_BLOCKED',
+  'XHS_SOURCE_RESPONSE_BLOCKED',
+] as const;
+export type XhsOriginalLinkCode = (typeof xhsOriginalLinkCodes)[number];
+/** Transient explicit-navigation result; never store a ready URL in note rows. */
+export type XhsOriginalLinkResult =
+  | { state: 'ready'; url: string }
+  | { state: 'not_ready'; code: XhsOriginalLinkCode };
+export type XhsSourceBudgetScope =
+  | { purpose: 'resolution' }
+  | { purpose: 'original-link'; creatorId: string };
+export type XhsSourceBudgetView = {
+  budgetId: string;
+  limit: number;
+  used: number;
+  remaining: number;
+  nextAt: number;
+  intervalMs: number;
+  scopeUsed?: number;
+  /** Legacy count limits are retained for compatibility and are not enforced. */
+  limitEnforced?: false;
 };
