@@ -56,3 +56,10 @@ test('only recovered unknown IDs are eligible for media, without widening select
  buttons().at(-1).props.onClick();await tick();assert.deepEqual(f.calls,[{jobId:'job',generationId:'gen',noteIds:[id]}]);
  const blocked=fixture(j,[id,other]);tree=blocked.draw();assert.equal(blocked.nodes(tree,n=>n.type==='button').at(-1).props.disabled,true);assert.equal(blocked.calls.length,0);assert.match(blocked.strings(tree),/需受控刷新详情/);
 });
+
+test('paused zero-dispatch repair requires exact selection and bounded explicit confirmation',async()=>{
+ const paused={...job,state:'paused',generationRecovery:{...job.generationRecovery,basicRepair:{noteIds:[id],bounded:true}}};
+ const f=fixture(paused,[id]);let tree=f.draw();const boxes=()=>f.nodes(tree,n=>n.type==='input'),button=()=>f.nodes(tree,n=>n.type==='button')[0];
+ assert.equal(button().props.disabled,true);boxes()[0].props.onChange({target:{checked:true}});tree=f.draw();boxes()[1].props.onChange({target:{checked:true}});tree=f.draw();assert.equal(button().props.disabled,false);
+ f.setSelected([other]);tree=f.draw();assert.equal(button().props.disabled,true);f.setSelected([id]);tree=f.draw();button().props.onClick();await tick();assert.deepEqual(f.calls,[{jobId:'job',generationId:'gen',noteIds:[id],bounded:true}]);
+});

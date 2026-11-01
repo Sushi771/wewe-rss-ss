@@ -719,6 +719,36 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     }
     expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
   },20000);
+  it('resumes only the exact bounded zero-dispatch session repair after local session restoration',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),ids=[key('safe')];
+    await db.xhsNote.create({data:{id:ids[0],creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))delete result.body.data.items[0].note_card.interact_info.collected_count;return result;});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:ids});await drain();api.mockClear();
+    jest.spyOn(runtime,'restoreCheckpointAuthorContext').mockImplementationOnce(()=>{throw new XhsSubscriptionError('XHS_SESSION_REQUIRED');});
+    await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids,bounded:true});await drain();
+    const stopped=await read();expect(stopped.state).toBe('paused');expect(stopped.code).toBe('XHS_SESSION_REQUIRED');expect(api).not.toHaveBeenCalled();
+    expect(stopped.basicRepairRequest.bounds.used).toEqual({profile:0,list:0,detail:0,media:0});expect(stopped.basicRepairRequest.taskId).toBeUndefined();
+    stopped.lastPauseCode='XHS_MEDIA_REQUEST_REJECTED';
+    const save=async(j:any)=>db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(j)} WHERE id='job'`;
+    for(const kind of ['used','limit','unknown','other','selection']){const bad=structuredClone(stopped);
+      if(kind==='used')bad.basicRepairRequest.bounds.used.list=1;
+      if(kind==='limit')bad.basicRepairRequest.bounds.list=3;
+      if(kind==='unknown')bad.generation.activeFence={state:'started',phase:'list'};
+      if(kind==='other')bad.code='XHS_LOCAL_OPERATION_FAILED';
+      await save(bad);await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:kind==='selection'?[key('note')]:ids,bounded:true})).rejects.toThrow();expect(api).not.toHaveBeenCalled();
+    }
+    const eight=structuredClone(stopped), originalEight=Array.from({length:8},(_,i)=>key('eight-'+i)), foreign=key('different');
+    eight.basicRepairRequest.noteIds=originalEight;eight.basicRepairRequest.bounds.detail=8;eight.generation.basicRepair.noteIds=originalEight;
+    eight.generation.directoryIds=[...eight.generation.directoryIds,...originalEight,foreign];await save(eight);
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:[...originalEight.slice(0,7),foreign],bounded:true})).rejects.toThrow();expect(api).not.toHaveBeenCalled();
+    const beforeChildren=await db.$queryRaw<Array<{n:bigint}>>`SELECT COUNT(*) AS n FROM xhs_subscription_tasks WHERE creator_id='creator'`;
+    await save(stopped);await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids,bounded:true});
+    await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids,bounded:true})).rejects.toThrow();await drain();
+    const afterChildren=await db.$queryRaw<Array<{n:bigint}>>`SELECT COUNT(*) AS n FROM xhs_subscription_tasks WHERE creator_id='creator'`;expect(Number(afterChildren[0].n)-Number(beforeChildren[0].n)).toBe(1);
+    expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
+  },30000);
   it('explicitly resumes selected media without repeating detail and refuses the historical unknown',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});

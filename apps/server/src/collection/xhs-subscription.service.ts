@@ -75,6 +75,7 @@ export interface XhsSubscriptionSource {
   resolve(
     url: string,
   ): Promise<{ inputKind: 'note' | 'profile'; author: XhsAuthor }>;
+  hasAuthorContext?(authorId: string): boolean;
   list(
     authorId: string,
     cursor: string | null,
@@ -96,6 +97,7 @@ export interface XhsSubscriptionSource {
 }
 type Task = XhsSubscriptionTask & {
   schedule?: {round:string;phase:'basic'|'media';batch?:number};
+  scheduledContext?: {authorId:string;used:1;state:'started'|'confirmed'};
   historyExcludedIds?: string[];
   scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
   noteIds: string[];
@@ -1078,6 +1080,37 @@ export class XhsSubscriptionService implements OnModuleInit {
     }
     return this.task(input);
   }
+  /** One durable author-context attempt per scheduled creator/round. */
+  private async prepareScheduledContext(t: Task, authorId: string) {
+    if (!this.source?.hasAuthorContext || !/^[a-zA-Z0-9_-]{1,128}$/.test(authorId)) return reject('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    const ready=this.source.hasAuthorContext(authorId);
+    const marker=await this.write(8192,async tx=>{
+      const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND creator_id=${t.creatorId}`;
+      if(rows.length!==1||rows[0].state!=='running') return reject('XHS_TASK_STATE_CHANGED');
+      const saved=JSON.parse(rows[0].document) as Task;
+      if(saved.schedule?.phase!=='basic'||saved.schedule.round!==t.schedule?.round||saved.taskId!==t.taskId||saved.creatorId!==t.creatorId||scheduledTaskId(saved.schedule.round,t.creatorId,'basic')!==t.taskId)return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      const old=saved.scheduledContext;
+      if(old && (old.authorId!==authorId||old.used!==1||!['started','confirmed'].includes(old.state)))return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      if(old?.state==='started'||(old && !ready))return reject('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+      if(ready) return old;
+      const next={authorId,used:1 as const,state:'started' as const};saved.scheduledContext=next;
+      if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      return next;
+    });
+    if(marker)t.scheduledContext=marker;
+    if(ready)return;
+    const result=await this.source.resolve(`https://www.xiaohongshu.com/user/profile/${authorId}`);
+    if(result.inputKind!=='profile'||result.author?.id!==authorId||!this.source.hasAuthorContext(authorId))return reject('XHS_AUTHOR_MISMATCH');
+    await this.write(8192,async tx=>{
+      const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND creator_id=${t.creatorId}`;
+      if(rows.length!==1||rows[0].state!=='running')return reject('XHS_TASK_STATE_CHANGED');
+      const saved=JSON.parse(rows[0].document) as Task;
+      if(saved.schedule?.round!==t.schedule?.round||saved.scheduledContext?.state!=='started'||saved.scheduledContext.authorId!==authorId||saved.scheduledContext.used!==1)return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      saved.scheduledContext={authorId,used:1,state:'confirmed'};
+      if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      t.scheduledContext=saved.scheduledContext;
+    });
+  }
   private async run(t: Task, directory?: string) {
     if (!active(t)) {
       this.pending.delete(t.taskId);
@@ -1091,6 +1124,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       t.message = '处理中';
       await this.persist(t);
       if (t.schedule?.phase === 'media') { await this.runScheduledMedia(t,creator); return; }
+      if (t.schedule?.phase === 'basic') await this.prepareScheduledContext(t,creator.externalAuthorId!);
       if (t.kind === 'list' && t.collectionStage !== 'details') {
         await this.updateList(t, creator);
         if (active(t) && t.collectDetails && (t.listFinished || t.selectionComplete)) {

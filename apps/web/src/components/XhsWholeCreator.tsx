@@ -457,7 +457,7 @@ export function XhsWholeGeneration({ job, refresh }: { job: Job; refresh: () => 
 /** Explicit per-generation action; selection is never widened or auto-retried. */
 export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
   job: { id: string; state: string; items: { noteId: string; title: string; mediaResult?: 'complete' | 'needs-review' | 'needs-detail-refresh' }[];
-    generationRecovery?: { id: string; directoryComplete: boolean; selectionComplete?: boolean; resumable: boolean; excludedIds?: string[]; mediaRecoverableIds?: string[]; newResult?: string } | null };
+    generationRecovery?: { id: string; directoryComplete: boolean; selectionComplete?: boolean; resumable: boolean; basicRepair?: {noteIds:string[];bounded:true}; excludedIds?: string[]; mediaRecoverableIds?: string[]; newResult?: string } | null };
   selectedNoteIds: string[]; refresh: () => Promise<unknown>;
 }) {
   const [confirmedKey, setConfirmedKey] = useState('');
@@ -476,7 +476,9 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
     selectedNoteIds.length > 0 && selectedNoteIds.length <= 1000 &&
     new Set(selectedNoteIds).size === selectedNoteIds.length &&
     items.every(Boolean);
-  const basicEligible = eligible && (!boundedBasic || selectedNoteIds.length <= 8) && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
+  const existingRepair = !!generation && job.state === 'paused' && generation.resumable && !generation.newResult && boundedBasic && !!generation.basicRepair?.noteIds &&
+    JSON.stringify([...generation.basicRepair?.noteIds].sort()) === JSON.stringify([...selectedNoteIds].sort()) && items.every(Boolean);
+  const basicEligible = (eligible || existingRepair) && (!boundedBasic || selectedNoteIds.length <= 8) && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
   const mediaEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id) && !(generation?.mediaRecoverableIds ?? []).includes(id));
   const run = async () => {
     if (lock.current || !mediaEligible || confirmedKey !== key || !generation) return;

@@ -63,6 +63,16 @@ type Job = {
   sourceFence?: { marker: string; phase: string; state: string };
   generation?: Record<string, any>;
 };
+/** Only an explicitly bounded, never-dispatched repair may resume a local preparation failure. */
+function pendingUnsentBasicRepair(job: Job): boolean {
+  const r=job.basicRepairRequest, g=job.generation, b=r?.bounds;
+  return job.state==='paused' && typeof job.code==='string' && job.code.length>0 && g?.localFailure?.code===job.code && g.localFailure.stage==='prepare' && !!r && !r.taskId && !!b &&
+    Array.isArray(r.noteIds) && r.noteIds.length>0 && r.noteIds.length<=8 && new Set(r.noteIds).size===r.noteIds.length &&
+    b.profile===1 && b.list===2 && b.detail===r.noteIds.length && b.media===0 &&
+    !!b.used && [b.used.profile,b.used.list,b.used.detail,b.used.media].every(v=>v===0) && Array.isArray(b.detailIds) && b.detailIds.length===0 &&
+    Array.isArray(g.basicRepair?.noteIds) && !g.basicRepair.taskId && JSON.stringify([...g.basicRepair.noteIds].sort())===JSON.stringify([...r.noteIds].sort()) &&
+    !activeWholeFence(job) && generationReviewSettled(job);
+}
 /** A finite explicit run over durable existing primitives; restart never dispatches. */
 @Injectable()
 export class XhsWholeCreatorService implements OnModuleInit {
@@ -625,6 +635,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
           if(children.length!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
           const child=JSON.parse(children[0].document);
           if(child.creatorId!==job.creatorId||child.collectionScope!=='selected'||child.basicOnly!==true||child.collectDetails!==true||child.reuseCompleteCache!==true||!Array.isArray(child.selectedIds)||JSON.stringify([...child.selectedIds].sort())!==JSON.stringify([...existing.noteIds].sort()))throw new XhsSubscriptionError('XHS_SELECTION_CHANGED');
+          selected=existing.noteIds;
+        }else if(existing && pendingUnsentBasicRepair(job)){
+          if(!input.bounded || !Array.isArray(noteIds) || JSON.stringify([...noteIds].sort())!==JSON.stringify([...existing.noteIds].sort()) || existing.noteIds.some(id=>!g.directoryIds.includes(id)))throw new XhsSubscriptionError('XHS_SELECTION_INVALID');
           selected=existing.noteIds;
         }else{
           if(rows[0].state!=='partial'||existing)throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
@@ -1265,6 +1278,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       } : undefined,
       reviewedRecovery: generation && (!reviewAttempt || oldPrepared || (reviewContext?.state==='ready' && reviewAttempt.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch)) ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
       generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const, handoffDone: !!(job as any).historyHandoff,
+        basicRepair: pendingUnsentBasicRepair(job) && !this.running.has(id) && !this.starting.has(id) ? {noteIds:[...job.basicRepairRequest!.noteIds],bounded:true as const} : undefined,
         mediaRecoverableIds: [...new Set<string>([reviewAttempt,...(reviewAttemptHistory??[])].filter(a=>a&&generationReviewSettled({...job,reviewAttempt:a})).map(a=>a.receipt.noteId as string))],
         profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
         missing: Number(generation.missingIds?.length ?? 0), originalNoteStatus: String(generation.originalNoteStatus ?? 'unknown'),
