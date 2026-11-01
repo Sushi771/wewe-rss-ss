@@ -21,9 +21,11 @@ it.each([true, false, 'shutdown'] as const)('starts real Nest during audit and a
   process.env.NODE_ENV = 'test';
   process.env.WECHAT2RSS_ENABLED = '0';
   process.env.XHS_LIVE_ACCESS_ENABLED = '0';
-  const db = new PrismaClient();
+  const db = new PrismaClient({ datasources: { db: { url: process.env.DATABASE_URL } } });
   let app: any, appClosed = false;
   try {
+    const initial = await db.$queryRawUnsafe<Array<{ name: string }>>("SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%'");
+    expect(initial).toEqual([]);
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
       if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;

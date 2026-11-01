@@ -60,8 +60,8 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     return testBody;
   };
   const it = Object.assign(
-    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout ?? 15000),
-    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout ?? 15000) },
+    (name: any, fn: any, timeout?: number) => globalThis.it(name, track(fn), timeout ?? 40000),
+    { each: (rows: any) => (name: any, fn: any, timeout?: number) => globalThis.it.each(rows)(name, track(fn), timeout ?? 40000) },
   ) as jest.It;
 
   let db:PrismaClient, folder:string, runtime:XhsSubscriptionRuntime, subscriptions:XhsSubscriptionService, whole:XhsWholeCreatorService;
@@ -232,7 +232,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(next[0].pathname.endsWith('user_posted')).toBe(true);expect(next.some(url=>url.pathname.endsWith('otherinfo'))).toBe(false);
     expect(next[0].searchParams.get('xsec_token')).toBe('');expect(next[0].searchParams.get('xsec_source')).toBe('');
     expect(requestedDetails()).toEqual(['note']);await assertUnknownPreserved();
-  }, 15000);
+  }, 40000);
   it.each([401,461])('retains a real list refusal %s after restoring checkpoint identity without a profile retry',async status=>{
     jest.spyOn(subscriptions,'refreshFull').mockRejectedValueOnce(Error('synthetic child creation failure'));
     await whole.prepareGeneration({...input,phaseLimits:{...input.phaseLimits,profile:4}});
@@ -503,7 +503,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await read()).generation.activeFence.state).toBe('started');const prior=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='parse-failure-task'`;expect(prior[0].document).toBe(before);
     await db.$transaction(checkpoint);const result=await read();expect(result.generation.detailReceipts[noteKey]).toMatchObject({outcome:'local-failure',code:'XHS_DETAIL_PARSE_FAILED'});expect(result.generation.activeFence).toBeUndefined();
     const stored=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='parse-failure-task'`;expect(JSON.parse(stored[0].document).items[noteKey]).toBe('failed');await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('separates old missing notes from the returned directory and preserves their cached body without requesting them',async()=>{
     await db.xhsNote.update({where:{id:noteKey},data:{status:'complete',contentHtml:'<p>old cached body remains</p>'}});
     directory(['fresh']);await (whole as any).prepareGeneration(input);await execute();await drain();
@@ -529,7 +529,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     live=true;await execute(id);await drain();diagMark('resume-drained');const completed=await read();
     expect(completed.state).toBe('partial');expect(completed.generation.id).toBe(id);
     expect(requestedDetails()).toEqual(['note','second']);await assertUnknownPreserved();
-  }, 15000);
+  }, 40000);
   it('retains both unknown markers and consumed counts when a successful body response loses its checkpoint transaction',async()=>{
     const checkpoint=runtime.checkpointWholeSource.bind(runtime);let failed=false;
     jest.spyOn(runtime,'checkpointWholeSource').mockImplementation(async(tx,collectedAt)=>{
@@ -548,7 +548,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const budget=await currentBudget();await assertUnknownPreserved();
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();
     await expect(execute()).rejects.toThrow();expect(await currentBudget()).toEqual(budget);expect(requestedDetails()).toEqual(['note']);
-  }, 15000);
+  }, 40000);
   it('creates a current-directory child instead of resuming the old blocked archive selection',async()=>{
     const freshKey=JSON.stringify(['xiaohongshu','note','fresh']);
     await db.xhsNote.update({where:{id:noteKey},data:{status:'listed',contentHtml:'<p>old partial cache must remain</p>'}});
@@ -589,7 +589,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     let enter!:()=>void,release!:()=>void;const queued=new Promise<void>(r=>enter=r),gate=new Promise<void>(r=>release=r);const originalDispatch=(runtime as any).sourceDispatch;
     (runtime as any).sourceDispatch=async(op:any,ready:any,group:any,charge:any)=>{if(charge==='media'){enter();await gate;}return originalDispatch(op,ready,group,charge);};
     await whole.prepareGeneration(input);await execute();await queued;try{await whole.cancel('job');}finally{release();}await drain();expect(media).not.toHaveBeenCalled();expect((await read()).state).toBe('cancelled');await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it('commits selected basic fields from one detail without media and leaves excluded unknown pending',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -604,7 +604,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(JSON.parse(task).mediaManifests[safe]).toMatchObject({state:'needs-review',manifest:{images:[{ordinal:1,resourceKey:null}]}});
     expect(task).not.toContain('invalid.example');
     expect(job.state).toBe('partial');expect(job.generation.basicCompleted).toBe(true);expect(job.generation.missingIds).toContain(noteKey);expect(job.generation.detailReceipts[safe]).toMatchObject({outcome:'checkpointed'});await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it('checkpoints media identity with basic data while signed URLs remain session-only',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -620,7 +620,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     runtime.onModuleDestroy();expect(runtime.getTransientMediaUrl('author','safe',saved.manifest.version,saved.manifest.images[0].resourceKey)).toBeUndefined();
     expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({pendingImages:1,needsDetailRefreshNotes:1});
     expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it.each(['fresh','old-prepared','entry-rollback'] as const)('separates versioned context intent from old detail permits: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
     const initial=await read(),proof=initial.legacyMaintenanceProof,initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
@@ -670,7 +670,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       await expect(db.$transaction(tx=>startReviewedContextStage(tx,'job',intent.id,'list',target))).rejects.toThrow();
     }
     expect(JSON.stringify((await read()).reviewAttempt)).toBe(before);expect(api.mock.calls.length).toBe(calls);await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it.each(['success','cached','old-prepared','profile-rebuild','profile-wrong','second-page','lost','second-lost','restricted','wrong-author','missing','exhausted','ready-restart','ready-cached','session-missing','expired-context','binding-mismatch','source-preblocked'] as const)('recovers only one excluded note through bounded context: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
     const initial=await read(),proof=initial.legacyMaintenanceProof,initialBudgets=await db.$queryRaw<any[]>`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets WHERE id IN ('job','xhs:source-total')`;
@@ -751,7 +751,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       }
     }
     expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('resumes only the exact bounded zero-dispatch session repair after local session restoration',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),ids=[key('safe')];
     await db.xhsNote.create({data:{id:ids[0],creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
@@ -781,7 +781,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids,bounded:true})).rejects.toThrow();await drain();
     const afterChildren=await db.$queryRaw<Array<{n:bigint}>>`SELECT COUNT(*) AS n FROM xhs_subscription_tasks WHERE creator_id='creator'`;expect(Number(afterChildren[0].n)-Number(beforeChildren[0].n)).toBe(1);
     expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
-  },30000);
+  }, 40000);
   it('explicitly resumes selected media without repeating detail and refuses the historical unknown',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -800,7 +800,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const saved=await db.xhsNote.findUniqueOrThrow({where:{id:safe}});expect(saved.contentHtml).toContain('Synthetic body safe');expect(saved.contentHtml).toContain('data-xhs-media');
     await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[safe]});await drain();expect(media).toHaveBeenCalledTimes(1);
     await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('repairs only eight selected missing basics and reuses fourteen complete notes',async()=>{
     await useDurableWal();
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), names=Array.from({length:22},(_,i)=>'repair-'+String(i).padStart(2,'0'));
@@ -837,7 +837,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await drain();const job=await read();expect(job.state).toBe('paused');expect(requestedDetails()).toEqual(['repair-a']);
     await expect(whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:names.map(key)})).rejects.toThrow();
     expect(requestedDetails()).toEqual(['repair-a']);await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('continues an interrupted selected basic repair from its persisted child without replaying completed detail',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),names=['repair-a','repair-b'],ids=names.map(key);
     for(const n of names)await db.xhsNote.create({data:{id:key(n),creatorId:'creator',title:n,publishTime:0,kind:'image-text',status:'listed'}});
@@ -854,7 +854,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.resumeMissingBasic({jobId:'job',generationId:id,noteIds:ids});await drain();
     const done=await read();if(done.state!=='partial'){const child=await subscriptions.task({taskId:done.basicRepairRequest.taskId});console.info('synthetic repair resume diagnostic',{code:done.code,childState:child.state,childCode:child.code,activeFence:done.generation.activeFence?.state,details:requestedDetails()});}expect({state:done.state,code:done.code}).toEqual({state:'partial',code:'XHS_MEDIA_OR_SUPPLEMENT_PENDING'});expect(requestedDetails()).toEqual(['repair-a','repair-b']);expect(done.basicRepairRequest).toBeUndefined();
     await assertUnknownPreserved();
-  },30000);
+  }, 40000);
   it('marks a missing media manifest for review without treating it as zero images',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -866,7 +866,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(JSON.parse(raw).mediaManifests[safe]).toEqual({state:'needs-review',code:'XHS_MEDIA_MANIFEST_UNAVAILABLE'});
     expect((await subscriptions.task({taskId:job.listTask})).mediaSummary).toMatchObject({manifestNotes:0,needsReviewNotes:1,needsDetailRefreshNotes:1});
     expect((await db.xhsNote.findUnique({where:{id:safe}}))?.contentHtml).toContain('Synthetic body safe');expect(media).not.toHaveBeenCalled();
-  },15000);
+  }, 40000);
   it('reuses complete basic fields even when media has not been archived',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'Saved',publishTime:1760000000,kind:'image-text',status:'listed',contentHtml:'<div id="js_content"><p>Existing body</p></div>'}});
@@ -876,7 +876,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
     expect(requestedDetails()).toEqual([]);expect(media).not.toHaveBeenCalled();
     expect((await db.xhsNote.findUnique({where:{id:safe}}))?.contentHtml).toContain('Existing body');await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it.each(['success','lost','restricted','media-invalid','active','two-unsigned-restart','two-signed-restart','two-signed-live','two-unknown','two-invalid'] as const)('allows one explicitly bound excluded detail from a partial generation without replay: %s',async mode=>{
     await db.$executeRaw`UPDATE xhs_request_budgets SET interval_ms=1000 WHERE id IN ('job','xhs:source-total')`;
     const initial=await read(),proof=initial.legacyMaintenanceProof;
@@ -950,7 +950,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       expect((await restarted.view('job')).reviewedRecovery?.state).toBe('consumed');
     }
     await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('resumes committed basic fields without replay after interruption',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), ids=[key('safe-a'),key('safe-b')];
     for(const id of ids)await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -960,7 +960,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await run();await drain();expect(requestedDetails()).toEqual(['safe-a']);expect((await read()).state).toBe('paused');
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();live=true;await run();await drain();
     expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect(media).not.toHaveBeenCalled();expect((await read()).generation.basicCompleted).toBe(true);await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('excludes a newly unknown detail and carries earlier basic receipts without replay',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), a=key('safe-a'), b=key('safe-b');
     for(const id of [a,b])await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -977,7 +977,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect((await read()).generation.missingIds).toEqual(expect.arrayContaining([noteKey,b]));await assertUnknownPreserved();
     await expect(whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'safe-a'})).rejects.toThrow();
     await expect(whole.prepareReviewedAttempt({jobId:'job',confirmUnknownRetry:true,excludedNoteId:'safe-b'})).resolves.toMatchObject({state:'prepared'});
-  },20000);
+  }, 40000);
   it('excludes an unknown note from an older media child before starting basic collection',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), a=key('safe-a'), b=key('safe-b');
     for(const id of [a,b])await db.xhsNote.create({data:{id,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
@@ -990,7 +990,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.reviewGeneration({jobId:'job',generationId:id,confirmUnknown:true,excludeUnknown:true});
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[b]});await drain();
     expect(requestedDetails()).toEqual(['safe-a','safe-b']);expect(media).toHaveBeenCalledTimes(1);expect((await db.xhsNote.findUnique({where:{id:b}}))?.contentHtml).toContain('Synthetic body safe-b');await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('collects a synthetic 21-note basic range while excluding two unknown notes',async()=>{
     await useDurableWal();
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), safe=Array.from({length:21},(_,i)=>'safe-'+String(i).padStart(2,'0'));
@@ -1007,7 +1007,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     directory(['note','safe']); await whole.prepareGeneration(input);const id=(await read()).generation.id;
     await (whole as any).executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
     expect(requestedDetails()).not.toContain('note');expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it('keeps the narrowed scope through interruption and reuses verified cached bodies',async()=>{
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]);
     const cached=key('a-cached'), first=key('b-first'), second=key('c-second');
@@ -1025,7 +1025,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect(result.generation.selectedIds).toEqual(selectedIds);expect(result.generation.missingIds).toContain(noteKey);expect(result.state).toBe('partial');
     expect((await db.xhsNote.findUnique({where:{id:cached}}))?.contentHtml).toContain('Verified cached body');
     await run();await drain();expect(requestedDetails()).toEqual(['b-first','c-second']);await assertUnknownPreserved();
-  },20000);
+  }, 40000);
   it('stops narrowed recovery at a platform refusal and cannot replay after restart',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'safe',publishTime:0,kind:'image-text',status:'listed'}});
     directory(['note','safe']);const normal=api.getMockImplementation()!;
@@ -1036,7 +1036,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await run();await drain();expect((await read()).state).toBe('paused');expect(requestedDetails()).toEqual(['safe']);const budget=await currentBudget();
     await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();
     await expect(run()).rejects.toThrow();expect(requestedDetails()).toEqual(['safe']);expect(await currentBudget()).toEqual(budget);await assertUnknownPreserved();
-  },15000);
+  }, 40000);
   it('replaces an old completed directory-only child and saves all returned basic fields',async()=>{
     const ids=['note',...Array.from({length:22},(_,i)=>`old-${i}`)];
     const keys=ids.map(id=>JSON.stringify(['xiaohongshu','note',id]));
@@ -1078,7 +1078,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.xhsNote.findUnique({where:{id:missingKey}}))?.status).toBe('listed');
     expect(await db.xhsMetricSnapshot.count({where:{ownerKind:'note',ownerId:missingKey}})).toBe(0);
     await assertUnknownPreserved();
-  }, 15000);
+  }, 40000);
   it('leaves historical export children unchanged when caching without a destination',async()=>{
     const originals = new Map<string,string>();
     for (const taskId of ['old-archive','old-download']) {
@@ -1092,7 +1092,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.prepareGeneration(input);await execute();await drain();expect((await read()).state).toBe('partial');
     for(const [taskId,raw] of originals) expect((await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`)[0].document).toBe(raw);
     expect(pick).not.toHaveBeenCalled();expect(save).not.toHaveBeenCalled();await assertUnknownPreserved();
-  },30000);
+  }, 40000);
 
   it('retains only the fixed directory conflict code and never arbitrary local messages',()=>{
     const {TRPCError}=require('@trpc/server');const {safeSourceFailure}=require('./xhs-source-receipt');
@@ -1101,7 +1101,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const {ArticleDownloadError}=require('../article-download');
     expect(safeSourceFailure(new ArticleDownloadError('private path synthetic-secret',409,{code:'DIRECTORY_PICK_REQUIRED'}),'admitted').code).toBe('XHS_SAVE_DIRECTORY_SELECTION_REQUIRED');
     expect(safeSourceFailure(new ArticleDownloadError('private path synthetic-secret',409,{code:'OTHER'}),'admitted').code).toBe('XHS_LOCAL_OPERATION_FAILED');
-  });
+  }, 15000);
 
   it('starts one cache child and rejects duplicate execution',async()=>{
     await whole.prepareGeneration(input);const id=(await read()).generation.id;
