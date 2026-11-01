@@ -75,9 +75,21 @@ describe('XHS metric contract: public source only, no real requests', () => {
     expect(diagnostic.fieldDiagnostics?.collects).toMatchObject({present:true,type:'string',result:'parsed',parsed:0});
     expect(diagnostic.fieldDiagnostics?.shares).toMatchObject({present:true,type:'string',result:'invalid-format',parsed:null});
     expect(JSON.stringify(diagnostic)).not.toContain('synthetic-secret');
-    expect(JSON.stringify(diagnostic)).not.toContain('1.2万');
+    expect(diagnostic.fieldDiagnostics?.shares).toMatchObject({displayShape:'allowlisted',formatShape:'#.#万'});
     expect(xhsNoteMetrics({interact_info:{collected_count:null,share_count:{}}}).fieldDiagnostics).toMatchObject({collects:{result:'null',type:'null'},shares:{result:'invalid-type',type:'object'}});
     expect(xhsNoteMetrics({interact_info:{collected_count:10,share_count:'15'}}).values).toMatchObject({collects:10,shares:15});
+  });
+  it('retains only short count-like invalid text and redacts other payloads', () => {
+    for (const value of ['1,000','1.2万','3k','']) {
+      const m=xhsNoteMetrics({interact_info:{collected_count:value,share_count:value}},1);
+      expect(m.values.collects).toBeNull();expect(m.fieldDiagnostics?.collects).toMatchObject({result:'invalid-format',displayShape:'allowlisted',formatShape:value.replace(/[0-9]/g,'#')});
+    }
+    expect(xhsNoteMetrics({interact_info:{collected_count:'0'}}).values.collects).toBe(0);
+    const privateDigits=xhsNoteMetrics({interact_info:{share_count:'123456789 '}},1);expect(privateDigits.fieldDiagnostics?.shares).toMatchObject({displayShape:'allowlisted',formatShape:'######### '});expect(JSON.stringify(privateDigits)).not.toContain('123456789');
+    for (const value of ['token=synthetic-secret','https://example.com/?secret=x','9999999999999999','1\n2','x'.repeat(1000)]) {
+      const m=xhsNoteMetrics({interact_info:{share_count:value}},1);
+      expect(m.fieldDiagnostics?.shares).toMatchObject({result:'invalid-format',displayShape:'redacted'});expect(JSON.stringify(m)).not.toContain(value);
+    }
   });
   it.each([
     null,
@@ -293,7 +305,7 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     expect(saved.values).toEqual({likes:6,collects:10,shares:11,comments:7});
     expect(saved.valueCollectedAt).toEqual({likes:200,collects:100,shares:100,comments:200});
     expect(saved.fieldDiagnostics.collects).toMatchObject({result:'absent',persistence:'not-parsed'});
-    expect(saved.fieldDiagnostics.shares).toMatchObject({result:'invalid-format',persistence:'not-parsed'});
+    expect(saved.fieldDiagnostics.shares).toMatchObject({result:'invalid-format',persistence:'not-parsed',displayShape:'allowlisted',formatShape:'#.#万'});
     const markdown=xhsMetricMarkdown('metrics',saved,{likes:'likes',collects:'collects'});
     expect(markdown).toContain('likes：6（采集于 1970-01-01T00:00:00.200Z）');
     expect(markdown).toContain('collects：10（采集于 1970-01-01T00:00:00.100Z）');

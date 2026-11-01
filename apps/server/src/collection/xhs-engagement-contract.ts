@@ -13,6 +13,8 @@ export type XhsFieldDiagnostic = {
   result: 'parsed' | 'absent' | 'absent-container' | 'invalid-container' | 'null' | 'invalid-format' | 'invalid-type';
   parsed: number | null;
   persistence?: 'stored' | 'missing' | 'mismatch' | 'not-parsed';
+  formatShape?: string;
+  displayShape?: 'allowlisted' | 'redacted';
 };
 export type XhsDiagnosedMetrics = XhsMetricSnapshot & {
   fieldDiagnostics?: Partial<Record<'collects' | 'shares', XhsFieldDiagnostic>>;
@@ -24,6 +26,11 @@ function fieldDiagnostic(info: Record<string, unknown>, field: 'collected_count'
   const type = !present ? 'absent' : value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
   const parsed = xhsExactCount(value);
   const result = parsed !== null ? 'parsed' : !present ? 'absent' : value === null ? 'null' : typeof value === 'string' || typeof value === 'number' ? 'invalid-format' : 'invalid-type';
+  // Only compact count-like text may be retained locally; never retain arbitrary payloads.
+  if (result === 'invalid-format' && typeof value === 'string') {
+    const allowed = value.length <= 16 && /^[0-9,. 万亿kKmM\t]*$/.test(value) && (value.match(/[0-9]/g)?.length ?? 0) <= 9;
+    return allowed ? {field,present,type,result,parsed,displayShape:'allowlisted',formatShape:value.replace(/[0-9]/g,'#')} : {field,present,type,result,parsed,displayShape:'redacted'};
+  }
   return { field, present, type, result, parsed };
 }
 /** Exact integers only. Abbreviated/rounded display counts remain unknown. */
