@@ -17,7 +17,7 @@ function profileReviewPending(job:any,review:any):boolean {
 /** Read-only preparation. Confirmation must repeat this check under the writer lock. */
 export async function prepareHistoryHandoff(tx: Tx, jobId: string, generationId: string) {
   if (!jobId || !generationId) return blocked();
-  const rows = await tx.$queryRaw<Array<{document:string;state:string;creator_id:string;author:string;enabled:number}>>`
+  const rows = await tx.$queryRaw<Array<{document:string;state:string;creator_id:string;author:string;enabled:number|boolean}>>`
     SELECT j.document,j.state,j.creator_id,c.external_author_id AS author,c.enabled
     FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${jobId}`;
   if (rows.length !== 1) return blocked();
@@ -25,7 +25,7 @@ export async function prepareHistoryHandoff(tx: Tx, jobId: string, generationId:
   let job: any;
   try { job = JSON.parse(row.document); } catch { return blocked(); }
   const g = job.generation;
-  if (row.enabled !== 1 || job.id !== jobId || job.creatorId !== row.creator_id ||
+  if ((row.enabled !== 1 && row.enabled !== true) || job.id !== jobId || job.creatorId !== row.creator_id ||
       job.sourceGrant?.authorId !== row.author || !generationMatches(job) || g.id !== generationId ||
       !['paused','partial','failed','cancelled','completed'].includes(row.state) || job.state !== row.state ||
       g.activeFence || !generationReviewSettled(job) || !Array.isArray(g.selectedIds)) return blocked();

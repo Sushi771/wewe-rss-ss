@@ -35,7 +35,7 @@ describe('explicit review appends generation unknown without deleting markers or
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-generation-review-'));
     db = new PrismaClient({ datasources:{db:{url:'file:'+path.join(root,'fixture.db').replace(/\\/g,'/')}} });
-    await db.$executeRawUnsafe('CREATE TABLE xhs_creators(id TEXT PRIMARY KEY,external_author_id TEXT,enabled INTEGER)');
+    await db.$executeRawUnsafe('CREATE TABLE xhs_creators(id TEXT PRIMARY KEY,external_author_id TEXT,enabled BOOLEAN)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_whole_creator_jobs(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');
     await db.$executeRawUnsafe('CREATE TABLE xhs_request_budgets(id TEXT PRIMARY KEY,used INTEGER,request_limit INTEGER,next_at INTEGER,interval_ms INTEGER)');
@@ -71,6 +71,18 @@ describe('explicit review appends generation unknown without deleting markers or
     await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs VALUES('job','creator','paused',${JSON.stringify(job)},1000)`;
   });
   afterAll(async()=>{await db.$disconnect();await fs.rm(root,{recursive:true,force:true});});
+
+  it('uses real Prisma Boolean values for history handoff and rejects a disabled creator',async()=>{
+    const job=await read();job.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','safe'])];await write(job);
+    const enabled=await db.$queryRaw<Array<{enabled:boolean}>>`SELECT enabled FROM xhs_creators WHERE id='creator'`;
+    expect(enabled[0].enabled).toBe(true);
+    await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},2000));
+    expect((await prepareHistoryHandoff(db,'job',input.generationId)).jobId).toBe('job');
+    await db.$executeRaw`UPDATE xhs_creators SET enabled=0 WHERE id='creator'`;
+    const disabled=await db.$queryRaw<Array<{enabled:boolean}>>`SELECT enabled FROM xhs_creators WHERE id='creator'`;
+    expect(disabled[0].enabled).toBe(false);
+    await expect(prepareHistoryHandoff(db,'job',input.generationId)).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+  });
 
   it('handoff preserves a reviewed unknown profile and blocks only that author until a later identity-bound profile checkpoint',async()=>{
     const job=await read();job.generation.activeFence.phase='profile';delete job.generation.activeFence.noteId;await write(job);

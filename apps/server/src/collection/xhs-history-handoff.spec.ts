@@ -25,3 +25,9 @@ it('refuses a newly added or changed unknown marker',async()=>{
   const f=fixture();f.result[5].push({id:'xhs:dispatch-pending:whole:3',used:1,request_limit:1});
   await expect(f.run()).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
 });
+it.each([false,0,null,'1','true',2])('refuses non-enabled value %p',async enabled=>{
+  const f=fixture();f.result[0][0].enabled=enabled;await expect(f.run()).rejects.toThrow('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+});
+it('accepts the Prisma Boolean true representation',async()=>{
+  const f=fixture();f.result[0][0].enabled=true;expect((await f.run()).jobId).toBe('job');
+});

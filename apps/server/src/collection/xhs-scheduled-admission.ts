@@ -21,7 +21,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   if(task.taskId!==taskId||task.creatorId!==creatorId||task.state!=='queued'||!Number.isSafeInteger(now))throw Error('XHS_SCHEDULE_TASK_INVALID');
   const existing=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
   if(existing.length){const old=JSON.parse(existing[0].document);if(old.creatorId!==creatorId||old.schedule?.round!==round||old.schedule?.phase!==phase||(old.schedule?.batch??0)!==batch||(phase==='media'&&JSON.stringify(old.noteIds)!==JSON.stringify(task.noteIds)))throw Error('XHS_SCHEDULE_BINDING_MISMATCH');return {kind:'existing',taskId};}
-  const creator=await tx.$queryRaw<Array<{enabled:number;external_author_id:string|null}>>`SELECT enabled,external_author_id FROM xhs_creators WHERE id=${creatorId}`;
+  const creator=await tx.$queryRaw<Array<{enabled:number|boolean;external_author_id:string|null}>>`SELECT enabled,external_author_id FROM xhs_creators WHERE id=${creatorId}`;
   const risk=await tx.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`;
   const history=await readHistoryHandoffs(tx as any);
   const fences=(await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).filter(f=>!history.markers.includes(f.id));
@@ -31,7 +31,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   // on a later tick without admitting a task or sending a source request.
   if(risk.length===1 && risk[0].state==='pending')return {kind:'deferred',taskId,reason:'XHS_SCHEDULE_SOURCE_BUSY'};
   let reason:string|undefined;
-  if(creator.length!==1||creator[0].enabled!==1||!creator[0].external_author_id)reason='XHS_SCHEDULE_CREATOR_DISABLED';
+  if(creator.length!==1||(creator[0].enabled!==1&&creator[0].enabled!==true)||!creator[0].external_author_id)reason='XHS_SCHEDULE_CREATOR_DISABLED';
   else if(risk.length!==1||risk[0].state!=='clear'||fences.length)reason='XHS_SCHEDULE_SOURCE_BLOCKED';
   else if(history.profilePendingCreators.includes(creatorId))reason='XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED';
   else if(jobs.length||tasks.length)return {kind:'deferred',taskId,reason:'XHS_SCHEDULE_TASK_ACTIVE'};
