@@ -318,11 +318,16 @@ describe('whole creator durable offline closure', () => {
       signalFinal!: () => void;
     const legacyWaiting = new Promise<void>((r) => (signalWait = r));
     const finalWaiting = new Promise<void>((r) => (signalFinal = r));
-    let localAdmitted = 0;
+    let localAdmitted = 0, forcedWait = false;
+    let releaseFinal!: () => void;
+    const finalGate = new Promise<void>(resolve => { releaseFinal = resolve; });
     const original = XhsSqliteBudgetStore.prototype.reserve;
     const spy = jest
       .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
       .mockImplementation(async function (this: XhsSqliteBudgetStore, id, now) {
+        if (mode === 'final-cancel' && id === jobId && localAdmitted === 1 && !forcedWait) {
+          forcedWait = true; signalWait(); return false;
+        }
         const accepted = await original.call(this, id, now);
         if (id === jobId) {
           if (accepted) localAdmitted++;
@@ -332,9 +337,14 @@ describe('whole creator durable offline closure', () => {
       });
     const wait = runtime.waitForSourceRate.bind(runtime);
     jest.spyOn(runtime, 'waitForSourceRate').mockImplementation(async (ms) => {
-      if (localAdmitted === 2) signalFinal();
+      if (mode !== 'final-cancel' && localAdmitted === 2) signalFinal();
       return wait(ms);
     });
+    const dispatch = (runtime as any).sourceDispatch;
+    if (mode === 'final-cancel') (runtime as any).sourceDispatch = async (...args: any[]) => {
+      if (localAdmitted === 2) { signalFinal(); await finalGate; }
+      return dispatch(...args);
+    };
     const subscriptions: any = {
       refresh: async () => {
         const rows = await db.$queryRaw<Array<{ id: string }>>`
@@ -362,7 +372,7 @@ describe('whole creator durable offline closure', () => {
         intervalMs: mode === 'final-cancel' ? 1500 : 2200,
       });
       if (mode === 'interleave' || mode === 'final-cancel') {
-        await legacyWaiting;
+        expect(await Promise.race([legacyWaiting.then(() => true), (whole as any).lane.then(() => false)])).toBe(true);
         await ordinary.resolve(profile);
         if (mode === 'final-cancel') {
           expect(
@@ -372,6 +382,7 @@ describe('whole creator durable offline closure', () => {
             ]),
           ).toBe(true);
           await whole.cancel(started.id);
+          releaseFinal();
         }
       }
       await (whole as any).lane;
@@ -405,6 +416,7 @@ describe('whole creator durable offline closure', () => {
       );
       expect(job.budget!.used).toBe(mode === 'final-cancel' ? 1 : 2);
     } finally {
+      releaseFinal();
       await Promise.allSettled(pending);
       await (whole as any).lane;
       spy.mockRestore();
