@@ -3,6 +3,9 @@ import type { AttemptScope } from './xhs-reviewed-attempt';
 import { retainedGenerationMarkers } from './xhs-whole-generation';
 import { readHistoryHandoffs } from './xhs-history-handoff';
 import { writeSourceReceipt } from './xhs-source-receipt';
+import { startTaskSource, settleTaskSource, settleTaskMediaStreamUnknown, verifiedUnknownMarkers, type TaskSourceScope } from './xhs-task-source-fence';
+import { RedbookPauseError } from './redbook-client';
+import { XhsMediaError } from './xhs-media-error';
 import { randomUUID } from 'node:crypto';
 import {
   xhsOriginalLinkCodes,
@@ -133,7 +136,9 @@ async function hasPendingDispatch(
   db: Pick<Prisma.TransactionClient, '$queryRaw'>,
   owned = '',
   retained: string[] = [],
+  scoped?:TaskSourceScope,
 ) {
+  if(scoped)retained=[...retained,...await verifiedUnknownMarkers(db as Prisma.TransactionClient,scoped)];
   retained = [...new Set([...retained, ...(await readHistoryHandoffs(db)).markers])];
   const rows = await db.$queryRaw<Array<{ id: string }>>`
     SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}) LIMIT 1`;
@@ -144,9 +149,10 @@ async function pendingWaitExpired(
   waiting: { since?: number },
   owned = '',
   group?: WholeSourceGroup,
+  scoped?:TaskSourceScope,
 ) {
   const retained = group ? await retainedGenerationMarkers(db, group) : [];
-  if (!(await hasPendingDispatch(db, owned, retained))) {
+  if (!(await hasPendingDispatch(db, owned, retained,scoped))) {
     waiting.since = undefined;
     return false;
   }
@@ -185,6 +191,7 @@ async function dispatchSource<T>(
   ready: (tx?: Prisma.TransactionClient) => Promise<void>,
   group?: WholeSourceGroup,
   charge?: Charge,
+  scoped?:TaskSourceScope,
 ): Promise<T> {
   const store = new XhsSqliteBudgetStore(db);
   await ready();
@@ -193,13 +200,14 @@ async function dispatchSource<T>(
   for (;;) {
     await ready();
     if (!(await store.read(SOURCE_TOTAL))) {
-      if (group) fail('XHS_REQUEST_BUDGET_REQUIRED');
-      if (await hasPendingDispatch(db)) fail('XHS_REQUEST_RATE_PAUSED');
+      if (group || scoped) fail('XHS_REQUEST_BUDGET_REQUIRED');
+      if (await hasPendingDispatch(db,'',[],scoped)) fail('XHS_REQUEST_RATE_PAUSED');
       return operation();
     }
     const marker = group?.marker ?? DISPATCH_PREFIX + randomUUID();
     let started = false;
     let dispatchCommitted = false;
+    let gotResponse = false;
     let response: Promise<T> | undefined;
     try {
       // A durable fence precedes all outbound work. It has no timed expiry:
@@ -212,7 +220,7 @@ async function dispatchSource<T>(
           RETURNING id`;
         if (
           !rows.length ||
-          (await hasPendingDispatch(tx, group?.acquired ? marker : '', retained))
+          (await hasPendingDispatch(tx, group?.acquired ? marker : '', retained,scoped))
         )
           throw new AdmissionUnavailable();
         await ready(tx);
@@ -240,6 +248,7 @@ async function dispatchSource<T>(
           SELECT id FROM xhs_request_budgets WHERE id=${marker}`;
         if (!owned.length) fail('XHS_REQUEST_RATE_PAUSED');
         await ready(tx);
+        if(scoped && !group)await startTaskSource(tx,scoped);
         if (group && !group.generationId) await markWholeSourceStarted(tx, group.jobId, marker, group.owner, charge, group.generationId);
         if (group?.mediaAttempt && !group.mediaDispatched) {
           if (charge !== 'media' || !group.mediaDispatch) fail('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
@@ -260,13 +269,24 @@ async function dispatchSource<T>(
         // Network response latency is awaited after COMMIT.
       });
       dispatchCommitted = true;
-      return await response!;
+      const result=await response!;gotResponse=true;
+      if(scoped && !group)await write(db,tx=>settleTaskSource(tx,scoped,'response'));
+      return result;
     } catch (error) {
       // A dispatch transaction can fail after transport entry. Its network promise
       // must settle before the owning stack can attest quiescence for review.
       if (started && response) {
         if (!dispatchCommitted) runtime.markDispatchPersistenceFailure?.();
         try { await response; } catch { /* preserve the original persistence error */ }
+      }
+      const transportUnknown=charge==='media'
+        ? error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code)
+        : error instanceof RedbookPauseError ? error.reason==='transport' : !(error instanceof XhsSubscriptionError || error instanceof XhsMediaError);
+      if(started && dispatchCommitted && !gotResponse && scoped && !group && transportUnknown) {
+        // Only the original pending owner may atomically retain this unknown
+        // request and release the shared lane; failed writes stay globally fenced.
+        await write(db,tx=>settleTaskSource(tx,scoped,'unknown'));
+        scoped.isolatedUnknown=true;
       }
       if (!started && (!group || !group.started)) {
         try {
@@ -284,7 +304,7 @@ async function dispatchSource<T>(
     const row = await store.read(SOURCE_TOTAL);
     if (
       !row ||
-      (await pendingWaitExpired(db, waiting, group?.marker, group))
+      (await pendingWaitExpired(db, waiting, group?.marker, group,scoped))
     )
       fail('XHS_REQUEST_RATE_PAUSED');
     await runtime.waitForSourceRate(
@@ -299,8 +319,9 @@ export function bindXhsSourceTotalBudget(
   runtime: XhsSubscriptionRuntime,
 ) {
   runtime.bindWholeReceipt?.((scope,receipt) => write(db, tx => writeSourceReceipt(tx,scope,receipt)));
+  runtime.bindScopedMediaFailure?.(scope=>write(db,tx=>settleTaskMediaStreamUnknown(tx,scope)));
   runtime.bindSourceAdmission(
-    async (alreadyBudgeted, group, ready) => {
+    async (alreadyBudgeted, group, ready,scoped) => {
       const store = new XhsSqliteBudgetStore(db);
       runtime.assertSourceReady();
       await ensureSourceCounter(db);
@@ -316,7 +337,7 @@ export function bindXhsSourceTotalBudget(
           for (;;) {
             runtime.assertSourceReady();
             await ready?.();
-            if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, group ? await retainedGenerationMarkers(tx, group) : []))) {
+            if (await write(db, async (tx) => reserveTotal(tx, now, group?.marker, [...(group ? await retainedGenerationMarkers(tx, group) : []),...(scoped ? await verifiedUnknownMarkers(tx,scoped) : [])]))) {
               return true;
             }
             const row = await store.read(id);
@@ -324,7 +345,7 @@ export function bindXhsSourceTotalBudget(
               fail('XHS_REQUEST_BUDGET_EXHAUSTED');
             if (
               !row ||
-              (await pendingWaitExpired(db, waiting, group?.marker, group))
+              (await pendingWaitExpired(db, waiting, group?.marker, group,scoped))
             )
               return false;
             await runtime.waitForSourceRate(
@@ -339,8 +360,8 @@ export function bindXhsSourceTotalBudget(
       });
       return budget.reserve(SOURCE_TOTAL);
     },
-    (operation, ready, group, charge) =>
-      dispatchSource(db, runtime, operation, ready, group, charge),
+    (operation, ready, group, charge,scoped) =>
+      dispatchSource(db, runtime, operation, ready, group, charge,scoped),
   );
 }
 async function withPolicy<T>(

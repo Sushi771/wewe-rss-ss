@@ -18,6 +18,7 @@ import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { RedbookPauseError } from './redbook-client';
 import { createHash, randomUUID } from 'node:crypto';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
 import { createRequire } from 'node:module';
@@ -153,6 +154,17 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     }
     throw Error('SYNTHETIC_SETTLEMENT_TIMEOUT');
   };
+  it.each([
+    [new XhsSubscriptionError('XHS_LIST_PARSE_FAILED'),'XHS_LIST_PARSE_FAILED'],
+    [new RedbookPauseError('transport'),'XHS_SOURCE_TRANSPORT_BLOCKED'],
+    [new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED'),'XHS_REQUEST_BUDGET_EXHAUSTED'],
+    [new Error('synthetic-private-error'),'XHS_TASK_BLOCKED'],
+  ])('persists fixed listing failure classification without raw payload',async (error,code)=>{
+    (source.list as jest.Mock).mockRejectedValueOnce(error);const task=await service.refreshFull({id:creatorId,scope:'all',basicOnly:true});
+    const done=await finish(task.taskId);expect(done).toMatchObject({state:'blocked',collectionStage:'listing',code});
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${task.taskId}`;
+    expect(JSON.parse(rows[0].document)).toMatchObject({state:'blocked',collectionStage:'listing',code});expect(rows[0].document).not.toContain('synthetic-private-error');expect(source.list).toHaveBeenCalledTimes(1);
+  },20000);
   it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
     let page = 0;
     const list = jest.fn(async (_author: string, _cursor: string | null) => {

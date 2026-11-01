@@ -3,6 +3,7 @@ import { safeSourceFailure, type SafeSourceReceipt, type SafeSourceStage, type S
 import { consumeReviewedTransportPermit, consumeReviewedContextPermit, type ContextBinding } from './xhs-reviewed-dispatch';
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
+import { taskSourceFingerprint, type TaskSourceScope } from './xhs-task-source-fence';
 import type { Prisma } from '@prisma/client';
 import { setTimeout as waitForRate } from 'node:timers/promises';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
@@ -18,6 +19,7 @@ import {
   RedbookTransport,
 } from './redbook-client';
 import { allowedRedbookMediaUrl, RedbookMediaTransport } from './redbook-response';
+import { XhsMediaError } from './xhs-media-error';
 import type { XhsMediaManifest } from './xhs-native-media';
 import {
   RedbookSubscriptionAdapter,
@@ -29,7 +31,7 @@ import {
   XhsShortLinkTransport,
   xhsPublicInputUrl,
 } from './xhs-short-link';
-import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError } from './xhs-subscription-errors';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import {
   checkedXhsCookies,
@@ -83,6 +85,10 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string}>();
+  withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
+  private scopedMediaFailure?: (scope:TaskSourceScope)=>Promise<void>;
+  bindScopedMediaFailure(fn:(scope:TaskSourceScope)=>Promise<void>){this.scopedMediaFailure ??= fn;}
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly reviewedContext = new AsyncLocalStorage<{ binding: ContextBinding; started:boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
@@ -254,6 +260,7 @@ export class XhsSubscriptionRuntime
   async checkpointWholeSource(
     tx: Prisma.TransactionClient,
     collectedAt?: number,
+    localFailure?: {code:'XHS_DETAIL_PARSE_FAILED';taskId:string},
   ) {
     const group = this.wholeSourceGroup.getStore();
     if (group?.acquired) {
@@ -269,6 +276,7 @@ export class XhsSubscriptionRuntime
         group.owner,
         collectedAt,
         group.generationId,
+        localFailure,
       );
       group.checkpointed = true;
     }
@@ -333,18 +341,21 @@ export class XhsSubscriptionRuntime
     alreadyBudgeted: boolean,
     group?: WholeSourceGroup,
     ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
+    scoped?: TaskSourceScope,
   ) => Promise<(() => Promise<void>) | void>;
   private sourceDispatch?: <T>(
     operation: () => Promise<T>,
     ready: (tx?: Prisma.TransactionClient) => Promise<void>,
     group?: WholeSourceGroup,
     charge?: Charge,
+    scoped?: TaskSourceScope,
   ) => Promise<T>;
   bindSourceAdmission(
     admit: (
       alreadyBudgeted: boolean,
       group?: WholeSourceGroup,
       ready?: (tx?: Prisma.TransactionClient) => Promise<void>,
+      scoped?: TaskSourceScope,
     ) => Promise<(() => Promise<void>) | void>,
     dispatch?: XhsSubscriptionRuntime['sourceDispatch'],
   ) {
@@ -468,6 +479,19 @@ export class XhsSubscriptionRuntime
         }
         const route = new URL(request.url).pathname;
         const charge: Charge = route.endsWith('/user/otherinfo') ? 'profile' : route.endsWith('/user_posted') ? 'list' : group?.phase === 'metrics' ? 'metrics' : 'detail';
+        let scoped:TaskSourceScope|undefined;
+        const task=this.taskSourceContext.getStore();
+        if(task?.owner && !group && !reviewed && !context && !recovery && this.sourceAdmission && this.sourceDispatch){
+          const url=new URL(request.url);let phase:TaskSourceScope['phase']|undefined,target='',cursor='';
+          if(request.method==='GET' && route==='/api/sns/web/v1/user/otherinfo'){phase='profile';target=url.searchParams.get('target_user_id')??'';}
+          else if(request.method==='GET' && route==='/api/sns/web/v1/user_posted'){phase='list';target=url.searchParams.get('user_id')??'';cursor=url.searchParams.get('cursor')??'';}
+          else if(request.method==='POST' && route==='/api/sns/web/v1/feed'){let body:any;try{body=JSON.parse(request.body??'');}catch{body=undefined;}if(typeof body?.source_note_id==='string'){phase='detail';target=body.source_note_id;}}
+          if(phase && /^[a-zA-Z0-9_-]{1,128}$/.test(target) && cursor.length<=4096){
+            const cursorHash=createHash('sha256').update(cursor).digest('hex');
+            scoped={taskId:task.taskId,creatorId:task.creatorId,phase,target,cursorHash,fingerprint:taskSourceFingerprint(task.creatorId,phase,target,cursorHash),owner:task.owner};
+            task.current=scoped;
+          }
+        }
         return this.guardTransport(() =>
           (() => {
             const route = new URL(request.url).pathname;
@@ -487,15 +511,21 @@ export class XhsSubscriptionRuntime
               return value;
             });
           })(),
-        charge);
+        charge,scoped);
       },
     });
-    this.mediaTransport = (url, request) =>
-      this.guardTransport(() => {
+    this.mediaTransport = (url, request) => {
+      const task=this.taskSourceContext.getStore();let scoped:TaskSourceScope|undefined;
+      if(task?.owner && task.mediaNoteKey && !this.wholeSourceGroup.getStore() && this.sourceAdmission && this.sourceDispatch){
+        const target=createHash('sha256').update(url.href).digest('hex'),cursorHash=createHash('sha256').update(task.mediaNoteKey).digest('hex');
+        scoped={taskId:task.taskId,creatorId:task.creatorId,phase:'media',target,cursorHash,noteKey:task.mediaNoteKey,fingerprint:taskSourceFingerprint(task.creatorId,'media',target,cursorHash),owner:task.owner};task.current=scoped;
+      }
+      return this.guardTransport(() => {
         this.observeSourceStage('transport');
         this.requestAttempts.media++;
         return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
-      }, 'media');
+      }, 'media',scoped);
+    };
     this.adapter = new RedbookSubscriptionAdapter(
       client,
       {
@@ -519,7 +549,7 @@ export class XhsSubscriptionRuntime
       this.mediaTransport,
     );
   }
-  private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge) {
+  private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge,scoped?:TaskSourceScope) {
     this.requireSession();
     const context=this.reviewedContext.getStore();
     if(context){
@@ -586,6 +616,7 @@ export class XhsSubscriptionRuntime
           scopes.length > 0,
           this.wholeSourceGroup.getStore(),
           ready,
+          scoped,
         );
         if (release) undo.push(release);
       }
@@ -598,6 +629,7 @@ export class XhsSubscriptionRuntime
             ready,
             this.wholeSourceGroup.getStore(),
             charge,
+            scoped,
           )
         : await dispatch();
       this.batchDispatchScope.getStore()?.onReceipt();
@@ -839,6 +871,8 @@ export class XhsSubscriptionRuntime
         return failure(code);
       }
     }
+    const taskScope=this.taskSourceContext.getStore();
+    if(taskScope){taskScope.owner=riskOwner;taskScope.current=undefined;}
     try {
       const result = await operation();
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
@@ -861,6 +895,9 @@ export class XhsSubscriptionRuntime
         this.verified = true;
       return result;
     } catch (error) {
+      if(riskOwner && taskScope?.current?.owner===riskOwner && taskScope.current.phase==='media' && !taskScope.current.isolatedUnknown && this.scopedMediaFailure && error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code)){
+        try{await this.scopedMediaFailure(taskScope.current);taskScope.current.isolatedUnknown=true;}catch{/* unknown or unconfirmed storage remains globally fenced */}
+      }
       if (
         error instanceof RedbookPauseError &&
         [
@@ -878,6 +915,9 @@ export class XhsSubscriptionRuntime
         this.transientMedia.clear();
         this.adapter.clearAccessContext();
       }
+      const isolatedPhase=riskOwner && !this.stopCode && taskScope?.current?.owner===riskOwner && taskScope.current.isolatedUnknown &&
+        (taskScope.current.phase==='media' ? error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code) : error instanceof RedbookPauseError && error.reason==='transport') ? taskScope.current.phase : undefined;
+      if(isolatedPhase){riskOwner=undefined;this.persistedRisk=undefined;}
       if (riskOwner) {
         const known =
           admission?.failure instanceof XhsSubscriptionError
@@ -885,7 +925,8 @@ export class XhsSubscriptionRuntime
             : error;
         const code =
           this.stopCode ??
-          ((admission?.failure === known &&
+          ((known instanceof XhsSourceParseError) ||
+          (admission?.failure === known &&
             known instanceof XhsSubscriptionError &&
             known.code === 'XHS_TASK_CANCELLED') ||
           (known instanceof XhsSubscriptionError &&
@@ -899,12 +940,13 @@ export class XhsSubscriptionRuntime
             ? undefined
             : 'XHS_SOURCE_RISK_REVIEW_REQUIRED');
         try {
+          const mediaStatus=error instanceof XhsMediaError ? /^XHS_MEDIA_HTTP_(401|403|406|429|461|471)$/.exec(error.code) : null;
           await this.riskStore!.finish(
             riskOwner,
             code,
             error instanceof RedbookPauseError
               ? { status: error.httpStatus, endpoint: error.endpoint }
-              : undefined,
+              : mediaStatus ? {status:Number(mediaStatus[1])} : undefined,
           );
           this.persistedRisk = code;
         } catch {
@@ -914,6 +956,7 @@ export class XhsSubscriptionRuntime
       }
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
+      if(isolatedPhase)throw new XhsTaskSourceUnknownError(isolatedPhase);
       // RedbookClient intentionally wraps transport failures. Preserve only the
       // local pre-dispatch admission result, never provider text or responses.
       if (!this.stopCode && admission?.failure) throw admission.failure;
@@ -1159,7 +1202,7 @@ export class XhsSubscriptionRuntime
     }
     return result;
   }
-  withScheduledMediaSession<T>(work:(transport:RedbookMediaTransport)=>Promise<T>) { return this.withSession(()=>work(this.mediaTransport)); }
+  withScheduledMediaSession<T>(work:(transport:RedbookMediaTransport)=>Promise<T>,noteKey?:string) { const task=this.taskSourceContext.getStore();return task && noteKey ? this.taskSourceContext.run({...task,mediaNoteKey:noteKey},()=>this.withSession(()=>work(this.mediaTransport))) : this.withSession(()=>work(this.mediaTransport)); }
   /** Rehydrate only a confirmed receipt's query-free URLs; never infer a signature. */
   restoreReviewedMediaUrls(manifest:XhsMediaManifest,entries:unknown) {
     if(!Array.isArray(entries)||entries.length!==manifest.images.length||entries.length>60)return;

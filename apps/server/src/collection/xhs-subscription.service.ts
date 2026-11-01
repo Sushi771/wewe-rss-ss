@@ -1,5 +1,7 @@
 import { assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 import { resumeXhsMedia } from './xhs-native-media';
+import { XhsMediaLocalResponseError } from './xhs-media-error';
+import { hasTaskDetailUnknown, hasTaskMediaUnknown } from './xhs-task-source-fence';
 import { xhsMediaTaskStore } from './xhs-media-task-store';
 import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
@@ -28,7 +30,7 @@ import type { XhsMediaManifest } from './xhs-native-media';
 import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
-import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
 import { selectMissingBasic } from './xhs-missing-basic';
 import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
@@ -44,6 +46,7 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  withTaskScope?<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T>;
   withCheckpointGroup?<T>(
     phase: 'profile' | 'list' | 'detail' | 'metrics',
     authorId: string,
@@ -53,6 +56,7 @@ export interface XhsSubscriptionSource {
   checkpointWholeSource?(
     tx: Prisma.TransactionClient,
     collectedAt?: number,
+    localFailure?: {code:'XHS_DETAIL_PARSE_FAILED';taskId:string},
   ): Promise<void>;
   sourceStorage?<T>(work: () => Promise<T>): Promise<T>;
   checkpointWholeDirectory?(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]): Promise<void>;
@@ -88,7 +92,7 @@ export interface XhsSubscriptionSource {
   basicDetail?(authorId: string, noteId: string, signal?: AbortSignal): Promise<ReturnType<typeof mapRedbookBasicDetail>>;
   basicDetailWithMedia?(authorId: string, noteId: string, signal?: AbortSignal): Promise<{basic:ReturnType<typeof mapRedbookBasicDetail>;media:{manifest:XhsMediaManifest;getUrl:(key:string)=>string|undefined}|null}>;
   getTransientMediaUrl?(authorId:string,noteId:string,version:string,resourceKey:string):string|undefined;
-  withScheduledMediaSession?<T>(work:(transport:import('./redbook-response').RedbookMediaTransport)=>Promise<T>):Promise<T>;
+  withScheduledMediaSession?<T>(work:(transport:import('./redbook-response').RedbookMediaTransport)=>Promise<T>,noteKey?:string):Promise<T>;
   detail(
     authorId: string,
     noteId: string,
@@ -98,6 +102,8 @@ export interface XhsSubscriptionSource {
 type Task = XhsSubscriptionTask & {
   schedule?: {round:string;phase:'basic'|'media';batch?:number};
   scheduledContext?: {authorId:string;used:1;state:'started'|'confirmed'};
+  sourceActive?: {fingerprint:string;phase:string;targetHash:string;cursorHash:string;owner:string;outcome:'started'};
+  sourceUnknowns?: Array<{marker:string;fingerprint:string;phase:string;targetHash:string;cursorHash:string;outcome:'unknown';classification:'request-outcome-unknown';taskId:string;creatorId:string}>;
   historyExcludedIds?: string[];
   scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
   noteIds: string[];
@@ -610,7 +616,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     const basic=await this.loadTask(scheduledTaskId(input.round,input.creatorId,'basic'));
     const batch=input.batch??0;
     if(!Number.isSafeInteger(batch)||batch<0) return reject('XHS_SELECTION_INVALID');
-    const ids=basic.noteIds.slice(batch*1000,(batch+1)*1000);
+    const mediaIds=basic.state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic.code??'') && basic.remaining===0 ? basic.noteIds.filter(id=>basic.items[id]==='completed') : basic.noteIds;
+    const ids=mediaIds.slice(batch*1000,(batch+1)*1000);
     if(!ids.length) return {state:'nothing-to-archive' as const};
     return this.enqueue('list',input.creatorId,ids,undefined,undefined,undefined,false,'selected',ids,undefined,false,false,undefined,{round:input.round,phase:'media',batch});
   }
@@ -662,7 +669,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       // classifying it; do not repeat a network request or local archive action.
       try {
         const saved = await this.loadTask(t.taskId);
-        if (JSON.stringify(saved) === json) {
+        if (JSON.stringify(saved) === JSON.stringify(snapshot)) {
           this.uncertain.delete(t.taskId);
           return;
         }
@@ -715,6 +722,10 @@ export class XhsSubscriptionService implements OnModuleInit {
     // A late task write must not erase already committed per-resource receipts.
     if (saved?.mediaManifests)
       t.mediaManifests = { ...t.mediaManifests, ...saved.mediaManifests };
+    // Source fences are written by dispatch transactions and may never be
+    // removed by a stale in-memory task snapshot.
+    if (saved?.sourceActive) t.sourceActive=saved.sourceActive; else delete t.sourceActive;
+    if (saved?.sourceUnknowns) t.sourceUnknowns=saved.sourceUnknowns; else delete t.sourceUnknowns;
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
@@ -906,12 +917,13 @@ export class XhsSubscriptionService implements OnModuleInit {
       const manifest=entry.manifest;
       if(!manifest){mediaSummary.needsDetailRefreshNotes++;continue;}
       mediaSummary.declaredImages+=manifest.images.length;
-      let refresh=false,blocked=false;
+      let refresh=false,blocked=false,itemReview=false;
       for(const image of manifest.images){
         const item=entry.items?.[String(image.ordinal)];
         if(item?.state==='saved')mediaSummary.recordedSavedImages++;
-        else {mediaSummary.pendingImages++;if(['started','unknown','restricted'].includes(item?.state??''))blocked=true;else if(!image.resourceKey || !this.source?.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,image.resourceKey))refresh=true;}
+        else {mediaSummary.pendingImages++;if(item?.state==='review')itemReview=true;else if(['started','unknown','restricted'].includes(item?.state??''))blocked=true;else if(!image.resourceKey || !this.source?.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,image.resourceKey))refresh=true;}
       }
+      if(itemReview && entry.state!=='needs-review')mediaSummary.needsReviewNotes++;
       if(blocked)mediaSummary.blockedNotes++;else if(refresh)mediaSummary.needsDetailRefreshNotes++;
     }
     return {
@@ -947,6 +959,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       supersededByTaskId: t.supersededByTaskId,
       resumable:
         !uncertain &&
+        !t.sourceActive && !(t.sourceUnknowns?.length) && t.code!=='XHS_DETAIL_OUTCOME_UNKNOWN' &&
         !t.supersededByTaskId &&
         !this.pending.has(t.taskId) &&
         (t.kind === 'list' || t.total > t.completed + t.skipped) &&
@@ -1112,6 +1125,9 @@ export class XhsSubscriptionService implements OnModuleInit {
     });
   }
   private async run(t: Task, directory?: string) {
+    return this.source?.withTaskScope ? this.source.withTaskScope({taskId:t.taskId,creatorId:t.creatorId},()=>this.runTask(t,directory)) : this.runTask(t,directory);
+  }
+  private async runTask(t: Task, directory?: string) {
     if (!active(t)) {
       this.pending.delete(t.taskId);
       return;
@@ -1176,8 +1192,19 @@ export class XhsSubscriptionService implements OnModuleInit {
               if (!this.source?.basicDetail && !this.source?.basicDetailWithMedia) return reject('XHS_SOURCE_UNCONFIGURED');
               const tuple = JSON.parse(id);
               if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
+              if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
               await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
-                const projection = this.source!.basicDetailWithMedia ? await this.source!.basicDetailWithMedia(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal) : {basic:await this.source!.basicDetail!(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal),media:null};
+                let projection: Awaited<ReturnType<NonNullable<XhsSubscriptionSource['basicDetailWithMedia']>>>;
+                try {
+                  projection = this.source!.basicDetailWithMedia ? await this.source!.basicDetailWithMedia(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal) : {basic:await this.source!.basicDetail!(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal),media:null};
+                } catch (error) {
+                  if (!(error instanceof XhsSourceParseError) || error.code !== 'XHS_DETAIL_PARSE_FAILED' || !active(t)) throw error;
+                  const failed={...t,failed:t.failed+1,items:{...t.items,[id]:'failed' as const},basicResults:{...t.basicResults,[id]:'missing' as const},code:error.code,remaining:t.total-t.completed-t.skipped-t.failed-1};
+                  // A confirmed response and its incomplete receipt settle the
+                  // existing whole-source fence in the same transaction.
+                  await this.write(Buffer.byteLength(JSON.stringify(failed))+4096,async tx=>{await this.persistIn(tx,failed);await this.source?.checkpointWholeSource?.(tx,undefined,{code:'XHS_DETAIL_PARSE_FAILED',taskId:t.taskId});});
+                  Object.assign(t,failed);return;
+                }
                 const note=projection.basic, rawManifest=projection.media?.manifest;
                 let manifest:XhsMediaManifest|undefined;
                 if(rawManifest && rawManifest.authorId===creator.externalAuthorId && rawManifest.noteId===tuple[2] && Array.isArray(rawManifest.images) && rawManifest.images.length<=60 && rawManifest.images.every((image,i)=>image?.ordinal===i+1 && (image.resourceKey===null || /^[a-f0-9]{64}$/.test(image.resourceKey)))) {
@@ -1396,6 +1423,9 @@ export class XhsSubscriptionService implements OnModuleInit {
             }
           } catch (error) {
             if (!active(t)) break;
+            if(t.basicOnly && t.collectDetails && error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
+              t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+            }
             t.failed++;
             t.items[id] = 'failed';
             // Unknown provider failures may be authentication/verification stops.
@@ -1455,16 +1485,20 @@ export class XhsSubscriptionService implements OnModuleInit {
     for(const id of t.noteIds) {
       if(!active(t)) return;
       const rows=await this.db.$queryRaw<Array<{document:string;state:string}>>`SELECT document,state FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${creator.id}`;
-      if(rows.length!==1 || (rows[0].state!=='completed' && !(rows[0].state==='partial' && JSON.parse(rows[0].document).code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'))) return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
+      if(rows.length!==1) return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
       const basic=JSON.parse(rows[0].document) as Task, slot=basic.mediaManifests?.[id];
+      const historyPartial=rows[0].state==='partial' && basic.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED';
+      const itemPartial=rows[0].state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic.code??'') && basic.remaining===0 && basic.items?.[id]==='completed';
+      if(rows[0].state!=='completed' && !historyPartial && !itemPartial)return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
       if(!basic.noteIds.includes(id)) return reject('XHS_SELECTION_CHANGED');
       if(!slot?.manifest || slot.state==='needs-review') {t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};t.skipped++;t.items[id]='skipped';t.remaining--;await this.persist(t);continue;}
       const manifest=slot.manifest;
+      if(await hasTaskMediaUnknown(this.db,creator.id,id,manifest.images.map(image=>image.resourceKey))){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};t.skipped++;t.items[id]='skipped';t.remaining--;await this.persist(t);continue;}
       const gate=async(tx:Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>)=>{
         await assertScheduledMediaBinding(tx,{round,creatorId:creator.id,taskId:t.taskId,basicId,authorId:manifest.authorId,noteId:id,batch:t.schedule?.batch??0});
       };
-      const store=xhsMediaTaskStore(this.db,fn=>this.write(20_000_000,tx=>fn(tx)),{taskId:basicId,creatorId:creator.id,noteId:id},gate,undefined,false,{allowCompleteAppend:true});
-      const result=await this.source.withScheduledMediaSession(async transport=>{const adopted=await store.adoptVerified(manifest);if(adopted<0)return {pending:0,needsReview:true};return {...await resumeXhsMedia(manifest,key=>this.source!.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,key),store,transport),needsReview:false};});
+      const store=xhsMediaTaskStore(this.db,fn=>this.write(20_000_000,tx=>fn(tx)),{taskId:basicId,creatorId:creator.id,noteId:id},gate,undefined,false,{allowCompleteAppend:true,allowLocalReview:true});
+      const result=await this.source.withScheduledMediaSession(async transport=>{const adopted=await store.adoptVerified(manifest);if(adopted<0)return {pending:0,needsReview:true};try{return {...await resumeXhsMedia(manifest,key=>this.source!.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,key),store,transport),needsReview:false};}catch(error){if(error instanceof XhsMediaLocalResponseError)return {pending:0,needsReview:true};throw error;}},id).catch(error=>{if(error instanceof XhsTaskSourceUnknownError && error.phase==='media')return {pending:0,needsReview:true};throw error;});
       if(result.needsReview){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};t.skipped++;t.items[id]='skipped';} else if(result.pending){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-detail-refresh'};t.skipped++;t.items[id]='skipped';} else {t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'complete'};t.completed++;t.items[id]='completed';}
       t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);
     }

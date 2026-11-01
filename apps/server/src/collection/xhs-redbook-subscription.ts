@@ -13,7 +13,7 @@ import {
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
-import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError } from './xhs-subscription-errors';
 import { extractXhsMediaManifest, selectXhsNativeDetail } from './xhs-native-media';
 import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import {
@@ -257,13 +257,18 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
   }
   async list(authorId: string, cursor: string | null, signal?: AbortSignal) {
     const revision = ++this.revision;
-    const raw = record(
-      await this.client.getUserNotes(authorId, cursor ?? '', {
-        ...this.options(authorId),
-        ...(signal ? { signal } : {}),
-      }),
-    );
-    const page = mapRedbookPage(raw, authorId);
+    const response = await this.client.getUserNotes(authorId, cursor ?? '', {
+      ...this.options(authorId),
+      ...(signal ? { signal } : {}),
+    });
+    let raw: Record<string, unknown>, page: ReturnType<typeof mapRedbookPage>;
+    try {
+      raw = record(response);
+      page = mapRedbookPage(raw, authorId);
+    } catch {
+      // Fixed local classification only; do not persist upstream data or errors.
+      throw new XhsSourceParseError('XHS_LIST_PARSE_FAILED');
+    }
     for (const [key, access] of this.tokens)
       if (access.expiresAt <= this.now()) this.tokens.delete(key);
     // No arbitrary all-entry eviction: earlier pages remain usable for large jobs.
@@ -357,7 +362,9 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     const access = this.tokens.get(JSON.stringify([authorId, noteId]));
     if (!access || access.expiresAt <= this.now()) throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
     const raw = await this.client.getNoteById(noteId, access.token, access.source, signal);
-    const basic = mapRedbookBasicDetail(raw, authorId, noteId);
+    let basic: ReturnType<typeof mapRedbookBasicDetail>;
+    try { basic = mapRedbookBasicDetail(raw, authorId, noteId); }
+    catch { throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED'); }
     // Media is optional: malformed or absent images must never discard the basic response.
     try { return { basic, media: extractXhsMediaManifest(raw, authorId, noteId) }; }
     catch { return { basic, media: null }; }

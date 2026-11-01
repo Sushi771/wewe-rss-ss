@@ -1,5 +1,5 @@
 import { mapRedbookBasicDetail, mapRedbookDetail } from './redbook-response';
-import { XhsMediaError } from './xhs-media-error';
+import { XhsMediaError, XhsMediaLocalResponseError } from './xhs-media-error';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 
 const data = { items: [{ id:'synthetic-note', note_card:{note_id:'synthetic-note',user:{user_id:'synthetic-author'},type:'normal',time:1760000000000,title:'synthetic',desc:'body',image_list:[{url_default:'https://sns-webpic.xhscdn.com/synthetic?token=synthetic-secret'}]} }] };
@@ -12,10 +12,11 @@ it.each([403,429,461,500,503])('preserves observed status %s without response co
   expect(transport).toHaveBeenCalledTimes(1);
 });
 it.each([
-  ['empty', () => new Response(null, {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_EMPTY'],
-  ['empty stream', () => new Response('', {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_EMPTY'],
-  ['type', () => new Response('synthetic-secret', {status:200, headers:{'content-type':'text/html'}}), 'XHS_MEDIA_TYPE_REJECTED'],
-  ['bytes', () => new Response('invalid', {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_BYTES_INVALID'],
+  ['empty', () => new Response(null, {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_RESPONSE_INVALID'],
+  ['empty stream', () => new Response('', {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_RESPONSE_INVALID'],
+  ['type', () => new Response('synthetic-secret', {status:200, headers:{'content-type':'text/html'}}), 'XHS_MEDIA_RESPONSE_INVALID'],
+  ['bytes', () => new Response(Buffer.from('89504e470d0a1a0a','hex'), {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_BYTES_INVALID'],
+  ['disguised markup', () => new Response('<html>verification</html>', {status:200, headers:{'content-type':'image/png'}}), 'XHS_MEDIA_RESPONSE_INVALID'],
 ])('reports fixed %s classification', async (_label, response, expected) => {
   const error = await map(async () => response()).catch((e) => e);
   expect(xhsPublicCode(error, 'fallback')).toBe(expected);
@@ -27,6 +28,12 @@ it('retains control and fixed media errors while hiding arbitrary transport exce
   const error = await map(async () => { throw Error('https://private.invalid/?token=synthetic-secret'); }).catch((e) => e);
   expect(xhsPublicCode(error, 'fallback')).toBe('XHS_MEDIA_TRANSPORT_FAILED');
   expect(String(error)).not.toMatch(/private|synthetic-secret/);
+});
+it('does not treat a transport-thrown local classification as a received response', async () => {
+  const error = await map(async () => { throw new XhsMediaLocalResponseError('XHS_MEDIA_BYTES_INVALID'); }).catch(e => e);
+  expect(error).toBeInstanceOf(XhsMediaError);
+  expect(error).not.toBeInstanceOf(XhsMediaLocalResponseError);
+  expect(error.code).toBe('XHS_MEDIA_TRANSPORT_FAILED');
 });
 
 it('keeps the media cancellation signal live after a long synthetic admission wait', async () => {

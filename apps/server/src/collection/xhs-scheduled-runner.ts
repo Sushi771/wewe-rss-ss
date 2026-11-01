@@ -8,14 +8,16 @@ export class XhsScheduledRunner {
     const authors=await this.db.xhsCreator.findMany({where:{enabled:true},select:{id:true},orderBy:{id:'asc'}});
     let pending=false, incomplete=false;
     for(const author of authors){
+      try {
       const basic=await this.service.scheduleCreatorPhase({round,creatorId:author.id,phase:'basic'});
       if(basic.state==='deferred'){pending=true;continue;}
       if(!basic.taskId)throw Error('XHS_SCHEDULE_ADMISSION_UNKNOWN');
       const b=await this.service.task({taskId:basic.taskId});
       if(['queued','running'].includes(b.state)){pending=true;continue;}
       const historyPartial=b.state==='partial' && b.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' && !b.failed;
-      if(historyPartial)incomplete=true;
-      if((b.state!=='completed'&&!historyPartial)||b.failed){incomplete=true;continue;}
+      const itemPartial=b.state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(b.code??'') && !!b.failed && b.remaining===0;
+      if(historyPartial||itemPartial)incomplete=true;
+      if((b.state!=='completed'&&!historyPartial&&!itemPartial)||(b.failed&&!itemPartial)){incomplete=true;continue;}
       for(let batch=0;;batch++) {
         const media=await this.service.scheduleCreatorPhase({round,creatorId:author.id,phase:'media',batch});
         if(media.state==='nothing-to-archive')break;
@@ -27,6 +29,7 @@ export class XhsScheduledRunner {
         if(safePartial){incomplete=true;continue;}
         if(m.state!=='completed'||m.failed||m.remaining){incomplete=true;break;}
       }
+      } catch { incomplete=true; }
     }
     if(pending)throw Error('XHS_SCHEDULE_TASK_PENDING');
     if(incomplete)throw Error('XHS_SCHEDULE_ROUND_INCOMPLETE');

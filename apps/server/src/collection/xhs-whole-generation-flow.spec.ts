@@ -471,6 +471,23 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     expect((await db.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`)).toHaveLength(2);
     expect(api).not.toHaveBeenCalled();expect(shortLinks).not.toHaveBeenCalled();await assertUnknownPreserved();
   });
+  it('records a confirmed detail parse failure atomically without a success receipt',async()=>{
+    const generation=await db.$transaction(tx=>createWholeGeneration(tx,input));
+    const job=await read();job.state='running';job.generation.state='running';job.listEnd=true;job.generation.directoryIds=[noteKey];
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='running',document=${JSON.stringify(job)} WHERE id='job'`;
+    const activeMarker='xhs:dispatch-pending:whole:00000000-0000-4000-8000-000000000003';
+    const owner={pid:22,startIdentity:'638000000000000001',nonce:'00000000-0000-4000-8000-000000000002'};
+    const scope={jobId:'job',creatorId:'creator',authorId:'author',generationId:generation.id,marker:activeMarker,phase:'detail' as const,noteId:'note',owner};
+    await db.$transaction(tx=>prepareWholeSourceFence(tx,scope));await db.$transaction(tx=>markWholeSourceStarted(tx,'job',activeMarker,owner,'detail',generation.id));
+    const before=JSON.stringify({items:{}}),failed=JSON.stringify({items:{[noteKey]:'failed'},basicResults:{[noteKey]:'missing'},code:'XHS_DETAIL_PARSE_FAILED'});
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-failure-task','creator','running',${before},1)`;
+    await expect(db.$transaction(tx=>commitWholeSourceCheckpoint(tx,'job',activeMarker,owner,undefined,generation.id,{code:'XHS_DETAIL_PARSE_FAILED',taskId:'parse-failure-task'}))).rejects.toThrow();
+    const checkpoint=async(tx:any)=>{await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${failed} WHERE id='parse-failure-task'`;await commitWholeSourceCheckpoint(tx,'job',activeMarker,owner,undefined,generation.id,{code:'XHS_DETAIL_PARSE_FAILED',taskId:'parse-failure-task'});};
+    await expect(db.$transaction(async tx=>{await checkpoint(tx);throw Error('synthetic rollback');})).rejects.toThrow('synthetic rollback');
+    expect((await read()).generation.activeFence.state).toBe('started');const prior=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='parse-failure-task'`;expect(prior[0].document).toBe(before);
+    await db.$transaction(checkpoint);const result=await read();expect(result.generation.detailReceipts[noteKey]).toMatchObject({outcome:'local-failure',code:'XHS_DETAIL_PARSE_FAILED'});expect(result.generation.activeFence).toBeUndefined();
+    const stored=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id='parse-failure-task'`;expect(JSON.parse(stored[0].document).items[noteKey]).toBe('failed');await assertUnknownPreserved();
+  },20000);
   it('separates old missing notes from the returned directory and preserves their cached body without requesting them',async()=>{
     await db.xhsNote.update({where:{id:noteKey},data:{status:'complete',contentHtml:'<p>old cached body remains</p>'}});
     directory(['fresh']);await (whole as any).prepareGeneration(input);await execute();await drain();

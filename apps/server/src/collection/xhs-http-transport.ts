@@ -108,7 +108,7 @@ export function createRedbookHttpTransport(
         for (const b of chunks) b.fill(0);
         chunks.length = 0;
       };
-      const fail = () => {
+      const fail = (reason:'transport'|'response'='transport') => {
         if (done) return;
         done = true;
         clear();
@@ -118,7 +118,7 @@ export function createRedbookHttpTransport(
         // its optional diagnostic body is invalid, slow, interrupted or huge.
         if (errorStatus !== undefined)
           resolve({ status: errorStatus, url: input.url, body: {} });
-        else reject(stop());
+        else reject(reason==='response' ? new RedbookPauseError('response') : stop());
       };
       const abort = () => fail();
       try {
@@ -152,7 +152,7 @@ export function createRedbookHttpTransport(
               )
                 throw stop();
             } catch {
-              fail();
+              fail('response');
               return;
             }
             res.on('data', (part: Buffer) => {
@@ -160,13 +160,13 @@ export function createRedbookHttpTransport(
               length += part.length;
               if (length > limit) {
                 part.fill(0);
-                fail();
+                fail('response');
                 return;
               }
               chunks.push(Buffer.from(part));
             });
-            res.on('error', fail);
-            res.on('aborted', fail);
+            res.on('error', () => fail());
+            res.on('aborted', () => fail());
             res.on('end', () => {
               if (done) return;
               let bytes: Buffer | undefined;
@@ -183,14 +183,14 @@ export function createRedbookHttpTransport(
                   body: rejected ? redbookErrorSummary(body) : body,
                 });
               } catch {
-                fail();
+                fail('response');
               } finally {
                 bytes?.fill(0);
               }
             });
           },
         );
-        req.on('error', fail);
+        req.on('error', () => fail());
         req.once('finish', () => { if (!done) observe?.('sent'); });
         timer = setTimeout(fail, input.timeoutMs);
         timer.unref?.();

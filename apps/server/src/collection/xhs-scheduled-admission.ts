@@ -38,9 +38,12 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   if(!reason && input.preBlocked)reason=input.preBlocked;
   if(!reason && phase==='media'){
     const basicId=scheduledTaskId(round,creatorId,'basic');const predecessor=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${basicId}`;
-    if(predecessor.length!==1||!(predecessor[0].state==='completed'||(predecessor[0].state==='partial'&&JSON.parse(predecessor[0].document).code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'))||JSON.parse(predecessor[0].document).failed!==0)reason='XHS_SCHEDULE_BASIC_INCOMPLETE';
+    const basic=predecessor.length===1?JSON.parse(predecessor[0].document):undefined;
+    const historyPartial=predecessor[0]?.state==='partial'&&basic?.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&basic?.failed===0;
+    const itemPartial=predecessor[0]?.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic?.code)&&basic?.failed>0&&basic?.remaining===0;
+    if(predecessor.length!==1||!(predecessor[0].state==='completed'||historyPartial||itemPartial)||(!itemPartial&&basic.failed!==0))reason='XHS_SCHEDULE_BASIC_INCOMPLETE';
     else {
-      const basic=JSON.parse(predecessor[0].document),expected=Array.isArray(basic.noteIds)?basic.noteIds.slice(batch*1000,(batch+1)*1000):undefined;
+      const ids=Array.isArray(basic.noteIds)?(itemPartial?basic.noteIds.filter((id:string)=>basic.items?.[id]==='completed'):basic.noteIds):undefined,expected=ids?.slice(batch*1000,(batch+1)*1000);
       if(!expected?.length || JSON.stringify(task.noteIds)!==JSON.stringify(expected))reason='XHS_SCHEDULE_BATCH_MISMATCH';
       if(!reason&&batch>0){const previousId=scheduledTaskId(round,creatorId,'media',batch-1);const previous=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${previousId} AND creator_id=${creatorId}`;const prior=previous.length===1?JSON.parse(previous[0].document):undefined;const safePartial=previous[0]?.state==='partial'&&prior?.failed===0&&prior?.remaining===0&&['XHS_MEDIA_NEEDS_DETAIL_REFRESH','XHS_MEDIA_REVIEW_REQUIRED'].includes(prior?.code);if(previous.length!==1||(previous[0].state!=='completed'&&!safePartial)||prior?.failed!==0)reason='XHS_SCHEDULE_PREVIOUS_BATCH_INCOMPLETE';}
     }

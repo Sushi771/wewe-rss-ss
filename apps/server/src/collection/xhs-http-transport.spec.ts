@@ -183,11 +183,11 @@ describe('native HTTPS metadata transport (injected synthetic request only)', ()
     });
     await expect(
       createRedbookHttpTransport(declared.request)(input()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('response');
     const streamed = httpsFixture({ parts: [Buffer.alloc(1001, 65)] });
     await expect(
       createRedbookHttpTransport(streamed.request)(input()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('response');
     expect(streamed.destroy).toHaveBeenCalled();
   });
   it('rejects non-JSON and malformed JSON with fixed errors', async () => {
@@ -197,13 +197,13 @@ describe('native HTTPS metadata transport (injected synthetic request only)', ()
     });
     await expect(
       createRedbookHttpTransport(html.request)(input()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('response');
     const malformed = httpsFixture({
       parts: [Buffer.from('synthetic secret not json')],
     });
     await expect(
       createRedbookHttpTransport(malformed.request)(input()),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('response');
   });
   it('honors cancellation before dispatch and during response streaming', async () => {
     const f = httpsFixture({ hold: true }),

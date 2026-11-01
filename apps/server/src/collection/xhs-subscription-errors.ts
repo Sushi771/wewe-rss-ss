@@ -8,6 +8,14 @@ export class XhsSubscriptionError extends Error {
     super(code);
   }
 }
+/** Only raised by pure parsing after a source response was received. */
+export class XhsSourceParseError extends XhsSubscriptionError {
+  constructor(code: 'XHS_LIST_PARSE_FAILED' | 'XHS_DETAIL_PARSE_FAILED') { super(code); }
+}
+/** Only created after an identity-bound unknown receipt and owner settlement commit. */
+export class XhsTaskSourceUnknownError extends XhsSubscriptionError {
+  constructor(readonly phase:'profile'|'list'|'detail'|'media') { super('XHS_SOURCE_OUTCOME_UNKNOWN'); }
+}
 const codes = new Set([
   'XHS_LOCAL_PROGRAM_ERROR',
   'XHS_LOCAL_OPERATION_FAILED',
@@ -24,6 +32,10 @@ const codes = new Set([
   'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
   'XHS_BUDGET_SCOPE_MISMATCH',
   'XHS_LIST_INVALID',
+  'XHS_LIST_PARSE_FAILED',
+  'XHS_DETAIL_PARSE_FAILED',
+  'XHS_DETAIL_OUTCOME_UNKNOWN',
+  'XHS_SOURCE_OUTCOME_UNKNOWN',
   'XHS_TASK_STATE_CHANGED',
   'XHS_WHOLE_SOURCE_FENCE_BLOCKED',
   'XHS_WHOLE_PHASE_BUDGET_EXHAUSTED',

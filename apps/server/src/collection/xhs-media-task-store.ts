@@ -13,7 +13,7 @@ const hash=(s:Buffer)=>createHash('sha256').update(s).digest('hex');
 
 /** Local task storage only. The caller must supply the existing durable source gate;
  * without it, this store cannot reserve or send any media request. */
-export function xhsMediaTaskStore(db:Tx,write:Writer,scope:{taskId:string;creatorId:string;noteId:string},gate:Gate,settle?:Gate,prepareOnly=false,options:{allowCompleteAppend?:boolean}={}):XhsMediaResumeStore & {adoptVerified:(manifest:XhsMediaManifest)=>Promise<number>; startIn:(tx:Tx,manifest:XhsMediaManifest,ordinal:number)=>Promise<void>} {
+export function xhsMediaTaskStore(db:Tx,write:Writer,scope:{taskId:string;creatorId:string;noteId:string},gate:Gate,settle?:Gate,prepareOnly=false,options:{allowCompleteAppend?:boolean;allowLocalReview?:boolean}={}):XhsMediaResumeStore & {adoptVerified:(manifest:XhsMediaManifest)=>Promise<number>; startIn:(tx:Tx,manifest:XhsMediaManifest,ordinal:number)=>Promise<void>} {
   async function read(tx:Tx,manifest:XhsMediaManifest){
     if(JSON.stringify(['xiaohongshu','note',manifest.noteId])!==scope.noteId)return bad();
     const rows=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${scope.taskId} AND creator_id=${scope.creatorId}`;
@@ -54,7 +54,7 @@ export function xhsMediaTaskStore(db:Tx,write:Writer,scope:{taskId:string;creato
         for(const im of m.images){
           if(!Number.isSafeInteger(im.ordinal)||im.ordinal<1||im.ordinal>m.images.length||m.images[im.ordinal-1]?.resourceKey!==im.resourceKey||!/^[a-f0-9]{64}$/.test(im.resourceKey??''))return bad();
           const item=prior.items?.[String(im.ordinal)];
-          if(['prepared','started','unknown','restricted'].includes(item?.state))unresolved=true;
+          if(['prepared','started','unknown','restricted','review'].includes(item?.state))unresolved=true;
           if(item?.state==='saved'&&item.resourceKey===im.resourceKey)candidates.push({key:im.resourceKey,item,version:m.version,ordinal:im.ordinal});
         }
       }
@@ -89,7 +89,7 @@ export function xhsMediaTaskStore(db:Tx,write:Writer,scope:{taskId:string;creato
     attemptState:async(manifest,ordinal)=>{
       const {slot}=await read(db,manifest),state=slot.items?.[String(ordinal)]?.state;
       if(state==='saved')return (await verified(db,manifest,ordinal))!==null?'ready':'stop';
-      return state==='prepared'||state==='started'||state==='unknown'||state==='restricted'?'stop':state==='refresh'?'refresh':'ready';
+      return state==='prepared'||state==='started'||state==='unknown'||state==='restricted'||state==='review'?'stop':state==='refresh'?'refresh':'ready';
     },
     begin:async(manifest,ordinal)=>write(async tx=>{
       const {raw,task,slot}=await read(tx,manifest),image=manifest.images[ordinal-1];
@@ -131,10 +131,10 @@ export function xhsMediaTaskStore(db:Tx,write:Writer,scope:{taskId:string;creato
     fail:async(manifest,ordinal,code)=>write(async tx=>{
       const {raw,task,slot}=await read(tx,manifest),item=slot.items?.[String(ordinal)];
       if(item?.state!=='started')return bad();
-      item.state=code==='XHS_MEDIA_HTTP_404'||code==='XHS_MEDIA_HTTP_410'?'refresh':'unknown';
-      item.code=item.state==='refresh'?code:'XHS_MEDIA_OUTCOME_UNKNOWN';
+      item.state=code==='XHS_MEDIA_HTTP_404'||code==='XHS_MEDIA_HTTP_410'?'refresh':options.allowLocalReview && code==='XHS_MEDIA_BYTES_INVALID'?'review':'unknown';
+      item.code=item.state==='unknown'?'XHS_MEDIA_OUTCOME_UNKNOWN':code;
       await save(tx,raw,task);
-      if (item.state === 'refresh' && settle) await settle(tx,manifest,ordinal);
+      if ((item.state === 'refresh'||item.state === 'review') && settle) await settle(tx,manifest,ordinal);
     }),
   };
 }

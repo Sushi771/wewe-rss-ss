@@ -3,7 +3,7 @@ import { inspectCachedMp4 } from '../xhs-video-download';
 import { decodeInlineImage } from './image-fetch';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
 import { xhsNoteMetrics } from './xhs-engagement-contract';
-import { XhsMediaError, mediaHttpError } from './xhs-media-error';
+import { XhsMediaError, XhsMediaLocalResponseError, mediaHttpError } from './xhs-media-error';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { RedbookPauseError } from './redbook-client';
 
@@ -151,6 +151,8 @@ export async function downloadRedbookMedia(
     });
   } catch (error) {
     // Transport errors can contain signed URLs or secrets: return a fixed code.
+    // A validation classification is only trusted after this call returned a response.
+    if (error instanceof XhsMediaLocalResponseError) throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
     if (error instanceof XhsMediaError || error instanceof XhsSubscriptionError || error instanceof RedbookPauseError) throw error;
     throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
@@ -165,9 +167,11 @@ export async function downloadRedbookMedia(
     !/^image\/(png|jpeg|gif|webp)$/.test(type)
   ) {
     await response.body?.cancel();
-    throw new XhsMediaError(response.redirected || (response.url && response.url !== url.href) ? 'XHS_MEDIA_RESPONSE_INVALID' : 'XHS_MEDIA_TYPE_REJECTED');
+    // HTML and other unexpected responses may be a login or verification page.
+    // Their origin and effect are unknown, even when the HTTP status is 200.
+    throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
   }
-  if (!response.body) throw new XhsMediaError('XHS_MEDIA_EMPTY');
+  if (!response.body) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let length = 0;
@@ -186,10 +190,16 @@ export async function downloadRedbookMedia(
     if (error instanceof XhsMediaError) throw error;
     throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
-  if (!length) throw new XhsMediaError('XHS_MEDIA_EMPTY');
-  const inlineData = `data:${type};base64,${Buffer.concat(chunks).toString('base64')}`;
+  if (!length) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+  const bytes=Buffer.concat(chunks);
+  const hasImageSignature = (type==='image/png' && bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) ||
+    (type==='image/jpeg' && bytes.subarray(0,3).equals(Buffer.from('ffd8ff','hex'))) ||
+    (type==='image/gif' && ['GIF87a','GIF89a'].includes(bytes.subarray(0,6).toString('ascii'))) ||
+    (type==='image/webp' && bytes.subarray(0,4).toString('ascii')==='RIFF' && bytes.subarray(8,12).toString('ascii')==='WEBP');
+  if(!hasImageSignature) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+  const inlineData = `data:${type};base64,${bytes.toString('base64')}`;
   // Existing archive validator checks actual container bytes, including MIME.
-  try { decodeInlineImage(inlineData); } catch { throw new XhsMediaError('XHS_MEDIA_BYTES_INVALID'); }
+  try { decodeInlineImage(inlineData); } catch { throw new XhsMediaLocalResponseError('XHS_MEDIA_BYTES_INVALID'); }
   return { inlineData, byteLength: length };
 }
 

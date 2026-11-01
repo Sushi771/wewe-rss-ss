@@ -179,6 +179,7 @@ export async function commitWholeSourceCheckpoint(
   expectedOwner: DispatchOwner,
   collectedAt?: number,
   generationId?: string,
+  localFailure?: {code:'XHS_DETAIL_PARSE_FAILED';taskId:string},
 ) {
   const rows = await tx.$queryRaw<
     Array<{ document: string }>
@@ -190,6 +191,13 @@ export async function commitWholeSourceCheckpoint(
   await retainedGenerationMarkers(tx, { jobId, creatorId: job.creatorId, authorId: job.sourceGrant.authorId, generationId });
   if (!fence || fence.mediaAttempt || !ownsDispatch(fence.owner, expectedOwner) || fence.marker !== marker || fence.state !== 'started')
     return bad();
+  if (localFailure) {
+    if (localFailure.code !== 'XHS_DETAIL_PARSE_FAILED' || fence.phase !== 'detail' || !fence.noteId) return bad();
+    const tasks=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${localFailure.taskId} AND creator_id=${job.creatorId} AND state='running'`;
+    if(tasks.length!==1)return bad();
+    const task=JSON.parse(tasks[0].document), key=JSON.stringify(['xiaohongshu','note',fence.noteId]);
+    if(task.code!==localFailure.code || task.items?.[key]!=='failed' || task.basicResults?.[key]!=='missing')return bad();
+  }
   if (fence.phase === 'profile' || fence.phase === 'metrics') {
     if (!Number.isSafeInteger(collectedAt) || !collectedAt || collectedAt < 1)
       return bad();
@@ -202,10 +210,10 @@ export async function commitWholeSourceCheckpoint(
     }
   }
   job.lastSourceOwnerReceipt = { marker, owner: fence.owner, state: 'checkpointed' };
-  if (job.generation && fence.receipt) job.generation.lastSourceReceipt = { ...fence.receipt, stage:'checkpoint', outcome:'checkpointed', settled:true };
+  if (job.generation && fence.receipt) job.generation.lastSourceReceipt = { ...fence.receipt, stage:'checkpoint', outcome:localFailure?'local-failure':'checkpointed', ...(localFailure?{code:localFailure.code}:{}), settled:true };
   if (job.generation && fence.phase === 'detail' && fence.noteId) {
     const key = JSON.stringify(['xiaohongshu','note',fence.noteId]);
-    job.generation.detailReceipts = { ...(job.generation.detailReceipts ?? {}), [key]: { outcome:'checkpointed', at:Date.now(), ...(Number.isInteger(fence.receipt?.status) ? {status:fence.receipt.status} : {}) } };
+    job.generation.detailReceipts = { ...(job.generation.detailReceipts ?? {}), [key]: { outcome:localFailure?'local-failure':'checkpointed', ...(localFailure?{code:localFailure.code}:{}), at:Date.now(), ...(Number.isInteger(fence.receipt?.status) ? {status:fence.receipt.status} : {}) } };
   }
   setActiveWholeFence(job, undefined);
   const changed =

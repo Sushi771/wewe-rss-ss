@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { allowedRedbookMediaUrl, downloadRedbookMedia, mapRedbookBasicDetail, RedbookMediaTransport } from './redbook-response';
-import { XhsMediaError } from './xhs-media-error';
+import { XhsMediaError, XhsMediaLocalResponseError } from './xhs-media-error';
 import { decodeInlineImage } from './image-fetch';
 
 const FULL = new Set(['WB_DFT', 'CRD_WM_JPG', 'CRD_WM_WEBP', 'ND_DFT']);
@@ -229,9 +229,10 @@ export async function resumeXhsMedia(
       let media: { inlineData: string; byteLength: number };
       try { media = await downloadRedbookMedia(url, mediaLimit - totalBytes, transport); }
       catch (error) {
-        const code = error instanceof XhsMediaError && /^XHS_MEDIA_(?:HTTP_[1-5][0-9]{2}|TRANSPORT_FAILED|TIMEOUT|EMPTY|TYPE_REJECTED|SIZE_REJECTED|BYTES_INVALID|RESPONSE_INVALID)$/.test(error.code) ? error.code : 'XHS_MEDIA_OUTCOME_UNKNOWN';
+        const localResponse = error instanceof XhsMediaLocalResponseError;
+        const code = error instanceof XhsMediaError && /^XHS_MEDIA_(?:HTTP_[1-5][0-9]{2}|TRANSPORT_FAILED|TIMEOUT|EMPTY|TYPE_REJECTED|SIZE_REJECTED|BYTES_INVALID|RESPONSE_INVALID)$/.test(error.code) && (localResponse || error.code!=='XHS_MEDIA_BYTES_INVALID') ? error.code : 'XHS_MEDIA_OUTCOME_UNKNOWN';
         await store.fail(manifest, image.ordinal, code);
-        return { code } as const;
+        return { code, localResponse } as const;
       }
       await store.commit(manifest, image.ordinal, media.inlineData);
       return { media } as const;
@@ -240,6 +241,7 @@ export async function resumeXhsMedia(
       const code = outcome.code;
       // Missing/expired URLs are shared by identical resource keys.
       if (code === 'XHS_MEDIA_HTTP_404' || code === 'XHS_MEDIA_HTTP_410') { refreshKeys.add(image.resourceKey); pending++; continue; }
+      if (outcome.localResponse) throw new XhsMediaLocalResponseError(code);
       throw new XhsMediaError(code);
     }
     totalBytes += outcome.media.byteLength; saved++;
