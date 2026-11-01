@@ -380,7 +380,7 @@ export class XhsSubscriptionRuntime
     if (!this.riskStore) return failure('XHS_SOURCE_RISK_UNAVAILABLE');
     const risk=await this.riskStore.read();
     this.persistedRisk=risk;
-    if (!risk && this.stopCode==='XHS_SOURCE_HISTORY_REVIEW_REQUIRED') this.stopCode=undefined;
+    if (!risk && ['XHS_SOURCE_HISTORY_REVIEW_REQUIRED','XHS_SOURCE_RISK_REVIEW_REQUIRED'].includes(this.stopCode??'')) this.stopCode=undefined;
   }
   private readonly adapter: RedbookSubscriptionAdapter;
   private readonly mediaTransport: RedbookMediaTransport;

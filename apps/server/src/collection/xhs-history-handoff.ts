@@ -6,6 +6,68 @@ import { XhsSubscriptionError } from './xhs-subscription-errors';
 
 type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 const blocked = (): never => { throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED'); };
+const restrictionEvidence = (value:any):boolean => {
+  if(!value||typeof value!=='object')return false;
+  if(typeof value.code==='string' && /^XHS_SOURCE_(?:AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(value.code))return true;
+  if([value.status,value.httpStatus,value.http_status].some(v=>[401,403,406,429,461,471].includes(v)))return true;
+  return [value.sourceReceipt,value.lastSourceReceipt,value.receipt,value.sourceFence,value.activeFence,value.generation,...(Array.isArray(value.events)?value.events:[])].some(restrictionEvidence);
+};
+/** Review an old generic stop without inventing a cause or request identity. */
+export async function prepareGenericRiskReview(tx:Tx,jobId:string,generationId:string) {
+  const risk=await tx.$queryRaw<Array<{state:string;code:string|null;owner:string|null;http_status:number|null;endpoint:string|null;updated_at:string}>>`SELECT state,code,owner,http_status,endpoint,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'`;
+  if(risk.length!==1||risk[0].state!=='blocked'||risk[0].code!=='XHS_SOURCE_RISK_REVIEW_REQUIRED'||risk[0].owner!==null||risk[0].http_status!==null||risk[0].endpoint!==null)return blocked();
+  const jobs=await tx.$queryRaw<Array<{id:string;state:string;document:string;updated_at:string}>>`SELECT id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_whole_creator_jobs ORDER BY id`;
+  const tasks=await tx.$queryRaw<Array<{id:string;creator_id:string;state:string;document:string;updated_at:string}>>`SELECT id,creator_id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_subscription_tasks ORDER BY id`;
+  if(jobs.some(j=>['queued','running'].includes(j.state))||tasks.some(t=>['queued','running'].includes(t.state)))return blocked();
+  const pendingRecovery=await tx.$queryRaw<Array<{id:string}>>`SELECT original.id FROM xhs_limited_recovery original WHERE original.state IN ('armed','started','unknown') AND NOT EXISTS(SELECT 1 FROM xhs_limited_recovery_append followup WHERE followup.id=original.id AND followup.note_id=original.note_id AND followup.author_id=original.author_id AND followup.state='finished') LIMIT 1`;
+  if(pendingRecovery.length)return blocked();
+  const row=jobs.find(j=>j.id===jobId);if(!row||!['paused','partial','failed','cancelled','completed'].includes(row.state))return blocked();
+  let job:any;try{job=JSON.parse(row.document);}catch{return blocked();}
+  const handoffs=await readHistoryHandoffs(tx);
+  if(job.id!==jobId||job.state!==row.state||!generationMatches(job)||job.generation.id!==generationId||job.generation.activeFence||!handoffs.jobIds.includes(jobId))return blocked();
+  const reviews=job.genericRiskReviews??[];
+  if(!Array.isArray(reviews)||reviews.some((r:any)=>r?.version!==1||!Number.isSafeInteger(r.confirmedAt)||r.confirmedAt<1||!/^[a-f0-9]{64}$/.test(r.digest??'')))return blocked();
+  const floor=Math.max(job.historyHandoff.confirmedAt,...reviews.map((r:any)=>r.confirmedAt));
+  if(!Number.isSafeInteger(floor)||floor<1||!/^\d+$/.test(risk[0].updated_at)||BigInt(risk[0].updated_at)<BigInt(floor))return blocked();
+  // Unresolved historical application codes without source evidence require an
+  // explicit human acknowledgement; they are not considered successful.
+  const historicalRestrictions:Array<{code:string;updatedAt:string;fingerprint:string}>=[];
+  const inspect=(current:{id:string;state:string;document:string;updated_at:string})=>{
+    if(!/^\d+$/.test(current.updated_at??''))return blocked();
+    let document:any;try{document=JSON.parse(current.document);}catch{return blocked();}
+    if(!document||typeof document!=='object')return blocked();
+    const {code,...rest}=document;
+    if(restrictionEvidence(rest))throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    if(!restrictionEvidence({code}))return;
+    if(!['paused','partial','failed','cancelled','blocked'].includes(current.state)||BigInt(current.updated_at)>=BigInt(risk[0].updated_at))throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    // No source receipt or active/unknown dispatch may be reclassified as a
+    // mere application code by human acknowledgement.
+    if(document.sourceReceipt||document.lastSourceReceipt||document.receipt||document.sourceFence||document.activeFence||document.generation?.activeFence||document.lastSourceOwnerReceipt||document.sourceActive||document.sourceUnknowns?.length)throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    historicalRestrictions.push({code,updatedAt:current.updated_at,fingerprint:createHash('sha256').update(JSON.stringify(current)).digest('hex')});
+  };
+  for(const current of jobs)inspect(current);
+  for(const current of tasks){let document:any;try{document=JSON.parse(current.document);}catch{return blocked();}if(!document||document.taskId!==current.id||document.creatorId!==current.creator_id||document.state!==current.state)return blocked();inspect(current);}
+  historicalRestrictions.sort((a,b)=>a.fingerprint.localeCompare(b.fingerprint));
+  const pending=await tx.$queryRaw<Array<{id:string;used:number;request_limit:number}>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' ORDER BY id`;
+  const expected=[...new Set(handoffs.markers)].sort();
+  if(pending.length!==expected.length||pending.some((p,i)=>p.id!==expected[i]||p.used!==1||p.request_limit!==1))return blocked();
+  const budgets=await tx.$queryRaw<Array<{id:string;used:number;request_limit:number;next_at:string;interval_ms:number}>>`SELECT id,used,request_limit,CAST(next_at AS TEXT) AS next_at,interval_ms FROM xhs_request_budgets ORDER BY id`;
+  if(!budgets.some(b=>b.id==='xhs:source-total'))return blocked();
+  const digest=createHash('sha256').update(JSON.stringify({kind:'generic-risk-review-v1',jobId,generationId,risk:risk[0],jobs,tasks,pending,budgets})).digest('hex');
+  return {kind:'generic' as const,digest,jobId,generationId,historicalRestrictions,excludedIds:[] as string[],profileReviewIds:[] as string[],pendingProfileReviewIds:[] as string[],historicalAttemptCount:pending.length};
+}
+export async function confirmGenericRiskReview(tx:Tx,input:{jobId:string;generationId:string;digest:string;confirm:true;acknowledgedLoginAndVerification?:boolean},now=Date.now()) {
+  if(input.confirm!==true||input.acknowledgedLoginAndVerification!==true||!/^[a-f0-9]{64}$/.test(input.digest)||!Number.isSafeInteger(now)||now<1)return blocked();
+  const lock=await tx.$queryRaw<Array<{id:string}>>`UPDATE xhs_request_budgets SET next_at=next_at WHERE id='xhs:source-total' RETURNING id`;if(lock.length!==1)return blocked();
+  const snapshot=await prepareGenericRiskReview(tx,input.jobId,input.generationId);if(snapshot.digest!==input.digest)return blocked();
+  const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_whole_creator_jobs WHERE id=${input.jobId}`;if(rows.length!==1)return blocked();
+  const risk=await tx.$queryRaw<Array<{state:string;code:string;owner:null;http_status:null;endpoint:null;updated_at:string}>>`SELECT state,code,owner,http_status,endpoint,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'`;
+  const job=JSON.parse(rows[0].document);const reviews=job.genericRiskReviews??[];if(!Array.isArray(reviews)||reviews.length>=100)return blocked();
+  reviews.push({version:1,digest:input.digest,confirmedAt:now,risk:risk[0],outcome:'unknown',requestIdentity:'unknown',acknowledgedLoginAndVerification:input.acknowledgedLoginAndVerification,historicalRestrictions:snapshot.historicalRestrictions});job.genericRiskReviews=reviews;
+  if(await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)},updated_at=${BigInt(now)} WHERE id=${input.jobId} AND state=${rows[0].state} AND document=${rows[0].document}`!==1)return blocked();
+  if(await tx.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL,updated_at=${BigInt(now)} WHERE id='source' AND state='blocked' AND code='XHS_SOURCE_RISK_REVIEW_REQUIRED' AND owner IS NULL AND http_status IS NULL AND endpoint IS NULL AND updated_at=${BigInt(risk[0].updated_at)}`!==1)return blocked();
+  return {state:'confirmed' as const,excludedCount:0};
+}
 /** A later profile checkpoint is written atomically with the source checkpoint. */
 function profileReviewPending(job:any,review:any):boolean {
   const p=job.generation?.profile, author=job.sourceGrant?.authorId, floor=review.budgetFloors?.phaseUsed?.profile;

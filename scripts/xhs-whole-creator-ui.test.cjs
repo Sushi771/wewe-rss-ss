@@ -308,6 +308,20 @@ test("AUDIT: terminal recovery copy describes user results without storage diagn
 });
 
 const generationJob = {id:'job',items:[{noteId:'synthetic-safe',title:'Safe'}],canPrepareGeneration:true,budget:{used:6,limit:310},historyGrant:{limits:{profile:2,list:3,detail:5,media:300,metrics:0},used:{profile:2,list:2,detail:1,media:1,metrics:0}}};
+test('generic source review requires a fresh explicit checkbox before confirming',async()=>{
+ let pos=0,slots=[],calls=[];const hooks={useState(v){const i=pos++;if(!(i in slots))slots[i]=v;return [slots[i],x=>{slots[i]=typeof x==='function'?x(slots[i]):x}]}}, mutation=kind=>({useMutation:opts=>{assert.equal(opts.retry,false);return {isLoading:false,mutateAsync:async input=>{calls.push({kind,input});return kind==='prepare'?{digest:'a'.repeat(64),excludedIds:[],historicalAttemptCount:1,historicalRestrictions:[{code:'XHS_SOURCE_VERIFICATION_BLOCKED',updatedAt:'1700000000000',fingerprint:'b'.repeat(64)}]}:{};}}}});
+ const trpc={xiaohongshu:{prepareXhsHistoryHandoff:mutation('prepare'),confirmXhsHistoryHandoff:mutation('confirm')}};
+ const output=ts.transpileModule(text,{compilerOptions:{target:ts.ScriptTarget.ES2021,module:ts.ModuleKind.CommonJS,jsx:ts.JsxEmit.ReactJSX,esModuleInterop:true}}).outputText,mod={exports:{}};
+ new Function('require','exports','module',output)(name=>name==='react'?hooks:name==='@web/utils/trpc'?{trpc}:resolve(name),mod.exports,mod);
+ const draw=()=>{pos=0;return mod.exports.XhsHistoryHandoff({jobId:'job',generationId:'gen',items:[],refresh:async()=>{},generic:true})};
+ const nodes=(tree,type)=>{const found=[];(function walk(n){if(!n)return;if(Array.isArray(n))return n.forEach(walk);if(typeof n==='object'){if(n.type===type)found.push(n);walk(n.props?.children)}})(tree);return found;};
+ let tree=draw();await nodes(tree,'button')[0].props.onClick();tree=draw();assert.equal(nodes(tree,'li').length,1);assert.ok(JSON.stringify(nodes(tree,'li')[0].props.children).includes('XHS_SOURCE_VERIFICATION_BLOCKED'));assert.ok(JSON.stringify(tree).includes('我已检查当前登录和验证状态'));assert.equal(nodes(tree,'button')[1].props.disabled,true);assert.deepEqual(calls.map(x=>x.kind),['prepare']);
+ nodes(tree,'input')[0].props.onChange({target:{checked:true}});tree=draw();assert.equal(nodes(tree,'button')[1].props.disabled,false);await nodes(tree,'button')[1].props.onClick();assert.deepEqual(calls.map(x=>x.kind),['prepare','confirm']);assert.deepEqual(calls[1].input,{jobId:'job',generationId:'gen',digest:'a'.repeat(64),confirm:true,acknowledgedLoginAndVerification:true});
+});
+test('generic source review warns that the old identity is unknown and a new read may repeat',()=>{
+ const job={...generationJob,state:'partial',updatedAt:1,listEnd:true,canPrepareGeneration:false,generationRecovery:{id:'g',state:'partial',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:1,missing:0,directoryComplete:true,originalNoteStatus:'unknown',resumable:false,handoffDone:true,genericRiskReviewAvailable:true}};
+ const html=render([job]);assert.match(html,/旧请求的身份和结果未知/);assert.match(html,/新只读请求可能再次获取相同页面/);assert.doesNotMatch(html,/确认并恢复/);
+});
 test('a live generation does not display the stopped unknown warning',()=>{
  const generationRecovery={id:'g',state:'running',profileUrl:'https://xhslink.cn/o/Synthetic',discovered:1,missing:0,directoryComplete:false,originalNoteStatus:'unknown',resumable:false,newResult:'in-progress'};
  const live=render({...generationJob,canPrepareGeneration:false,generationRecovery},'XhsWholeGeneration');

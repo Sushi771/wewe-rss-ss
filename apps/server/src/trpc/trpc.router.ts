@@ -2029,7 +2029,7 @@ export class TrpcRouter {
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareHistoryHandoff(input));}),
     confirmXhsHistoryHandoff: this.trpcService.protectedProcedure
-      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),digest:z.string().regex(/^[a-f0-9]{64}$/),confirm:z.literal(true)}).strict())
+      .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),digest:z.string().regex(/^[a-f0-9]{64}$/),confirm:z.literal(true),acknowledgedLoginAndVerification:z.boolean().optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.confirmHistoryHandoff(input));}),
     reviewWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),excludeUnknown:z.literal(true).optional()}).strict())

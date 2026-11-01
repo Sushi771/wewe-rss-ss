@@ -12,7 +12,7 @@ import { ownsDispatch } from './xhs-dispatch-owner';
 import { legacyBudgetDigest } from './xhs-legacy-review';
 import { generationMatches, activeWholeFence,verifiedReviewedNoteIds } from './xhs-whole-generation';
 import { generationReviewMarkers, reviewGenerationUnknown } from './xhs-generation-review';
-import { prepareHistoryHandoff, confirmHistoryHandoff,readHistoryHandoffs,claimReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
+import { prepareHistoryHandoff, confirmHistoryHandoff,prepareGenericRiskReview,confirmGenericRiskReview,readHistoryHandoffs,claimReviewedRisk,releaseReviewedRisk } from './xhs-history-handoff';
 import { createReviewedContextIntent,originalAttemptDigest } from './xhs-reviewed-attempt';
 import { admitScheduledXhs,scheduledTaskId } from './xhs-scheduled-admission';
 
@@ -115,6 +115,74 @@ describe('explicit review appends generation unknown without deleting markers or
       expect(await admit('other-creator')).toMatchObject({kind:'created'});
     } finally {await db.$executeRaw`DELETE FROM xhs_creators WHERE id='other-creator'`;await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');}
   });
+
+  it('reviews one generic stop atomically without changing old unknown tasks',async()=>{
+    await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');
+    await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)');
+    const other=new PrismaClient({datasources:{db:{url:'file:'+path.join(root,'fixture.db').replace(/\\/g,'/')}}});
+    try {
+      const original=await read();original.generation.selectedIds=[JSON.stringify(['xiaohongshu','note','note']),JSON.stringify(['xiaohongshu','note','safe'])];await write(original);
+      await db.$transaction(tx=>reviewGenerationUnknown(tx,{...input,excludeUnknown:true},2000));
+      const prior=await prepareHistoryHandoff(db,'job',input.generationId);await db.$transaction(tx=>confirmHistoryHandoff(tx,{...input,digest:prior.digest,confirm:true},3000));
+      const oldTask=JSON.stringify({taskId:'old-task',creatorId:'creator',kind:'list',state:'blocked',reason:'unknown'});
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('old-task','creator','blocked',${oldTask},4001)`;
+      const reviewedPast=JSON.stringify({taskId:'reviewed-past',creatorId:'creator',kind:'list',state:'blocked',code:'XHS_SOURCE_RATE_LIMIT_BLOCKED',supersededByTaskId:'reviewed-success'});
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('reviewed-past','creator','blocked',${reviewedPast},2000)`;
+      const reviewedSuccess=JSON.stringify({taskId:'reviewed-success',creatorId:'creator',kind:'list',state:'completed',resumedFromTaskId:'reviewed-past',total:1,completed:1,skipped:0,failed:0,remaining:0});
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('reviewed-success','creator','completed',${reviewedSuccess},2500)`;
+      await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_RISK_REVIEW_REQUIRED',owner=NULL,http_status=NULL,endpoint=NULL,updated_at=4000 WHERE id='source'`;
+      const historicalJob=JSON.stringify({id:'historical-job',state:'paused',code:'XHS_SOURCE_VERIFICATION_BLOCKED'});
+      await db.$executeRaw`INSERT INTO xhs_whole_creator_jobs(id,creator_id,state,document,updated_at) VALUES('historical-job','creator','paused',${historicalJob},2000)`;
+      const snapshot=await prepareGenericRiskReview(db,'job',input.generationId);const oldBudgets=await budgets();
+      expect(snapshot.historicalRestrictions.map(x=>x.code)).toEqual(expect.arrayContaining(['XHS_SOURCE_VERIFICATION_BLOCKED','XHS_SOURCE_RATE_LIMIT_BLOCKED']));
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:false as true,acknowledgedLoginAndVerification:true},5000))).rejects.toThrow();
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:true},5000))).rejects.toThrow();
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:true,acknowledgedLoginAndVerification:false},5000))).rejects.toThrow();
+      expect((await read()).genericRiskReviews).toBeUndefined();expect((await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`)[0].state).toBe('blocked');
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:undefined as unknown as true,acknowledgedLoginAndVerification:true},5000))).rejects.toThrow();
+      const restrictedTask=JSON.stringify({taskId:'old-task',creatorId:'creator',kind:'list',state:'blocked',code:'XHS_SOURCE_RATE_LIMIT_BLOCKED'});
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${restrictedTask} WHERE id='old-task'`;
+      await expect(prepareGenericRiskReview(db,'job',input.generationId)).rejects.toThrow('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const restrictedReceipt=JSON.stringify({taskId:'old-task',creatorId:'creator',kind:'list',state:'blocked',lastSourceReceipt:{status:461}});
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${restrictedReceipt} WHERE id='old-task'`;
+      await expect(prepareGenericRiskReview(db,'job',input.generationId)).rejects.toThrow('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${oldTask} WHERE id='old-task'`;
+      const alteredHistorical=JSON.stringify({id:'historical-job',state:'paused',code:'XHS_SOURCE_PERMISSION_BLOCKED'});
+      await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${alteredHistorical} WHERE id='historical-job'`;
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:true,acknowledgedLoginAndVerification:true},5000))).rejects.toThrow();
+      await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${historicalJob} WHERE id='historical-job'`;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets VALUES(${nextMarker},1,1,0,0)`;
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:true,acknowledgedLoginAndVerification:true},5000))).rejects.toThrow();
+      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${nextMarker}`;
+      await db.$executeRaw`UPDATE xhs_request_budgets SET used=used+1 WHERE id='xhs:source-total'`;
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:snapshot.digest,confirm:true,acknowledgedLoginAndVerification:true},5000))).rejects.toThrow();
+      await db.$executeRaw`UPDATE xhs_request_budgets SET used=used-1 WHERE id='xhs:source-total'`;
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='running' WHERE id='old-task'`;
+      await expect(prepareGenericRiskReview(db,'job',input.generationId)).rejects.toThrow();
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked' WHERE id='old-task'`;
+      await db.$executeRaw`UPDATE xhs_source_risk SET state='pending',owner='other-owner' WHERE id='source'`;
+      await expect(prepareGenericRiskReview(db,'job',input.generationId)).rejects.toThrow();
+      await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',owner=NULL WHERE id='source'`;
+      await db.$executeRaw`UPDATE xhs_source_risk SET code='XHS_SOURCE_RATE_LIMIT_BLOCKED',http_status=429 WHERE id='source'`;
+      await expect(prepareGenericRiskReview(db,'job',input.generationId)).rejects.toThrow();
+      await db.$executeRaw`UPDATE xhs_source_risk SET code='XHS_SOURCE_RISK_REVIEW_REQUIRED',http_status=NULL WHERE id='source'`;
+      const fresh=await prepareGenericRiskReview(db,'job',input.generationId);
+      await expect(db.$transaction(async tx=>{await confirmGenericRiskReview(tx,{...input,digest:fresh.digest,confirm:true,acknowledgedLoginAndVerification:true},4999);throw Error('synthetic rollback');})).rejects.toThrow('synthetic rollback');
+      expect((await read()).genericRiskReviews).toBeUndefined();expect((await db.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`)[0].state).toBe('blocked');
+      const results=await Promise.allSettled([db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:fresh.digest,confirm:true,acknowledgedLoginAndVerification:true},5000)),other.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:fresh.digest,confirm:true,acknowledgedLoginAndVerification:true},5001))]);
+      expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+      const risk=await db.$queryRaw<Array<{state:string;code:string|null}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;expect(risk[0]).toEqual({state:'clear',code:null});
+      const saved=await read();expect(saved.genericRiskReviews).toHaveLength(1);expect(saved.genericRiskReviews[0]).toMatchObject({outcome:'unknown',requestIdentity:'unknown',acknowledgedLoginAndVerification:true,historicalRestrictions:snapshot.historicalRestrictions,risk:{state:'blocked',code:'XHS_SOURCE_RISK_REVIEW_REQUIRED',updated_at:'4000'}});
+      const reopened=await other.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id='job'`;expect(JSON.parse(reopened[0].document).genericRiskReviews).toEqual(saved.genericRiskReviews);
+      expect(saved.historyHandoff).toBeDefined();expect(await budgets()).toEqual(oldBudgets);
+      const historical=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_whole_creator_jobs WHERE id='historical-job'`;expect(historical[0]).toEqual({state:'paused',document:historicalJob});
+      const task=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id='old-task'`;expect(task[0]).toEqual({state:'blocked',document:oldTask});
+      await expect(db.$transaction(tx=>confirmGenericRiskReview(tx,{...input,digest:fresh.digest,confirm:true,acknowledgedLoginAndVerification:true},5002))).rejects.toThrow();
+      const round='2026-11-01/17:30',taskId=scheduledTaskId(round,'creator','basic');
+      const admission=await db.$transaction(tx=>admitScheduledXhs(tx,{round,creatorId:'creator',phase:'basic',task:{taskId,creatorId:'creator',state:'queued'},now:5003}));
+      expect(admission).toMatchObject({kind:'created',historyExcludedIds:[JSON.stringify(['xiaohongshu','note','note'])]});
+    } finally {await db.$executeRaw`DELETE FROM xhs_whole_creator_jobs WHERE id='historical-job'`;await other.$disconnect();await db.$executeRawUnsafe('DROP TABLE xhs_subscription_tasks');await db.$executeRawUnsafe('CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,state TEXT)');}
+  },40000);
 
   it('handoff transaction retains historical evidence and rejects a stale or repeated confirmation',async()=>{
     const original=await read();

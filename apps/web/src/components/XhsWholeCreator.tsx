@@ -146,7 +146,7 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
       {(jobs.data ?? []).map((job) => (
         <section key={job.id} className="my-2 min-w-0 border-t">
           {(job.canPrepareGeneration || job.generationRecovery) && <XhsWholeGeneration job={job} refresh={() => jobs.refetch()} />}
-          {job.generationRecovery && !job.generationRecovery.handoffDone && <XhsHistoryHandoff jobId={job.id} generationId={job.generationRecovery.id} items={job.items} refresh={() => jobs.refetch()} />}
+          {job.generationRecovery && (!job.generationRecovery.handoffDone || job.generationRecovery.genericRiskReviewAvailable) && <XhsHistoryHandoff jobId={job.id} generationId={job.generationRecovery.id} items={job.items} refresh={() => jobs.refetch()} generic={!!job.generationRecovery.genericRiskReviewAvailable} />}
           {!!job.generationRecovery?.retryableExcludedIds?.length && (!job.reviewedRecovery || job.reviewedRecovery.state === "checkpointed") && (
             <div className="my-2 space-y-2 rounded border p-2">
               <p>历史请求结果未知；请选择一篇。最多请求作者 1 次、目录 2 页及目标详情 1 次，不请求图片；已取得的上下文优先复用。</p>
@@ -340,11 +340,15 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
 }
 
 const phases = ['profile', 'list', 'detail', 'media', 'metrics'] as const;
-function XhsHistoryHandoff({jobId,generationId,items,refresh}:{jobId:string;generationId:string;items:{noteId:string;title:string}[];refresh:()=>Promise<unknown>}) {
-  const [snapshot,setSnapshot]=useState<{digest:string;excludedIds:string[];profileReviewIds?:string[];pendingProfileReviewIds?:string[];historicalAttemptCount:number}>();
+export function XhsHistoryHandoff({jobId,generationId,items,refresh,generic=false}:{jobId:string;generationId:string;items:{noteId:string;title:string}[];refresh:()=>Promise<unknown>;generic?:boolean}) {
+  const [snapshot,setSnapshot]=useState<{digest:string;excludedIds:string[];profileReviewIds?:string[];pendingProfileReviewIds?:string[];historicalAttemptCount:number;historicalRestrictions?:{code:string;updatedAt:string;fingerprint:string}[]}>();
   const [checked,setChecked]=useState(false),[error,setError]=useState('');
   const prepare=trpc.xiaohongshu.prepareXhsHistoryHandoff.useMutation({retry:false});
   const confirm=trpc.xiaohongshu.confirmXhsHistoryHandoff.useMutation({retry:false});
+  if(generic) return <details><summary>核查旧来源暂停</summary><p>旧请求的身份和结果未知。确认后会保留旧记录并恢复正常采集；新只读请求可能再次获取相同页面。</p>
+    <button disabled={prepare.isLoading||confirm.isLoading} onClick={async()=>{setChecked(false);setSnapshot(undefined);try{setSnapshot(await prepare.mutateAsync({jobId,generationId}));setError('');}catch{setError('当前状态不能确认：可能存在未复核的登录、验证或限流记录，或任务状态无法确定，请先核查。');}}}>核查当前状态</button>
+    {snapshot&&<><p>以下历史应用记录没有可核对的原始响应或请求身份，无法确认与本次暂停是否相关：</p><ul>{(snapshot.historicalRestrictions??[]).map(x=><li key={x.fingerprint}>{x.code}（记录时间 {new Date(Number(x.updatedAt)).toLocaleString()}；证据 {x.fingerprint.slice(0,12)}）</li>)}</ul><label><input type="checkbox" checked={checked} onChange={e=>setChecked(e.target.checked)}/>我已检查当前登录和验证状态，了解旧请求身份与结果未知、新一轮只读采集可能重复获取，确认进行新一轮。</label><button disabled={!checked||confirm.isLoading} onClick={async()=>{try{await confirm.mutateAsync({jobId,generationId,digest:snapshot.digest,confirm:true,acknowledgedLoginAndVerification:checked});setSnapshot(undefined);await refresh();}catch{setSnapshot(undefined);setError('状态已变化，确认未完成，请重新核查。');}}}>确认并恢复</button></>}
+    {error&&<p role="alert">{error}</p>}</details>;
   return <details><summary>核查历史来源暂停</summary><p>保留历史未知记录和原请求；没有新成功回执的笔记继续排除并显示待核对。确认后其他内容可按定时计划继续。</p>
     <button disabled={prepare.isLoading||confirm.isLoading} onClick={async()=>{setChecked(false);setSnapshot(undefined);try{setSnapshot(await prepare.mutateAsync({jobId,generationId}));setError('');}catch{setError('当前状态不满足交接条件，请核对活动任务和未知请求。');}}}>核查当前范围</button>
     {snapshot&&<><p>历史未知请求 {snapshot.historicalAttemptCount} 次；继续排除待核对笔记 {snapshot.excludedIds.length} 篇。</p><label><input type="checkbox" checked={checked} onChange={e=>setChecked(e.target.checked)}/>我已核查范围，同意保留历史未知证据及待核对排除。</label><button disabled={!checked||confirm.isLoading} onClick={async()=>{try{await confirm.mutateAsync({jobId,generationId,digest:snapshot.digest,confirm:true});setSnapshot(undefined);await refresh();}catch{setSnapshot(undefined);setError('交接未确认或状态已变化，请刷新核对；不会自动重试。');}}}>确认历史交接</button></>}
@@ -361,7 +365,7 @@ type Job = {
   historyGrant?: { limits: Record<string, number>; used: Record<string, number> };
   items: {noteId: string; title: string}[];
   generationRecovery?: {
-    id: string; state: string; profileUrl: string; discovered: number; missing: number; handoffDone?:boolean;
+    id: string; state: string; profileUrl: string; discovered: number; missing: number; handoffDone?:boolean; genericRiskReviewAvailable?:boolean;
     directoryComplete: boolean; selectionComplete?: boolean; basicCompleted?: boolean; excludeUnknownRequired?: boolean; originalNoteStatus: string; newResult?: string; resumable: boolean;
     selectedIds?: string[]; excludedIds?: string[];
     reviewable?: boolean;

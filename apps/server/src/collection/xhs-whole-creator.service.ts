@@ -23,7 +23,7 @@ import { activeWholeFence, createWholeGeneration, generationMatches, generationR
 import { saveXhsMetrics } from './xhs-engagement-store';
 import { safeSourceFailure } from './xhs-source-receipt';
 import { reviewGenerationUnknown } from './xhs-generation-review';
-import { prepareHistoryHandoff, confirmHistoryHandoff,readHistoryHandoffs } from './xhs-history-handoff';
+import { prepareHistoryHandoff, confirmHistoryHandoff,prepareGenericRiskReview,confirmGenericRiskReview,readHistoryHandoffs } from './xhs-history-handoff';
 import { resumeWholeMedia } from './xhs-whole-media-resume';
 import { selectMissingBasic } from './xhs-missing-basic';
 
@@ -544,14 +544,20 @@ export class XhsWholeCreatorService implements OnModuleInit {
   async prepareHistoryHandoff(input:{jobId:string;generationId:string}) {
     await this.readyForMutation();
     if(this.starting.has(input.jobId)||this.running.has(input.jobId)||this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
-    return this.db.$transaction(tx=>prepareHistoryHandoff(tx,input.jobId,input.generationId));
+    return this.db.$transaction(async tx=>{
+      const rows=await tx.$queryRaw<Array<{code:string|null}>>`SELECT code FROM xhs_source_risk WHERE id='source'`;
+      return rows[0]?.code==='XHS_SOURCE_RISK_REVIEW_REQUIRED' ? prepareGenericRiskReview(tx,input.jobId,input.generationId) : prepareHistoryHandoff(tx,input.jobId,input.generationId);
+    });
   }
-  async confirmHistoryHandoff(input:{jobId:string;generationId:string;digest:string;confirm:true}) {
+  async confirmHistoryHandoff(input:{jobId:string;generationId:string;digest:string;confirm:true;acknowledgedLoginAndVerification?:boolean}) {
     await this.readyForMutation();
     if(this.starting.has(input.jobId)||this.running.has(input.jobId)||this.reviewing.has(input.jobId))throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     this.starting.add(input.jobId);
     try {
-      const result=await this.write(tx=>confirmHistoryHandoff(tx,input));
+      const result=await this.write(async tx=>{
+        const rows=await tx.$queryRaw<Array<{code:string|null}>>`SELECT code FROM xhs_source_risk WHERE id='source'`;
+        return rows[0]?.code==='XHS_SOURCE_RISK_REVIEW_REQUIRED' ? confirmGenericRiskReview(tx,input) : confirmHistoryHandoff(tx,input);
+      });
       await this.runtime.refreshAfterHistoryHandoff();
       return result;
     } finally {this.starting.delete(input.jobId);}
@@ -1277,7 +1283,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         state: this.reviewing.has(id) ? 'in-progress' as const : reviewContext.failureCode ? 'restricted' as const : reviewContext.state==='started' ? 'unknown' as const : reviewContext.state==='ready' ? 'ready' as const : reviewContext.state==='prepared' && reviewContext.stages?.length===0 && reviewContext.scope?.expiresAt>Date.now() ? 'prepared' as const : reviewContext.state==='prepared' && Array.isArray(reviewContext.stages) && reviewContext.stages.every((v:any)=>v.state==='settled'&&v.transportEntered===true) ? 'incomplete' as const : 'needs-review' as const,
       } : undefined,
       reviewedRecovery: generation && (!reviewAttempt || oldPrepared || (reviewContext?.state==='ready' && reviewAttempt.state==='prepared' && !reviewAttempt.owner && !reviewAttempt.dispatch)) ? undefined : reviewedRecoveryView(job,Date.now(),this.reviewing.has(id)),
-      generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const, handoffDone: !!(job as any).historyHandoff,
+      generationRecovery: generation ? { id: String(generation.id), state: generation.state === 'prepared' && job.state === 'paused' ? 'prepared' : job.state, originalResult: 'unknown' as const, handoffDone: !!(job as any).historyHandoff, genericRiskReviewAvailable: !!(job as any).historyHandoff && risk.length===1 && risk[0].state==='blocked' && risk[0].code==='XHS_SOURCE_RISK_REVIEW_REQUIRED',
         basicRepair: pendingUnsentBasicRepair(job) && !this.running.has(id) && !this.starting.has(id) ? {noteIds:[...job.basicRepairRequest!.noteIds],bounded:true as const} : undefined,
         mediaRecoverableIds: [...new Set<string>([reviewAttempt,...(reviewAttemptHistory??[])].filter(a=>a&&generationReviewSettled({...job,reviewAttempt:a})).map(a=>a.receipt.noteId as string))],
         profileUrl: String(generation.profileUrl), profile: generation.profile, basicCompleted: !!generation.basicCompleted, selectedIds: generation.selectedIds as string[] | undefined, excludedIds: [generation.origin.fence, ...(generation.reviews ?? []).map((r: any) => r.fence)].filter((f: any) => !!f.noteId).map((f: any) => JSON.stringify(['xiaohongshu','note',f.noteId])) as string[], directoryComplete: job.listEnd && !generation.selectedIds, selectionComplete: job.listEnd && !!generation.selectedIds && ['partial','completed'].includes(job.state), discovered: Number(generation.directoryIds?.length ?? 0),
