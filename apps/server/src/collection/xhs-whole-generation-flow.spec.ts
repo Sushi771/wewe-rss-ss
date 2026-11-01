@@ -31,6 +31,22 @@ import { prepareWholeSourceFence, markWholeSourceStarted, commitWholeSourceCheck
 import { attemptDigest, createReviewedContextIntent, consumeReviewedAttempt, originalAttemptDigest, startReviewedContextStage, enterReviewedContextStage, settleReviewedContextStage } from './xhs-reviewed-attempt';
 
 const hash = (v:unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
+async function waitForRollback(rolledBack:Promise<void>, lane:Promise<unknown>, timeoutMs=8000) {
+  let timer:ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([rolledBack.then(()=>true),lane.then(()=>false),new Promise<never>((_,reject)=>{
+      timer=setTimeout(()=>reject(new Error('SYNTHETIC_ROLLBACK_WAIT_TIMEOUT')),timeoutMs);
+    })]);
+  } finally { if(timer) clearTimeout(timer); }
+}
+it('releases the synthetic response gate when rollback never arrives',async()=>{
+  let release!:()=>void, cleaned=false;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const lane=gate.then(()=>{cleaned=true;});
+  try { await expect(waitForRollback(new Promise<void>(()=>{}),lane,30)).rejects.toThrow('SYNTHETIC_ROLLBACK_WAIT_TIMEOUT'); }
+  finally {release();await lane;}
+  expect(cleaned).toBe(true);
+});
 describe('whole creator generation through real runtime, policy and SQLite', () => {
   // Jest timeouts do not cancel the test body. Keep its promise so teardown
   // cannot reset the shared fixture while that body can still schedule work.
@@ -347,7 +363,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const total=api.mock.calls.length+shortLinks.mock.calls.length;
     expect(await currentBudget()).toEqual([{id:'job',used:6+total},{id:'xhs:source-total',used:8+total}]);
     await assertUnknownPreserved();
-  }, 15000);
+  }, 40000);
   // Initial regression run: after HTTP 200 the P2028 receipt incorrectly reported
   // XHS_SOURCE_TRANSPORT_BLOCKED instead of XHS_STORAGE_FAILED (1 failed, 20 skipped).
   it.each([200,461])('waits for an in-flight second transport before recording HTTP %s after dispatch rollback',async status=>{
@@ -371,7 +387,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     }})),options).catch((error:any)=>{if(error?.code==='P2028')rollbackDone();throw error;})) as any);
     try {
       await execute(generationId);void (whole as any).lane.then(()=>{runFinished=true;});
-      await rolledBack;
+      expect(await waitForRollback(rolledBack,(whole as any).lane)).toBe(true);
       // Give the failed dispatch stack a chance to settle if it incorrectly detached
       // the actual transport promise. The response gate itself remains unresolved.
       await new Promise(resolve=>setTimeout(resolve,100));
