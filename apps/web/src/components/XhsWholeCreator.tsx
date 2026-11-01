@@ -477,7 +477,7 @@ export function XhsSelectedMedia({ job, selectedNoteIds, refresh }: {
     new Set(selectedNoteIds).size === selectedNoteIds.length &&
     items.every(Boolean);
   const existingRepair = !!generation && job.state === 'paused' && generation.resumable && !generation.newResult && boundedBasic && !!generation.basicRepair?.noteIds &&
-    JSON.stringify([...generation.basicRepair?.noteIds].sort()) === JSON.stringify([...selectedNoteIds].sort()) && items.every(Boolean);
+    JSON.stringify([...generation.basicRepair.noteIds].sort()) === JSON.stringify([...selectedNoteIds].sort()) && items.every(Boolean);
   const basicEligible = (eligible || existingRepair) && (!boundedBasic || selectedNoteIds.length <= 8) && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id));
   const mediaEligible = eligible && !selectedNoteIds.some(id => (generation?.excludedIds ?? []).includes(id) && !(generation?.mediaRecoverableIds ?? []).includes(id));
   const run = async () => {
