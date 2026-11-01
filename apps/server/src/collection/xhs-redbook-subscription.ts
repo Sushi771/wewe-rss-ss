@@ -265,8 +265,14 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     try {
       raw = record(response);
       page = mapRedbookPage(raw, authorId);
-    } catch {
+    } catch (error) {
       // Fixed local classification only; do not persist upstream data or errors.
+      if (error instanceof Error && error.message === 'REDBOOK_AUTHOR_MISMATCH') throw error;
+      const notes = (response as any)?.notes;
+      if (Array.isArray(notes) && notes.some((note: any) =>
+        typeof note?.user?.user_id !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(note.user.user_id))) throw error;
+      if (Array.isArray(notes) && notes.some((note: any) => note.user.user_id !== authorId))
+        throw new Error('REDBOOK_AUTHOR_MISMATCH');
       throw new XhsSourceParseError('XHS_LIST_PARSE_FAILED');
     }
     for (const [key, access] of this.tokens)
@@ -364,7 +370,15 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     const raw = await this.client.getNoteById(noteId, access.token, access.source, signal);
     let basic: ReturnType<typeof mapRedbookBasicDetail>;
     try { basic = mapRedbookBasicDetail(raw, authorId, noteId); }
-    catch { throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED'); }
+    catch (error) {
+      // An incomplete or mismatched identity cannot settle the original fence.
+      // Only a response bound to the requested author and note is a local parse failure.
+      const detail = raw as any;
+      const item = Array.isArray(detail?.items) && detail.items.length === 1 ? detail.items[0] : undefined;
+      const card = item?.note_card;
+      if (item?.id !== noteId || card?.note_id !== noteId || card?.user?.user_id !== authorId) throw error;
+      throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED');
+    }
     // Media is optional: malformed or absent images must never discard the basic response.
     try { return { basic, media: extractXhsMediaManifest(raw, authorId, noteId) }; }
     catch { return { basic, media: null }; }

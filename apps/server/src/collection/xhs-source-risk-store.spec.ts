@@ -65,6 +65,14 @@ describe('durable synthetic source risk fence', () => {
     }
     runtime.onModuleDestroy();
   },20000);
+  it('keeps missing list author identity unknown and blocks subsequent dispatch',async()=>{
+    const api=jest.fn(async(request:any)=>({status:200,url:request.url,body:{success:true,code:0,data:{notes:[{note_id:'note',user:{},xsec_token:'synthetic'}],has_more:false,cursor:''}}}));
+    const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+    await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});(runtime as any).adapter.restoreDefaultAuthorAccess('synthetic-author');
+    await expect(runtime.list('synthetic-author',null)).rejects.not.toMatchObject({code:'XHS_LIST_PARSE_FAILED'});
+    const rows=await db.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
+    expect(rows[0]).toMatchObject({state:'blocked',code:'XHS_SOURCE_RISK_REVIEW_REQUIRED'});await expect(runtime.list('synthetic-author',null)).rejects.toThrow();expect(api).toHaveBeenCalledTimes(1);runtime.onModuleDestroy();
+  },20000);
   it('keeps a 200 HTML media response unknown and blocks a second account dispatch',async()=>{
     const media=jest.fn(async()=>new Response('<html>verification</html>',{status:200,headers:{'content-type':'image/png'}}));
     const runtime=new XhsSubscriptionRuntime({enabled:()=>true,media,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
@@ -80,7 +88,7 @@ describe('durable synthetic source risk fence', () => {
     const task:any={taskId:'parse-task',creatorId,kind:'list',state:'queued',collectionStage:'details',collectDetails:true,basicOnly:true,reuseCompleteCache:false,noteIds:keys,items:{},total:2,completed:0,skipped:0,failed:0,remaining:2};
     await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-task',${creatorId},'queued',${JSON.stringify(task)},1)`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
-    const api=jest.fn(async(request:any)=>{const note=JSON.parse(request.body).source_note_id;if(note==='parse-a'&&mode==='unknown')throw Error('synthetic detail connection lost');return {status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:note,note_card:{note_id:note,user:note==='parse-a'?{}:{user_id:author},type:'normal',time:1760000000000,title:'New',desc:'saved body',image_list:[],interact_info:{liked_count:'0',comment_count:'0'}}}]}}};});
+    const api=jest.fn(async(request:any)=>{const note=JSON.parse(request.body).source_note_id;if(note==='parse-a'&&mode==='unknown')throw Error('synthetic detail connection lost');return {status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:note,note_card:{note_id:note,user:{user_id:author},type:note==='parse-a'?'unrecognized':'normal',time:1760000000000,title:'New',desc:'saved body',image_list:[],interact_info:{liked_count:'0',comment_count:'0'}}}]}}};});
     const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
     for(const note of ['parse-a','parse-b'])(runtime as any).adapter.tokens.set(JSON.stringify([author,note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});
     const service:any=new XhsSubscriptionService(db as any,runtime);service.write=async(_bytes:number,fn:any)=>db.$transaction(fn);await service.run(task);

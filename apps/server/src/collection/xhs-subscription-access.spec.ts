@@ -88,8 +88,16 @@ describe('verified read endpoint and private access context (synthetic only)', (
     await expect(adapter.list(author.id,null)).rejects.toMatchObject({code:'XHS_LIST_PARSE_FAILED',message:'XHS_LIST_PARSE_FAILED'});
     expect(api.getUserNotes).toHaveBeenCalledTimes(1);
   });
+  it.each([
+    ['missing', [{}]], ['invalid', [{user_id:'bad id'}]],
+    ['mismatch', [{user_id:'other-author'}]], ['mixed', [{user_id:author.id},{user_id:'other-author'}]],
+  ])('does not classify a malformed list with %s author identity as a local parse failure',async(_label,users)=>{
+    const api=client();api.getUserNotes.mockResolvedValueOnce({notes:users.map((user,i)=>({note_id:`note${i}`,user,xsec_token:'synthetic'})),cursor:'',has_more:'invalid'} as any);
+    const adapter=new RedbookSubscriptionAdapter(api,{profileParser:parser});adapter.restoreDefaultAuthorAccess(author.id);
+    await expect(adapter.list(author.id,null)).rejects.not.toMatchObject({code:'XHS_LIST_PARSE_FAILED'});expect(api.getUserNotes).toHaveBeenCalledTimes(1);
+  });
   it('classifies a returned malformed detail locally without exposing body',async()=>{
-    const api=client();api.getUserNotes.mockResolvedValueOnce({notes:[{note_id:'synthetic',user:{user_id:author.id},xsec_token:'synthetic'}],cursor:'',has_more:false} as any);api.getNoteById.mockResolvedValueOnce({items:'synthetic-private-body'} as any);
+    const api=client();api.getUserNotes.mockResolvedValueOnce({notes:[{note_id:'synthetic',user:{user_id:author.id},xsec_token:'synthetic'}],cursor:'',has_more:false} as any);api.getNoteById.mockResolvedValueOnce({items:[{id:'synthetic',note_card:{note_id:'synthetic',user:{user_id:author.id},type:'synthetic-private-body'}}]} as any);
     const adapter=new RedbookSubscriptionAdapter(api,{profileParser:parser});adapter.restoreDefaultAuthorAccess(author.id);await adapter.list(author.id,null);
     await expect(adapter.basicDetail(author.id,'synthetic')).rejects.toMatchObject({code:'XHS_DETAIL_PARSE_FAILED',message:'XHS_DETAIL_PARSE_FAILED'});expect(api.getNoteById).toHaveBeenCalledTimes(1);
   });
