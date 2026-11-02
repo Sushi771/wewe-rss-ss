@@ -38,7 +38,8 @@ function tokens(text) {
 }
 
 test('platform directory seams retain every prior controller and source statement', () => {
- const originals={'apps/server/src/article-download.controller.ts':'4923fa9409ce762b28863e97788de0912dcb7060','apps/server/src/article-export-source.ts':'c2e7642b52e4a3a15d684eec219e87e3ff260ade','apps/server/src/collection/xiaohongshu.service.ts':'652a04c360f6c013790debac23626a7c7293da7c'};
+ // The reviewed avatar change reads avatar_url and adds avatarUrl to creator items.
+ const originals={'apps/server/src/article-download.controller.ts':'4923fa9409ce762b28863e97788de0912dcb7060','apps/server/src/article-export-source.ts':'c2e7642b52e4a3a15d684eec219e87e3ff260ade','apps/server/src/collection/xiaohongshu.service.ts':'a22649723473a5d4efb967192e8f01b5d35c6742'};
  for(const [file,expected] of Object.entries(originals)){
   const restored=restorePlatformDirectory(file,read(file));
   assert.equal(crypto.createHash('sha1').update('blob '+Buffer.byteLength(restored)+'\0').update(restored).digest('hex'),expected);
