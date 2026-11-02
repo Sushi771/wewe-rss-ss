@@ -51,6 +51,9 @@ const detail = (noteId = 'note-a'): XhsNormalizedCandidate => ({
   expectedImageCount: 1,
   images: [{ ordinal: 1, inlineData: png }],
 });
+// This file exercises real SQLite, async task lanes and local filesystem writes.
+// Keep per-test waits bounded while allowing CI time for the integrated I/O.
+jest.setTimeout(15000);
 describe('isolated subscription workflow with synthetic SQLite and actual local saver', () => {
   let root: string,
     db: PrismaClient,
