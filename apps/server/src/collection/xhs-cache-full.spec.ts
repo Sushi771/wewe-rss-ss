@@ -92,6 +92,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     await db.xhsNote.deleteMany();
     await db.xhsCreator.deleteMany();
     source = {
+      hasAuthorContext: jest.fn(() => true),
       resolve: jest.fn(async (url) => ({
         inputKind: url.includes('/user/profile/')
           ? ('profile' as const)
