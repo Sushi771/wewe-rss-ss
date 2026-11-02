@@ -71,7 +71,8 @@ import {dateSelectionFilter} from ${modulePath(path.join(sourceRoot, 'apps/web/s
 import {NextUIProvider} from ${modulePath(require.resolve('@nextui-org/react', { paths: [web] }).replace(/index\.js$/, 'index.mjs'))};
 const OriginalDate=Date;
 window.testNow='2026-10-10T15:59:59Z';
-window.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[window.testNow]));}};
+window.setTestDate=()=>window.Date=class extends OriginalDate {constructor(...args){super(...(args.length?args:[window.testNow]));}};
+window.setTestDate();
 window.restoreRealDate=()=>window.Date=OriginalDate;
 function App(){
  const [dates,setDates]=useState({mode:'day',start:'',end:''});
@@ -452,6 +453,8 @@ createRoot(document.getElementById('root')).render(<App/>);
         mobile: true,
       });
       await send('Emulation.setTouchEmulationEnabled', { enabled: true });
+      // The cleared range defaults to today; anchor it to the fixture month.
+      await evaluate('window.setTestDate()');
       await change('range');
       const clearSelector = 'button:not([aria-label])';
       await calendarClick(clearSelector, true);

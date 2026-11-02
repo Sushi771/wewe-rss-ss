@@ -1129,7 +1129,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
                 const current = await this.load(job.id, tx);
                 await tx.xhsCreator.update({ where: { id: job.creatorId }, data: { displayName: author.name, lastCheckedAt: Math.floor(collectedAt / 1000) } });
                 const avatar = safeXhsAvatarUrl(author.avatarUrl);
-                if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${job.creatorId}`;
+                if (avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${job.creatorId} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
                 await saveXhsMetrics(tx, 'creator', job.creatorId, author.metrics);
                 current.generation!.profile = { id: author.id, name: author.name, profileUrl: author.profileUrl,
                   ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}), ...(author.metrics ? { metrics: author.metrics } : {}), collectedAt };

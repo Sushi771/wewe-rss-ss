@@ -22,6 +22,7 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { safeXhsAvatarUrl } from './xhs-profile';
 import { load } from 'cheerio';
 import { articlePublicationRange, XhsNoteFilter } from '@wewe-rss/shared';
 import { visibleBodyText } from '../article-body-search';
@@ -431,8 +432,8 @@ export class XiaohongshuService {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       include: { _count: { select: { notes: true } } },
     });
-    const avatars = await this.prisma.$queryRaw<Array<{id:string;avatar_url:string|null}>>`SELECT id,avatar_url FROM xhs_creators`;
-    const avatarById = new Map(avatars.map(a => [a.id, a.avatar_url]));
+    const avatars = await this.prisma.$queryRaw<Array<{id:string;avatar_url:string|null}>>`SELECT s.owner_id AS id, CASE WHEN json_valid(s.document) THEN json_extract(s.document, '$.avatarUrl') ELSE NULL END AS avatar_url FROM xhs_metric_snapshots s INNER JOIN xhs_creators c ON c.id=s.owner_id WHERE s.owner_kind='creator-avatar'`;
+    const avatarById = new Map(avatars.map(a => [a.id, safeXhsAvatarUrl(a.avatar_url) ?? null]));
     return {
       platform: 'xiaohongshu' as const,
       items: xhsMetricSelection(
@@ -527,7 +528,10 @@ export class XiaohongshuService {
       if (await this.prisma.xhsNote.count({ where: { creatorId: id } }))
         return fail('此博主已有本地归档，请使用暂停保留内容。');
       await createVerifiedSqliteBackup();
-      await this.prisma.xhsCreator.delete({ where: { id: creator.id } });
+      await this.prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creator.id}`;
+        await tx.xhsCreator.delete({ where: { id: creator.id } });
+      });
       return { removed: true };
     } finally {
       this.active.delete(id);

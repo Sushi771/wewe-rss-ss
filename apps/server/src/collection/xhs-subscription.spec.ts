@@ -345,24 +345,6 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       service.subscribe({ resolutionId: 'expired' }),
     ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
   });
-  it('adds the nullable avatar field without changing existing creator data', async () => {
-    const dir=await fs.mkdtemp(path.join(tmpdir(),'xhs-avatar-migration-'));
-    const legacy=new PrismaClient({datasources:{db:{url:'file:'+path.join(dir,'legacy.sqlite').replace(/\\/g,'/')}}});
-    try {
-      const migrations=path.resolve(__dirname,'../../prisma/migrations');
-      for(const name of (await fs.readdir(migrations)).sort()) {
-        if(name==='20261101170000_xhs_creator_avatar'||!(await fs.stat(path.join(migrations,name))).isDirectory())continue;
-        for(const sql of splitSqliteStatements(await fs.readFile(path.join(migrations,name,'migration.sql'),'utf8')))await legacy.$executeRawUnsafe(sql);
-      }
-      await legacy.$executeRaw`INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id,enabled,last_status,last_checked_at,created_at) VALUES('old','https://example.invalid/profile','Old creator','old-author',1,'subscribed',42,0)`;
-      const before=await legacy.$queryRaw<Array<{id:string;display_name:string;enabled:number|boolean}>>`SELECT id,display_name,enabled FROM xhs_creators WHERE id='old'`;
-      const migration=await fs.readFile(path.join(migrations,'20261101170000_xhs_creator_avatar/migration.sql'),'utf8');
-      for(const sql of splitSqliteStatements(migration))await legacy.$executeRawUnsafe(sql);
-      const after=await legacy.$queryRaw<Array<{id:string;display_name:string;enabled:number|boolean;avatar_url:string|null}>>`SELECT id,display_name,enabled,avatar_url FROM xhs_creators WHERE id='old'`;
-      expect(after).toEqual([{...before[0],avatar_url:null}]);
-      expect((await legacy.$queryRaw<Array<{integrity_check:string}>>`PRAGMA integrity_check`)[0].integrity_check).toBe('ok');
-    } finally {await legacy.$disconnect();await fs.rm(dir,{recursive:true,force:true});}
-  },40000);
   it('does not acknowledge a scheduled archive if note data changes during saving',async()=>{
     const round='2026-11-01/09:15',taskId=scheduledTaskId(round,creatorId,'basic'),noteId=noteKey('archive-race');
     await db.xhsNote.create({data:{id:noteId,creatorId,title:'Before',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<p>body</p>'}});
@@ -391,12 +373,12 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     (source.resolve as jest.Mock).mockResolvedValueOnce({inputKind:'profile',author:{...author,avatarUrl:'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg?token=synthetic-secret'}});
     const first=await service.resolveSubscription({url:author.profileUrl});
     await service.subscribe({resolutionId:first.resolutionId});
-    const rows=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT avatar_url FROM xhs_creators WHERE id=${creatorId}`;
+    const rows=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
     expect(rows[0].avatar_url).toBe('https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg');
     const found=(await cache.list()).items.find(item=>item.id===creatorId);
     expect(found?.avatarUrl).toBe(rows[0].avatar_url);
     const second=await service.resolveSubscription({url:author.profileUrl});await service.subscribe({resolutionId:second.resolutionId});
-    const after=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT avatar_url FROM xhs_creators WHERE id=${creatorId}`;
+    const after=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
     expect(after[0].avatar_url).toBe(rows[0].avatar_url);
   });
   it('exposes the agreed task API through protected routes and gates local writes', async () => {

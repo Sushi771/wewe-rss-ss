@@ -448,7 +448,7 @@ export class XhsSubscriptionService implements OnModuleInit {
             },
           });
       const avatar = safeXhsAvatarUrl(author.avatarUrl);
-      if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${creator.id}`;
+      if (avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${creator.id} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
       const oldNote = await tx.xhsNote.findUnique({ where: { id: noteId } });
       if (oldNote && oldNote.creatorId !== creator.id)
         return reject('XHS_AUTHOR_CONFLICT');
@@ -550,7 +550,7 @@ export class XhsSubscriptionService implements OnModuleInit {
             },
           });
       const avatar = safeXhsAvatarUrl(author.avatarUrl);
-      if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${creator.id}`;
+      if (avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${creator.id} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
       await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
       if (batchReceipt) await batchReceipt(tx, creator.id, author.id);
       return {
@@ -1180,7 +1180,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       saved.scheduledContext={authorId,used:1,state:'confirmed'};
       if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
       const avatar=safeXhsAvatarUrl(result.author.avatarUrl);
-      if(avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${t.creatorId} AND enabled=1 AND external_author_id=${authorId}`;
+      if(avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${t.creatorId} AND enabled=1 AND external_author_id=${authorId} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
       t.scheduledContext=saved.scheduledContext;
     });
   }

@@ -124,7 +124,6 @@ model XhsCreator {
   id               String    @id @default(cuid())
   profileUrl       String    @unique @map("profile_url")
   displayName      String    @map("display_name")
-  avatarUrl        String?   @ignore @map("avatar_url")
   externalAuthorId String?   @unique @map("external_author_id")
   enabled          Boolean   @default(true)
   lastStatus       String    @default("pending") @map("last_status")

@@ -256,6 +256,18 @@ describe('production XHS router/service → additive SQLite and original export 
     await api.xiaohongshu.remove({ id: creatorId });
     expect((await api.xiaohongshu.list()).items).toHaveLength(0);
   });
+  it('removes only the deleted creator avatar and ignores orphaned old-version records', async () => {
+    const service = new XiaohongshuService(prisma as any);
+    const other = await service.add('Other', 'https://www.xiaohongshu.com/synthetic-other-profile');
+    const doc = JSON.stringify({ avatarUrl: 'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg' });
+    await prisma.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) VALUES ('creator-avatar',${creatorId},${doc}),('creator-avatar',${other.creator.id},${doc}),('creator-avatar','orphaned-old',${doc})`;
+    await service.remove(creatorId);
+    const rows = await prisma.$queryRaw<Array<{owner_id:string}>>`SELECT owner_id FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' ORDER BY owner_id`;
+    expect(rows.map(row => row.owner_id)).toEqual([other.creator.id, 'orphaned-old'].sort());
+    const listed = await service.list();
+    expect(listed.items.map(item => item.id)).toEqual([other.creator.id]);
+    expect(listed.items[0].avatarUrl).toBe('https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg');
+  });
   it('removes the platform reader route and service method without reading cached body data', async () => {
     const read = jest.spyOn(prisma.xhsNote, 'findFirst');
     expect('body' in XiaohongshuService.prototype).toBe(false);
