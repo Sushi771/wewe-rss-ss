@@ -22,6 +22,15 @@ import { PassThrough } from 'node:stream';
 import * as signing from './redbook-vendor/signing';
 
 describe('durable synthetic source risk fence', () => {
+  it('reports the actual worker settlement separately from an unresumable unknown receipt', () => {
+    const service:any=new XhsSubscriptionService({} as any,{} as any);
+    const task:any={taskId:'synthetic',creatorId:'synthetic',kind:'list',state:'blocked',code:'XHS_DETAIL_OUTCOME_UNKNOWN',sourceUnknowns:[{}],total:1,completed:0,skipped:0,failed:1,remaining:0};
+    expect(service.view(task)).toMatchObject({settling:false,resumable:false});
+    service.pending.set(task.taskId,task);
+    expect(service.view(task)).toMatchObject({settling:true,resumable:false});
+    service.pending.delete(task.taskId);
+    expect(service.view(task)).toMatchObject({settling:false,resumable:false});
+  });
   it('does not treat a transport-thrown configuration error as undispatched', async () => {
     const transport=jest.fn(async()=>{throw new RedbookPauseError('configuration')});
     const client=new RedbookClient({transport,cookies:()=>({a1:'synthetic-a1',web_session:'synthetic-session'})});

@@ -60,6 +60,7 @@ export type XhsSubscriptionTask = {
   code?: string;
   message: string;
   resumable?: boolean;
+  settling?: boolean;
   resumedFromTaskId?: string;
   supersededByTaskId?: string;
 };

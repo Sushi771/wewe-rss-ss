@@ -101,10 +101,12 @@ export const taskFinished = (task: SubscriptionTask) =>
 
 export const taskSettling = (task: SubscriptionTask) =>
   taskFinished(task) &&
-  task.state !== 'completed' &&
-  task.resumable === false &&
-  task.code !== 'XHS_TASK_RECEIPT_UNCERTAIN' &&
-  !task.supersededByTaskId;
+  (task.settling === true ||
+    (task.settling === undefined &&
+      task.state !== 'completed' &&
+      task.resumable === false &&
+      task.code !== 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+      !task.supersededByTaskId));
 
 export function selectedImageNotes<T extends { id: string; kind: string }>(
   notes: T[],

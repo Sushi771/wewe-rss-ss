@@ -1361,6 +1361,32 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
   }
 });
 
+test('an exited unknown task unlocks review entry but a settling writer keeps it locked', async () => {
+  for (const settling of [false,true]) {
+    const task={...status('blocked'),taskId:'synthetic-unknown',creatorId:'creator-a',resumable:false,settling,code:'XHS_DETAIL_OUTCOME_UNKNOWN'};
+    const f=fixture({recentTasks:[task],taskStatus:task});
+    try {
+      await f.start(true); await tick();
+      f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
+      assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
+      assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
+    } finally { f.dispose(); }
+  }
+});
+test('completed and uncertain tasks keep the session entry locked while their writer settles', async () => {
+  for (const state of [{state:'completed'},{state:'blocked',code:'XHS_TASK_RECEIPT_UNCERTAIN'}]) {
+    for (const settling of [true,false]) {
+      const task={...status(state.state),...state,taskId:'synthetic-terminal',creatorId:'creator-a',resumable:false,settling};
+      const f=fixture({recentTasks:[task],taskStatus:task});
+      try {
+        await f.start(true);await tick();
+        f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
+        assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
+        assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
+      } finally {f.dispose();}
+    }
+  }
+});
 test('connection controls stay default-off, never request secrets or connect automatically, and restore/disconnect only when pressed', async () => {
   const f = fixture();
   try {

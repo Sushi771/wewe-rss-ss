@@ -1026,6 +1026,7 @@ export class XhsSubscriptionService implements OnModuleInit {
           : t.message,
       resumedFromTaskId: t.resumedFromTaskId,
       supersededByTaskId: t.supersededByTaskId,
+      settling: this.pending.has(t.taskId),
       resumable:
         !uncertain &&
         !t.sourceActive && !(t.sourceUnknowns?.length) && t.code!=='XHS_DETAIL_OUTCOME_UNKNOWN' &&
