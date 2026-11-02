@@ -5,7 +5,7 @@ import { scheduledTaskId } from './xhs-scheduled-admission';
 import { assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
-export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media';target:string;cursorHash:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean};
+export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;contextRestore?:boolean};
 const prefix='xhs:dispatch-pending:unknown:';
 const bad=():never=>{throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');};
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
@@ -39,16 +39,30 @@ export async function hasTaskMediaUnknown(tx:Pick<Prisma.TransactionClient,'$que
 /** Validate the task, author, and actual request target within the dispatch transaction. */
 async function taskRow(tx:Tx,scope:TaskSourceScope) {
   if(!/^[a-f0-9]{64}$/.test(scope.fingerprint)||scope.fingerprint!==taskSourceFingerprint(scope.creatorId,scope.phase,scope.target,scope.cursorHash)||!/^[a-f0-9-]{36}$/.test(scope.owner))return bad();
-  const rows=await tx.$queryRaw<Array<{document:string;author:string;enabled:number|boolean}>>`SELECT t.document,c.external_author_id AS author,c.enabled AS enabled FROM xhs_subscription_tasks t JOIN xhs_creators c ON c.id=t.creator_id WHERE t.id=${scope.taskId} AND t.creator_id=${scope.creatorId} AND t.state='running'`;
+  const rows=await tx.$queryRaw<Array<{document:string;state:string;author:string;enabled:number|boolean}>>`SELECT t.document,t.state,c.external_author_id AS author,c.enabled AS enabled FROM xhs_subscription_tasks t JOIN xhs_creators c ON c.id=t.creator_id WHERE t.id=${scope.taskId} AND t.creator_id=${scope.creatorId} AND t.state IN ('running','completed','partial')`;
   if(rows.length!==1||(rows[0].enabled!==1&&rows[0].enabled!==true))return bad();
   let task:any;try{task=JSON.parse(rows[0].document);}catch{return bad();}
-  if(task.taskId!==scope.taskId||task.creatorId!==scope.creatorId||task.state!=='running')return bad();
+  if(task.taskId!==scope.taskId||task.creatorId!==scope.creatorId||task.state!==rows[0].state)return bad();
+  if(scope.contextRestore){
+    const round=task.schedule?.round;
+    if(scope.phase!=='list'||!['completed','partial'].includes(task.state)||typeof round!=='string'||task.schedule?.phase!=='basic'||scheduledTaskId(round,scope.creatorId,'basic')!==scope.taskId||task.listFinished!==true||!Array.isArray(task.cursorHistory)||task.cursorHistory.length<1||task.cursorHistory.length>1000||typeof scope.cursor!=='string'||scope.cursorHash!==hash(scope.cursor)||!task.cursorHistory.some((c:any)=>(c??'')===scope.cursor)||rows[0].author!==scope.target)return bad();
+  } else if(!['comments','replies'].includes(scope.phase) && task.state!=='running')return bad();
   if(scope.phase==='profile'||scope.phase==='list'){if(rows[0].author!==scope.target)return bad();}
   else if(scope.phase==='detail') {
     const note=JSON.stringify(['xiaohongshu','note',scope.target]);
     if(!Array.isArray(task.noteIds)||!task.noteIds.includes(note))return bad();
     const notes=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_notes WHERE id=${note} AND creator_id=${scope.creatorId}`;
     if(notes.length!==1)return bad();
+  } else if(scope.phase==='comments'||scope.phase==='replies') {
+    const round=task.schedule?.round,note=JSON.stringify(['xiaohongshu','note',scope.target]);
+    const itemPartial=task.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(task.code)&&task.remaining===0&&task.items?.[note]==='completed';
+    const historyPartial=task.state==='partial'&&task.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&!task.failed;
+    const scheduled=typeof round==='string'&&task.schedule?.phase==='basic'&&scheduledTaskId(round,scope.creatorId,'basic')===scope.taskId&&(task.state==='completed'||itemPartial||historyPartial);
+    const manual=task.commentManual===true&&task.state==='running'&&!task.schedule&&Array.isArray(task.noteIds)&&task.noteIds.length===1;
+    if((!scheduled&&!manual)||!Array.isArray(task.noteIds)||!task.noteIds.includes(note)||task.historyExcludedIds?.includes(note)||typeof scope.cursor!=='string'||scope.cursor.length>4096||scope.cursorHash!==hash(JSON.stringify([scope.rootId??'',scope.cursor])))return bad();
+    const notes=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_notes WHERE id=${note} AND creator_id=${scope.creatorId}`;if(notes.length!==1)return bad();
+    if(scope.phase==='replies') {if(!scope.rootId||!/^[a-zA-Z0-9_-]{1,128}$/.test(scope.rootId))return bad();const roots=await tx.$queryRaw<Array<{comment_id:string}>>`SELECT comment_id FROM xhs_saved_comments WHERE note_id=${note} AND comment_id=${scope.rootId} AND root_id IS NULL`;if(roots.length!==1)return bad();}
+    else if(scope.rootId)return bad();
   } else {
     const noteKey=scope.noteKey,round=task.schedule?.round,batch=task.schedule?.batch??0;
     if(typeof noteKey!=='string'||scope.cursorHash!==createHash('sha256').update(noteKey).digest('hex')||!/^[a-f0-9]{64}$/.test(scope.target)||typeof round!=='string')return bad();
@@ -91,7 +105,7 @@ export async function verifiedUnknownMarkers(tx:Tx,scope:TaskSourceScope):Promis
   if(!markers.length)return [];
   const rows=await tx.$queryRaw<Array<{id:string;creator_id:string;entry:string}>>`SELECT t.id,t.creator_id,j.value AS entry FROM xhs_subscription_tasks t, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j JOIN xhs_request_budgets b ON b.id=json_extract(j.value,'$.marker') AND b.used=1 AND b.request_limit=1 WHERE b.id LIKE ${prefix+'%'} AND json_extract(j.value,'$.outcome')='unknown' AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id AND json_extract(t.document,'$.creatorId')=t.creator_id`;
   const counts=new Map<string,number>();
-  for(const row of rows){let entry:any;try{entry=JSON.parse(row.entry);}catch{return bad();}const fp=entry.fingerprint;if(typeof fp==='string' && entry.marker===prefix+fp && entry.classification==='request-outcome-unknown' && ['profile','list','detail','media'].includes(entry.phase)&&/^[a-f0-9]{64}$/.test(entry.targetHash??'')&&/^[a-f0-9]{64}$/.test(entry.cursorHash??'')&&fingerprint(row.creator_id,entry.phase,entry.targetHash,entry.cursorHash)===fp)counts.set(entry.marker,(counts.get(entry.marker)??0)+1);}
+  for(const row of rows){let entry:any;try{entry=JSON.parse(row.entry);}catch{return bad();}const fp=entry.fingerprint;if(typeof fp==='string' && entry.marker===prefix+fp && entry.classification==='request-outcome-unknown' && ['profile','list','detail','media','comments','replies'].includes(entry.phase)&&/^[a-f0-9]{64}$/.test(entry.targetHash??'')&&/^[a-f0-9]{64}$/.test(entry.cursorHash??'')&&fingerprint(row.creator_id,entry.phase,entry.targetHash,entry.cursorHash)===fp)counts.set(entry.marker,(counts.get(entry.marker)??0)+1);}
   return markers.filter(({id,used,request_limit})=>used===1&&request_limit===1&&/^[a-f0-9]{64}$/.test(id.slice(prefix.length))&&id.slice(prefix.length)!==scope.fingerprint&&counts.get(id)===1).map(({id})=>id);
 }
 

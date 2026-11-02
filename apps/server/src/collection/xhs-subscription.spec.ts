@@ -1,3 +1,4 @@
+import { scheduledTaskId } from './xhs-scheduled-admission';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -343,6 +344,60 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     await expect(
       service.subscribe({ resolutionId: 'expired' }),
     ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
+  });
+  it('adds the nullable avatar field without changing existing creator data', async () => {
+    const dir=await fs.mkdtemp(path.join(tmpdir(),'xhs-avatar-migration-'));
+    const legacy=new PrismaClient({datasources:{db:{url:'file:'+path.join(dir,'legacy.sqlite').replace(/\\/g,'/')}}});
+    try {
+      const migrations=path.resolve(__dirname,'../../prisma/migrations');
+      for(const name of (await fs.readdir(migrations)).sort()) {
+        if(name==='20261101170000_xhs_creator_avatar'||!(await fs.stat(path.join(migrations,name))).isDirectory())continue;
+        for(const sql of splitSqliteStatements(await fs.readFile(path.join(migrations,name,'migration.sql'),'utf8')))await legacy.$executeRawUnsafe(sql);
+      }
+      await legacy.$executeRaw`INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id,enabled,last_status,last_checked_at,created_at) VALUES('old','https://example.invalid/profile','Old creator','old-author',1,'subscribed',42,0)`;
+      const before=await legacy.$queryRaw<Array<{id:string;display_name:string;enabled:number|boolean}>>`SELECT id,display_name,enabled FROM xhs_creators WHERE id='old'`;
+      const migration=await fs.readFile(path.join(migrations,'20261101170000_xhs_creator_avatar/migration.sql'),'utf8');
+      for(const sql of splitSqliteStatements(migration))await legacy.$executeRawUnsafe(sql);
+      const after=await legacy.$queryRaw<Array<{id:string;display_name:string;enabled:number|boolean;avatar_url:string|null}>>`SELECT id,display_name,enabled,avatar_url FROM xhs_creators WHERE id='old'`;
+      expect(after).toEqual([{...before[0],avatar_url:null}]);
+      expect((await legacy.$queryRaw<Array<{integrity_check:string}>>`PRAGMA integrity_check`)[0].integrity_check).toBe('ok');
+    } finally {await legacy.$disconnect();await fs.rm(dir,{recursive:true,force:true});}
+  },40000);
+  it('does not acknowledge a scheduled archive if note data changes during saving',async()=>{
+    const round='2026-11-01/09:15',taskId=scheduledTaskId(round,creatorId,'basic'),noteId=noteKey('archive-race');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Before',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<p>body</p>'}});
+    const task={taskId,creatorId,state:'completed',schedule:{round,phase:'basic'},noteIds:[noteId],failed:0};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'completed',${JSON.stringify(task)},1)`;
+    try {
+      let change=true;const save=jest.fn(async()=>{if(change){change=false;await db.xhsNote.update({where:{id:noteId},data:{title:'After'}});}return {alreadySaved:false,mediaComplete:true};});
+      let destination=root;service.bindLocalSaver(async()=>destination,save);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});
+      let row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(JSON.parse(row[0].document).scheduledArchive).toBeUndefined();
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(2);
+      row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+      destination=path.join(root,'other-synthetic');expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(3);
+      await db.xhsNote.update({where:{id:noteId},data:{title:'More'}});save.mockResolvedValueOnce({alreadySaved:false,mediaComplete:false});
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(4);
+      await db.xhsNote.update({where:{id:noteId},data:{title:'Conflict'}});
+      (save as any).mockResolvedValueOnce({alreadySaved:true,mediaComplete:true,supplement:{status:'conflict-version'}});
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});
+      row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'conflict'});
+      expect((await service.task({taskId})).archiveConflicts).toBe(1);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(5);
+    } finally {await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;}
+  },40000);
+  it('persists a checked avatar through subscription and preserves it when a later source has none', async () => {
+    (source.resolve as jest.Mock).mockResolvedValueOnce({inputKind:'profile',author:{...author,avatarUrl:'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg?token=synthetic-secret'}});
+    const first=await service.resolveSubscription({url:author.profileUrl});
+    await service.subscribe({resolutionId:first.resolutionId});
+    const rows=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT avatar_url FROM xhs_creators WHERE id=${creatorId}`;
+    expect(rows[0].avatar_url).toBe('https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg');
+    const found=(await cache.list()).items.find(item=>item.id===creatorId);
+    expect(found?.avatarUrl).toBe(rows[0].avatar_url);
+    const second=await service.resolveSubscription({url:author.profileUrl});await service.subscribe({resolutionId:second.resolutionId});
+    const after=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT avatar_url FROM xhs_creators WHERE id=${creatorId}`;
+    expect(after[0].avatar_url).toBe(rows[0].avatar_url);
   });
   it('exposes the agreed task API through protected routes and gates local writes', async () => {
     const config = new ConfigService({

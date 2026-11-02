@@ -8,13 +8,15 @@ export class XhsSubscriptionError extends Error {
     super(code);
   }
 }
+/** Raised only before source-session ownership or physical dispatch begins. */
+export class XhsPreDispatchError extends XhsSubscriptionError {}
 /** Only raised by pure parsing after a source response was received. */
 export class XhsSourceParseError extends XhsSubscriptionError {
-  constructor(code: 'XHS_LIST_PARSE_FAILED' | 'XHS_DETAIL_PARSE_FAILED') { super(code); }
+  constructor(code: 'XHS_LIST_PARSE_FAILED' | 'XHS_DETAIL_PARSE_FAILED' | 'XHS_COMMENT_PARSE_FAILED') { super(code); }
 }
 /** Only created after an identity-bound unknown receipt and owner settlement commit. */
 export class XhsTaskSourceUnknownError extends XhsSubscriptionError {
-  constructor(readonly phase:'profile'|'list'|'detail'|'media') { super('XHS_SOURCE_OUTCOME_UNKNOWN'); }
+  constructor(readonly phase:'profile'|'list'|'detail'|'media'|'comments'|'replies') { super('XHS_SOURCE_OUTCOME_UNKNOWN'); }
 }
 const codes = new Set([
   'XHS_LOCAL_PROGRAM_ERROR',
@@ -47,6 +49,7 @@ const codes = new Set([
   'XHS_TASK_CONFLICT',
   'XHS_LIST_INCOMPLETE',
   'XHS_REQUEST_POLICY_INVALID',
+  'XHS_COMMENT_PARSE_FAILED',
   'XHS_COMMENT_NO_PROGRESS',
   'XHS_COMMENT_FETCH_FAILED',
   'XHS_COMMENT_COLLECTION_DISABLED',

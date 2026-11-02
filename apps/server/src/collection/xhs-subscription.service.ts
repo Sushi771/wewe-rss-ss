@@ -1,3 +1,4 @@
+import { safeXhsAvatarUrl } from './xhs-profile';
 import { assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 import { resumeXhsMedia } from './xhs-native-media';
 import { XhsMediaLocalResponseError } from './xhs-media-error';
@@ -80,6 +81,8 @@ export interface XhsSubscriptionSource {
     url: string,
   ): Promise<{ inputKind: 'note' | 'profile'; author: XhsAuthor }>;
   hasAuthorContext?(authorId: string): boolean;
+  hasNoteContext?(authorId: string, noteId: string): boolean;
+  restoreScheduledNoteContexts?(authorId:string,cursors:Array<string|null>):Promise<void>;
   list(
     authorId: string,
     cursor: string | null,
@@ -339,8 +342,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       name: author.name.trim(),
       profileUrl: author.profileUrl,
       ...(author.metrics ? { metrics: author.metrics } : {}),
-      ...(author.avatarUrl && /^https:\/\//.test(author.avatarUrl)
-        ? { avatarUrl: author.avatarUrl }
+      ...(safeXhsAvatarUrl(author.avatarUrl)
+        ? { avatarUrl: safeXhsAvatarUrl(author.avatarUrl) }
         : {}),
     };
     this.resolutions.set(resolutionId, {
@@ -444,6 +447,8 @@ export class XhsSubscriptionService implements OnModuleInit {
               lastStatus: 'subscribed',
             },
           });
+      const avatar = safeXhsAvatarUrl(author.avatarUrl);
+      if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${creator.id}`;
       const oldNote = await tx.xhsNote.findUnique({ where: { id: noteId } });
       if (oldNote && oldNote.creatorId !== creator.id)
         return reject('XHS_AUTHOR_CONFLICT');
@@ -544,6 +549,8 @@ export class XhsSubscriptionService implements OnModuleInit {
               groupId: input.groupId,
             },
           });
+      const avatar = safeXhsAvatarUrl(author.avatarUrl);
+      if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${creator.id}`;
       await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
       if (batchReceipt) await batchReceipt(tx, creator.id, author.id);
       return {
@@ -620,6 +627,55 @@ export class XhsSubscriptionService implements OnModuleInit {
     const ids=mediaIds.slice(batch*1000,(batch+1)*1000);
     if(!ids.length) return {state:'nothing-to-archive' as const};
     return this.enqueue('list',input.creatorId,ids,undefined,undefined,undefined,false,'selected',ids,undefined,false,false,undefined,{round:input.round,phase:'media',batch});
+  }
+  /** Publish current saved data through the existing identity-protected local saver. */
+  async archiveScheduled(round:string,creatorId:string):Promise<{incomplete:boolean}> {
+    const taskId=scheduledTaskId(round,creatorId,'basic'),creator=await this.creator(creatorId),basic=await this.loadTask(taskId);
+    if(basic.creatorId!==creatorId||basic.schedule?.round!==round||basic.schedule?.phase!=='basic'||!['completed','partial'].includes(basic.state))return {incomplete:true};
+    const itemPartial=basic.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic.code??'')&&basic.remaining===0;
+    const historyPartial=basic.state==='partial'&&basic.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&!basic.failed;
+    if(basic.state==='partial'&&!itemPartial&&!historyPartial)return {incomplete:true};
+    const excluded=new Set(basic.historyExcludedIds??[]),ids=basic.noteIds.filter(id=>!excluded.has(id)&&(!itemPartial||basic.items[id]==='completed'));
+    if(!ids.length)return {incomplete:false};
+    if(!this.reserve||!this.save)return {incomplete:true};
+    let directory:string;try{directory=await this.reserve();}catch{return {incomplete:true};}
+    const destinationHash=createHash('sha256').update(directory).digest('hex');
+    let incomplete=false;
+    for(const noteId of ids){
+      const receiptKey=createHash('sha256').update(noteId).digest('hex');
+      let before:string|undefined;
+      const record=async(state:'saved'|'failed'|'conflict',digest:string)=>this.write(8192,async tx=>{
+        if(await this.scheduledArchiveDigest(tx,creatorId,noteId)!==digest)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId} AND creator_id=${creatorId}`;
+        if(rows.length!==1||!['completed','partial'].includes(rows[0].state))return reject('XHS_TASK_STATE_CHANGED');
+        const doc=JSON.parse(rows[0].document);if(doc.taskId!==taskId||doc.creatorId!==creatorId||doc.schedule?.round!==round||!Array.isArray(doc.noteIds)||!doc.noteIds.includes(noteId))return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+        doc.scheduledArchive={...(doc.scheduledArchive??{}),[receiptKey]:{digest,state,destinationHash}};
+        if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(doc)} WHERE id=${taskId} AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      });
+      try {
+        before=await this.scheduledArchiveDigest(this.db,creatorId,noteId);
+        const current=await this.loadTask(taskId),receipts=(current as any).scheduledArchive??{};
+        if(receipts[receiptKey]?.digest===before&&receipts[receiptKey]?.destinationHash===destinationHash){if(receipts[receiptKey].state!=='saved')incomplete=true;continue;}
+        const saved=await this.save(creator,noteId,directory);
+        if(saved.mediaComplete===false)throw new XhsSubscriptionError('XHS_LOCAL_MEDIA_INCOMPLETE');
+        if(saved.supplement?.status==='conflict-version'){incomplete=true;await record('conflict',before);}
+        else await record('saved',before);
+      } catch {
+        incomplete=true;
+        if(before)try{await record('failed',before);}catch{/* changed snapshot or storage remains incomplete */}
+      }
+    }
+    return {incomplete};
+  }
+  private async scheduledArchiveDigest(db:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteId:string):Promise<string> {
+    const note=await db.$queryRaw<Array<{id:string;title:string;publish_time:number;status:string;kind:string|null;content_html:string|null;video_sha256:string|null}>>`SELECT id,title,publish_time,status,kind,content_html,video_sha256 FROM xhs_notes WHERE id=${noteId} AND creator_id=${creatorId}`;
+    if(note.length!==1)return reject('XHS_NOTE_NOT_FOUND');
+    const creator=await db.$queryRaw<Array<{display_name:string;external_author_id:string|null;enabled:number|boolean}>>`SELECT display_name,external_author_id,enabled FROM xhs_creators WHERE id=${creatorId}`;
+    if(creator.length!==1||(creator[0].enabled!==true&&creator[0].enabled!==1)||!creator[0].external_author_id)return reject('XHS_SUBSCRIPTION_CHANGED');
+    const comments=await db.$queryRaw<Array<{comment_id:string;document:string}>>`SELECT comment_id,document FROM xhs_saved_comments WHERE note_id=${noteId} ORDER BY comment_id`;
+    const windows=await db.$queryRaw<Array<{scope:string;document:string}>>`SELECT scope,document FROM xhs_comment_windows WHERE note_id=${noteId} ORDER BY scope`;
+    const metrics=await db.$queryRaw<Array<{owner_kind:string;document:string}>>`SELECT owner_kind,document FROM xhs_metric_snapshots WHERE (owner_kind='note' AND owner_id=${noteId}) OR (owner_kind='creator' AND owner_id=${creatorId}) ORDER BY owner_kind`;
+    return createHash('sha256').update(JSON.stringify({creator,note,comments,windows,metrics})).digest('hex');
   }
   async downloadNotes(input: {
     creatorId: string;
@@ -941,6 +997,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       remaining: t.remaining,
       snapshotsSaved: t.snapshotsSaved,
       mediaSummary,
+      commentSummary: t.commentSummary,
+      archiveConflicts: (t as any).scheduledArchive ? Object.values((t as any).scheduledArchive).filter((entry:any)=>entry?.state==='conflict').length : undefined,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
@@ -1121,6 +1179,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       if(saved.schedule?.round!==t.schedule?.round||saved.scheduledContext?.state!=='started'||saved.scheduledContext.authorId!==authorId||saved.scheduledContext.used!==1)return reject('XHS_SCHEDULE_BINDING_MISMATCH');
       saved.scheduledContext={authorId,used:1,state:'confirmed'};
       if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      const avatar=safeXhsAvatarUrl(result.author.avatarUrl);
+      if(avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${t.creatorId} AND enabled=1 AND external_author_id=${authorId}`;
       t.scheduledContext=saved.scheduledContext;
     });
   }

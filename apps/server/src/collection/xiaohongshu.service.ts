@@ -431,10 +431,12 @@ export class XiaohongshuService {
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       include: { _count: { select: { notes: true } } },
     });
+    const avatars = await this.prisma.$queryRaw<Array<{id:string;avatar_url:string|null}>>`SELECT id,avatar_url FROM xhs_creators`;
+    const avatarById = new Map(avatars.map(a => [a.id, a.avatar_url]));
     return {
       platform: 'xiaohongshu' as const,
       items: xhsMetricSelection(
-        items.map((c) => ({ ...c, metrics: metrics.get(c.id) ?? null })),
+        items.map((c) => ({ ...c, avatarUrl: avatarById.get(c.id) ?? null, metrics: metrics.get(c.id) ?? null })),
         input,
       ),
     };

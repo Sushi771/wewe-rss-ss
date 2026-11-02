@@ -1,3 +1,4 @@
+import { safeXhsAvatarUrl } from './xhs-profile';
 import { reviewLegacyUnknown, legacyProofMatches } from './xhs-legacy-review';
 import { dispatchReviewedWholeSource, dispatchReviewedWholeContext } from './xhs-source-request-policy';
 import { attemptDigest, originalAttemptDigest, createReviewedAttempt, createReviewedContextIntent, markReviewedContextReady, reviewedRecoveryView, excludedGenerationFence } from './xhs-reviewed-attempt';
@@ -1127,6 +1128,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
                 await this.check(job, tx);
                 const current = await this.load(job.id, tx);
                 await tx.xhsCreator.update({ where: { id: job.creatorId }, data: { displayName: author.name, lastCheckedAt: Math.floor(collectedAt / 1000) } });
+                const avatar = safeXhsAvatarUrl(author.avatarUrl);
+                if (avatar) await tx.$executeRaw`UPDATE xhs_creators SET avatar_url=${avatar} WHERE id=${job.creatorId}`;
                 await saveXhsMetrics(tx, 'creator', job.creatorId, author.metrics);
                 current.generation!.profile = { id: author.id, name: author.name, profileUrl: author.profileUrl,
                   ...(author.avatarUrl ? { avatarUrl: author.avatarUrl } : {}), ...(author.metrics ? { metrics: author.metrics } : {}), collectedAt };

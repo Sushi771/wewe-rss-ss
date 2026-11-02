@@ -529,6 +529,7 @@ function fixture(options = {}) {
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsOriginalLink': 'XhsOriginalLink',
     '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
+    '@web/components/XhsSavedComments': 'XhsSavedComments',
     '@web/components/XhsBatchSubscription': 'XhsBatchSubscription',
     '@web/components/XhsCombinedFilter': 'XhsCombinedFilter',
     '@web/utils/xhs-combined-filter': load(
@@ -1874,3 +1875,6 @@ test('selected note media action opens existing diagnostics with exact selection
  assert.ok(f.button('补所选图片'));assert.equal(f.calls.some(([name])=>/Media/.test(name)),false);
  }finally{f.dispose()}
 });
+
+
+test('saved comments entry opens only a local view of the selected note', async()=>{const f=fixture();try{await f.start();const button=f.render().find(n=>n.type==='button'&&n.props.children==='查看评论');assert.ok(button);button.props.onClick();const view=f.find('XhsSavedComments');assert.equal(view.props.creatorId,'creator-a');assert.ok(view.props.noteId);assert.equal(f.calls.some(([name])=>name==='collectComments'),false)}finally{f.dispose()}});

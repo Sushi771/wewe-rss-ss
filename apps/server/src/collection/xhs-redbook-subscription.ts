@@ -109,6 +109,10 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     const access=this.authors.get(authorId);
     return !!access && access.expiresAt>this.now();
   }
+  hasNoteContext(authorId: string, noteId: string): boolean {
+    const access=this.tokens.get(JSON.stringify([authorId,noteId]));
+    return !!access && access.expiresAt>this.now();
+  }
   /** A verified public identity needs no invented share token. The normal list
    * client supports empty/default options; the actual response decides access. */
   restoreDefaultAuthorAccess(authorId: string) {
@@ -465,6 +469,12 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
     const raw = rootId
       ? await this.client.getSubComments(noteId, rootId, cursor)
       : await this.client.getComments(noteId, cursor, access.token);
-    return mapXhsComments(raw, rootId ?? null);
+    try { return mapXhsComments(raw, rootId ?? null); }
+    catch (error) {
+      // Only a recognisable received page is an item-local parse failure.
+      const page = raw as any;
+      if (!page || !Array.isArray(page.comments) || typeof page.has_more !== 'boolean') throw error;
+      throw new XhsSourceParseError('XHS_COMMENT_PARSE_FAILED');
+    }
   }
 }

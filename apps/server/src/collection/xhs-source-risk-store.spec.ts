@@ -11,6 +11,8 @@ import { XhsMediaError } from './xhs-media-error';
 import { downloadRedbookMedia } from './redbook-response';
 import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
 import { XhsSubscriptionService } from './xhs-subscription.service';
+import { XhsEngagementService } from './xhs-engagement.service';
+import { XhsScheduledRunner } from './xhs-scheduled-runner';
 import { extractXhsMediaManifest } from './xhs-native-media';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import { RedbookPauseError } from './redbook-client';
@@ -116,6 +118,101 @@ describe('durable synthetic source risk fence', () => {
     await expect(call(runtime,1)).resolves.toMatchObject({authorId:'author-b',notes:[]});expect(api).toHaveBeenCalledTimes(2);
     await expect(call(runtime,2)).rejects.toThrow();const after=await db.$queryRaw<any[]>`SELECT state,code,http_status FROM xhs_source_risk WHERE id='source'`;expect(after[0]).toMatchObject({state:'blocked',code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',http_status:461});
     await expect(call(runtime,3)).rejects.toThrow();expect(api).toHaveBeenCalledTimes(3);runtime.onModuleDestroy();
+  },40000);
+  it.each(['comments','replies','parse'] as const)('isolates a scheduled %s failure and continues another creator without replay',async(mode)=>{
+    const round='2026-11-01/09:15',records:Array<{creator:string;author:string;note:string;key:string;task:string}>=[];
+    try {
+      for(const label of ['a','b','c','d']){
+        const creator=`comment-creator-${label}`,author=`comment-author-${label}`,note=`comment-note-${label}`,key=JSON.stringify(['xiaohongshu','note',note]),task=scheduledTaskId(round,creator,'basic');
+        await db.xhsCreator.create({data:{id:creator,externalAuthorId:author,profileUrl:`https://example.invalid/${author}`,displayName:'Synthetic'}});
+        await db.xhsNote.create({data:{id:key,creatorId:creator,title:'Synthetic',publishTime:1,kind:'image-text',status:'complete'}});
+        const doc={taskId:task,creatorId:creator,state:'completed',schedule:{round,phase:'basic'},noteIds:[key],failed:0};
+        await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${task},${creator},'completed',${JSON.stringify(doc)},1)`;
+        records.push({creator,author,note,key,task});
+      }
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+      const api=jest.fn(async(request:any):Promise<any>=>{const url=new URL(request.url),note=url.searchParams.get('note_id'),sub=url.pathname.endsWith('/sub/page');if(note===records[0].note&&(mode==='comments'||(mode==='replies'&&sub)))throw Error('synthetic lost');if(note===records[0].note&&mode==='parse')return {status:200,url:request.url,body:{success:true,code:0,data:{comments:[{id:null}],has_more:false,cursor:''}}};if(note===records[2].note)return {status:461,url:request.url,body:{}};const comments=note===records[0].note?[{id:'root',content:'text',like_count:'0',user_info:{user_id:'synthetic',nickname:'Synthetic'}}]:[];return {status:200,url:request.url,body:{success:true,code:0,data:{comments,has_more:false,cursor:''}}};});
+      const connect=async()=>{const runtime=new XhsSubscriptionRuntime({enabled:()=>true,commentsEnabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});for(const r of records)(runtime as any).adapter.tokens.set(JSON.stringify([r.author,r.note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});return runtime;};
+      let runtime=await connect(),svc:any=new XhsEngagementService(db as any,runtime);svc.write=async(fn:any)=>db.$transaction(fn);
+      expect(await svc.collectScheduled(round,records[0].creator)).toMatchObject({incomplete:true});const firstCalls=mode==='replies'?2:1;expect(api).toHaveBeenCalledTimes(firstCalls);
+      const firstTask=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${records[0].task}`;expect(JSON.parse(firstTask[0].document).commentSummary).toMatchObject(mode==='parse'?{failedNotes:1,unknownNotes:0}:{failedNotes:0,unknownNotes:1});
+      let risk=await db.$queryRaw<any[]>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;expect(risk[0]).toMatchObject({state:'clear',code:null});
+      runtime.onModuleDestroy();runtime=await connect();svc=new XhsEngagementService(db as any,runtime);svc.write=async(fn:any)=>db.$transaction(fn);
+      expect(await svc.collectScheduled(round,records[0].creator)).toMatchObject({incomplete:true});expect(api).toHaveBeenCalledTimes(firstCalls);
+      expect(await svc.collectScheduled(round,records[1].creator)).toEqual({pending:false,incomplete:false});expect(api).toHaveBeenCalledTimes(firstCalls+1);
+      const used=await db.$queryRaw<Array<{used:number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;expect(used[0].used).toBe(firstCalls+1);
+      const otherRuntime=await connect(),otherSvc:any=new XhsEngagementService(db as any,otherRuntime);otherSvc.write=async(fn:any)=>db.$transaction(fn);
+      expect(await svc.collectScheduled(round,records[2].creator)).toMatchObject({incomplete:true});risk=await db.$queryRaw<any[]>`SELECT state,code,http_status FROM xhs_source_risk WHERE id='source'`;expect(risk[0]).toMatchObject({state:'blocked',code:'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',http_status:461});expect(api).toHaveBeenCalledTimes(firstCalls+2);
+      expect(await otherSvc.collectScheduled(round,records[3].creator)).toMatchObject({incomplete:true});expect(api).toHaveBeenCalledTimes(firstCalls+2);
+      const neverSent=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_comment_windows WHERE note_id=${records[3].key} AND scope='top'`;expect(neverSent.length).toBe(1);expect(JSON.parse(neverSent[0].document).pendingDispatch).toBeUndefined();otherRuntime.onModuleDestroy();runtime.onModuleDestroy();
+    } finally {
+      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
+      for(const r of records){await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${r.task}`;await db.xhsNote.deleteMany({where:{creatorId:r.creator}});await db.xhsCreator.deleteMany({where:{id:r.creator}});}
+    }
+  },40000);
+  it('resumes context rehydration after a known pre-dispatch busy page without repeating confirmed pages',async()=>{
+    const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api:jest.fn(),requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic',webSession:'synthetic'});
+    const cursors:(string|null)[]=[];let busy=true;
+    (runtime as any).adapter.list=jest.fn(async(_author:string,cursor:string|null)=>{cursors.push(cursor);if(cursor==='second'&&busy){busy=false;throw new XhsSubscriptionError('XHS_REQUEST_RATE_PAUSED');}return {notes:[],nextCursor:null};});
+    const work=()=>runtime.withTaskScope({taskId:'synthetic-rebuild',creatorId:'synthetic'},()=>runtime.restoreScheduledNoteContexts('author',[null,'second']));
+    await expect(work()).rejects.toMatchObject({code:'XHS_REQUEST_RATE_PAUSED'});await expect(work()).resolves.toBeUndefined();
+    expect(cursors).toEqual([null,'second','second']);runtime.onModuleDestroy();
+  },40000);
+  it.each(['success','unknown'])('rehydrates only checkpointed list pages after restart, with %s protected from replay',async(mode)=>{
+    const creator='rehydrate-creator',author='rehydrate-author',note='rehydrate-note',key=JSON.stringify(['xiaohongshu','note',note]),round='2026-11-01/14:00',taskId=scheduledTaskId(round,creator,'basic');
+    try {
+      await db.xhsCreator.create({data:{id:creator,externalAuthorId:author,profileUrl:'https://example.invalid/rehydrate',displayName:'Synthetic'}});
+      await db.xhsNote.create({data:{id:key,creatorId:creator,title:'Synthetic',publishTime:1,kind:'image-text',status:'complete'}});
+      const doc={taskId,creatorId:creator,state:'completed',schedule:{round,phase:'basic'},noteIds:[key],failed:0,listFinished:true,cursorHistory:[null]};
+      await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creator},'completed',${JSON.stringify(doc)},1)`;
+      const window={scope:'top',nextCursor:'next',pages:1,state:'partial',code:null,collectedAt:1,cursors:[''],scheduledRound:round};
+      await db.$executeRaw`INSERT INTO xhs_comment_windows(note_id,scope,document) VALUES(${key},'top',${JSON.stringify(window)})`;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+      const api=jest.fn(async(request:any):Promise<any>=>{const url=new URL(request.url);if(url.pathname.endsWith('/user_posted')){if(mode==='unknown')throw Error('synthetic lost');return {status:200,url:request.url,body:{success:true,code:0,data:{notes:[{note_id:note,user:{user_id:author},xsec_token:'synthetic-token'}],has_more:false,cursor:''}}};}return {status:200,url:request.url,body:{success:true,code:0,data:{comments:[],has_more:false,cursor:''}}};});
+      const connect=async()=>{const runtime=new XhsSubscriptionRuntime({enabled:()=>true,commentsEnabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});const svc:any=new XhsEngagementService(db as any,runtime);svc.write=async(fn:any)=>db.$transaction(fn);return {runtime,svc};};
+      let {runtime,svc}=await connect();const result=await svc.collectScheduled(round,creator);
+      expect(result.incomplete).toBe(mode==='unknown');expect(api).toHaveBeenCalledTimes(mode==='unknown'?1:2);runtime.onModuleDestroy();
+      ({runtime,svc}=await connect());const again=await svc.collectScheduled(round,creator);expect(again.incomplete).toBe(mode==='unknown');expect(api).toHaveBeenCalledTimes(mode==='unknown'?1:2);
+      if(mode==='success'){await expect(runtime.withTaskScope({taskId,creatorId:creator},()=>runtime.restoreScheduledNoteContexts(author,['not-checkpointed']))).rejects.toThrow();expect(api).toHaveBeenCalledTimes(2);}
+      const used=await db.$queryRaw<Array<{used:number}>>`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`;expect(used[0].used).toBe(mode==='unknown'?1:2);runtime.onModuleDestroy();
+    } finally {await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;await db.xhsNote.deleteMany({where:{creatorId:creator}});await db.xhsCreator.deleteMany({where:{id:creator}});}
+  },40000);
+  it('isolates a manual comment unknown and permits another creator without replay',async()=>{
+    const records:Array<{creator:string;author:string;note:string;key:string}>=[];
+    try {
+      for(const label of ['a','b']){const creator=`manual-creator-${label}`,author=`manual-author-${label}`,note=`manual-note-${label}`,key=JSON.stringify(['xiaohongshu','note',note]);await db.xhsCreator.create({data:{id:creator,externalAuthorId:author,profileUrl:`https://example.invalid/${author}`,displayName:'Synthetic'}});await db.xhsNote.create({data:{id:key,creatorId:creator,title:'Synthetic',publishTime:1,kind:'image-text',status:'complete'}});records.push({creator,author,note,key});}
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+      const api=jest.fn(async(request:any):Promise<any>=>{const note=new URL(request.url).searchParams.get('note_id');if(note===records[0].note)throw Error('synthetic lost');return {status:200,url:request.url,body:{success:true,code:0,data:{comments:[],has_more:false,cursor:''}}};});
+      const runtime=new XhsSubscriptionRuntime({enabled:()=>true,commentsEnabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
+      for(const r of records)(runtime as any).adapter.tokens.set(JSON.stringify([r.author,r.note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});
+      const svc:any=new XhsEngagementService(db as any,runtime);svc.write=async(fn:any)=>db.$transaction(fn);
+      const request=(r:typeof records[number])=>({creatorId:r.creator,noteId:r.key,maxPages:1,maxItems:200});
+      expect((await svc.collect(request(records[0]))).windows[0].state).toBe('failed');expect(api).toHaveBeenCalledTimes(1);
+      const risk=await db.$queryRaw<any[]>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;expect(risk[0]).toMatchObject({state:'clear',code:null});
+      await expect(svc.collect(request(records[0]))).rejects.toThrow('XHS_COMMENT_RECEIPT_UNCERTAIN');expect(api).toHaveBeenCalledTimes(1);
+      expect((await svc.collect(request(records[1]))).windows[0].state).toBe('returned-end');expect(api).toHaveBeenCalledTimes(2);runtime.onModuleDestroy();
+    } finally {await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;for(const r of records){await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id=${r.creator}`;await db.xhsNote.deleteMany({where:{creatorId:r.creator}});await db.xhsCreator.deleteMany({where:{id:r.creator}});}}
+  },40000);
+  it('runs scheduled comments and replies for two creators through the real runtime and SQLite',async()=>{
+    const round='2026-11-01/14:00',records:Array<{creator:string;author:string;note:string;key:string;task:string}>=[];
+    try {
+      for(const label of ['a','b']){
+        const creator=`integration-creator-${label}`,author=`integration-author-${label}`,note=`integration-note-${label}`,key=JSON.stringify(['xiaohongshu','note',note]),task=scheduledTaskId(round,creator,'basic');
+        await db.xhsCreator.create({data:{id:creator,externalAuthorId:author,profileUrl:`https://example.invalid/${author}`,displayName:'Synthetic'}});
+        await db.xhsNote.create({data:{id:key,creatorId:creator,title:'Synthetic',publishTime:1,kind:'image-text',status:'complete'}});
+        const doc={taskId:task,creatorId:creator,state:'completed',schedule:{round,phase:'basic'},noteIds:[key],failed:0};
+        await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${task},${creator},'completed',${JSON.stringify(doc)},1)`;records.push({creator,author,note,key,task});
+      }
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+      const api=jest.fn(async(request:any)=>{const u=new URL(request.url),reply=u.pathname.endsWith('/sub/page'),item={id:reply?'reply':'root',content:'synthetic',like_count:'0',user_info:{user_id:'synthetic',nickname:'Synthetic'}};return {status:200,url:request.url,body:{success:true,code:0,data:{comments:[item],has_more:false,cursor:''}}};});
+      const runtime=new XhsSubscriptionRuntime({enabled:()=>true,commentsEnabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
+      for(const r of records)(runtime as any).adapter.tokens.set(JSON.stringify([r.author,r.note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});
+      const engagement:any=new XhsEngagementService(db as any,runtime);engagement.write=async(fn:any)=>db.$transaction(fn);
+      const service={scheduleCreatorPhase:async(input:{creatorId:string;phase:'basic'|'media'})=>input.phase==='basic'?{taskId:records.find(r=>r.creator===input.creatorId)!.task}:{state:'nothing-to-archive'},task:async()=>({state:'completed',failed:0,remaining:0})};
+      const runner=new XhsScheduledRunner(db as any,service,engagement);await runner.run(round);expect(api).toHaveBeenCalledTimes(4);await runner.run(round);expect(api).toHaveBeenCalledTimes(4);
+      for(const r of records){const view=await engagement.view({creatorId:r.creator,noteId:r.key});expect(view.totalSaved).toBe(2);expect(view.comments.find((c:any)=>c.id==='reply')?.rootId).toBe('root');}
+      runtime.onModuleDestroy();
+    } finally {await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;for(const r of records){await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${r.task}`;await db.xhsNote.deleteMany({where:{creatorId:r.creator}});await db.xhsCreator.deleteMany({where:{id:r.creator}});}}
   },40000);
   it('does not isolate a received but untrusted API response as a transport unknown',async()=>{
     for(const [taskId,creatorId,author] of [['task-a','creator-a','author-a'],['task-b','creator-b','author-b']]){await db.xhsCreator.create({data:{id:creatorId,externalAuthorId:author,profileUrl:`https://example.invalid/${author}`,displayName:'Synthetic'}});const doc=JSON.stringify({taskId,creatorId,state:'running',noteIds:[]});await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'running',${doc},1)`;}

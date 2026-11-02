@@ -1,6 +1,6 @@
 # 单次恢复与导出中断反馈
 
-整号同步中的历史请求没有完整回执时，任务继续保留未知状态。对于有可验证请求所有者、符合来源风险门和原预算约束的正文或指标请求，可以由用户明确确认，准备一次有期限的补取。准备本身不请求来源；实际执行还需要该笔记的官方分享链接和第二次明确确认。
+整号同步中的历史请求没有完整回执时，任务继续保留未知状态。对于有可验证请求所有者、符合来源风险门和原预算约束的正文或指标请求，可以由用户明确确认，准备一次有期限的补取。准备本身不请求来源；该历史流程实际执行需要该笔记的官方分享链接和第二次明确确认；后续免链接恢复流程须以其对应版本和回执为准。
 
 恢复范围从持久任务、作者和累计预算派生，不接受客户端指定作者、阶段或用量。任务预算、共享预算、阶段额度、来源风险、订阅状态、会话和未决请求条件在执行时重新检查。存在其他未解决的恢复时，准备、消费和实际来源请求入口均拒绝；只有与原记录的笔记和作者身份精确匹配的完成记录才能证明该恢复已结束。
 
@@ -39,3 +39,7 @@ Offline regressions: `xhs-whole-generation.spec.ts`, `xhs-whole-generation-flow.
 A selected recovery can explicitly exclude a newly uncertain detail from its remaining scope. The original and new unknown markers remain intact; no uncertain detail is retried. Durable successful basic-field receipts for the remaining selection are carried into the replacement task. The basic phase stores verified publication time, available metric values and text before any media operation; missing values remain unknown, and the task does not claim a complete media archive. A source restriction or an uncertain request still stops the run.
 
 Media transport deadlines start only after admission and rate-limit waiting; cancellation remains effective while queued. URL rejection, cancellation and timeout use fixed codes without retaining signed URLs. This change does not establish the cause of any particular previous failure.
+
+## 统一候选：恢复与错误范围（待冻结验收）
+
+维护时区分篇级正文、图片及互动失败，账号目录失败，以及共享登录、验证和限流；具体状态转换以冻结实现和定向回归为准。未知已派发请求应保留身份与回执，不自动重放，也不应仅凭未知结果称为已证实平台风控。重启或取消后的未完成项不得计为完成；既有数据和历史未知记录保留。真实恢复前必须核实当前来源限制与人工确认条件。

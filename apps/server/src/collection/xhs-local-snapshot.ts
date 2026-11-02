@@ -52,9 +52,10 @@ export function xhsLocalSnapshotPublisher(
           )
           .join('\n') +
         '\n\n仅含本次已保存范围，未返回与受限内容仍未知。\n';
-      return xhsLocalSnapshotPublisher(noteId, title + ' 评论索引', manifest)!(
-        saved,
-      );
+      const manifestReceipt = await xhsLocalSnapshotPublisher(noteId, title + ' 评论索引', manifest)!(saved);
+      return manifestReceipt && receipts.some(receipt=>receipt.status==='conflict-version')
+        ? {...manifestReceipt,status:'conflict-version' as const}
+        : manifestReceipt;
     };
   }
   const snapshotBytes = Buffer.from(

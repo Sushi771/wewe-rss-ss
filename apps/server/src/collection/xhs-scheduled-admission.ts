@@ -24,7 +24,14 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   const creator=await tx.$queryRaw<Array<{enabled:number|boolean;external_author_id:string|null}>>`SELECT enabled,external_author_id FROM xhs_creators WHERE id=${creatorId}`;
   const risk=await tx.$queryRaw<Array<{state:string}>>`SELECT state FROM xhs_source_risk WHERE id='source'`;
   const history=await readHistoryHandoffs(tx as any);
-  const fences=(await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).filter(f=>!history.markers.includes(f.id));
+  const fences=(await tx.$queryRaw<Array<{id:string;used:number;request_limit:number}>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`).filter(f=>!history.markers.includes(f.id));
+  // A paired unknown prevents replay at dispatch, but must not prevent unrelated
+  // creators from creating a task. Invalid or unpaired markers still block.
+  const unknownPrefix='xhs:dispatch-pending:unknown:';
+  const unknownRows=await tx.$queryRaw<Array<{id:string;creator_id:string;entry:string}>>`SELECT t.id,t.creator_id,j.value AS entry FROM xhs_subscription_tasks t, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j JOIN xhs_request_budgets b ON b.id=json_extract(j.value,'$.marker') AND b.used=1 AND b.request_limit=1 WHERE b.id LIKE 'xhs:dispatch-pending:unknown:%' AND json_extract(j.value,'$.outcome')='unknown' AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id AND json_extract(t.document,'$.creatorId')=t.creator_id`;
+  const counts=new Map<string,number>();
+  for(const row of unknownRows){let e:any;try{e=JSON.parse(row.entry);}catch{continue;}const fp=e.fingerprint;const expected=createHash('sha256').update(JSON.stringify([row.creator_id,e.phase,e.targetHash,e.cursorHash])).digest('hex');if(typeof fp==='string'&&e.marker===unknownPrefix+fp&&e.classification==='request-outcome-unknown'&&['profile','list','detail','media','comments','replies'].includes(e.phase)&&/^[a-f0-9]{64}$/.test(e.targetHash??'')&&/^[a-f0-9]{64}$/.test(e.cursorHash??'')&&fp===expected)counts.set(e.marker,(counts.get(e.marker)??0)+1);}
+  const unverifiedFences=fences.filter(f=>!f.id.startsWith(unknownPrefix)||f.used!==1||f.request_limit!==1||counts.get(f.id)!==1);
   const jobs=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId} AND state IN ('queued','running') LIMIT 1`;
   const tasks=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_subscription_tasks WHERE creator_id=${creatorId} AND state IN ('queued','running') LIMIT 1`;
   // A live source request or creator task is not a settled failure. Observe it
@@ -32,7 +39,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
   if(risk.length===1 && risk[0].state==='pending')return {kind:'deferred',taskId,reason:'XHS_SCHEDULE_SOURCE_BUSY'};
   let reason:string|undefined;
   if(creator.length!==1||(creator[0].enabled!==1&&creator[0].enabled!==true)||!creator[0].external_author_id)reason='XHS_SCHEDULE_CREATOR_DISABLED';
-  else if(risk.length!==1||risk[0].state!=='clear'||fences.length)reason='XHS_SCHEDULE_SOURCE_BLOCKED';
+  else if(risk.length!==1||risk[0].state!=='clear'||unverifiedFences.length)reason='XHS_SCHEDULE_SOURCE_BLOCKED';
   else if(history.profilePendingCreators.includes(creatorId))reason='XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED';
   else if(jobs.length||tasks.length)return {kind:'deferred',taskId,reason:'XHS_SCHEDULE_TASK_ACTIVE'};
   if(!reason && input.preBlocked)reason=input.preBlocked;

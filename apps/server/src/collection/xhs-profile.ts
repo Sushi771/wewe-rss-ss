@@ -21,6 +21,18 @@ function text(value: unknown, limit: number) {
   return value.trim();
 }
 
+/** Optional source-only avatar metadata. Never persist a query, fragment or credentials. */
+export function safeXhsAvatarUrl(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length > 8192) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:' || url.username || url.password || url.port ||
+        !/^(?:sns-avatar|sns-avatar-qc|sns-avatar-hw|sns-avatar-bd)\.xhscdn\.com$/.test(url.hostname) ||
+        !/^\/avatar\/[A-Za-z0-9._!/-]+$/.test(url.pathname)) return undefined;
+    return url.origin + url.pathname;
+  } catch { return undefined; }
+}
+
 /** The reviewed otherinfo schema has no stable ID. Its identity is bound by the
  * exact signed target_user_id request in RedbookClient and its checked response
  * URL, not by nickname or red_id. Use only at that trusted adapter boundary.
@@ -40,6 +52,7 @@ export const parseXhsProfile: XhsProfileParser = (raw, expectedAuthorId) => {
   return {
     id: expectedAuthorId,
     name,
+    ...(safeXhsAvatarUrl(basic.images) ? { avatarUrl: safeXhsAvatarUrl(basic.images) } : {}),
     metrics: xhsProfileMetrics(raw),
     profileUrl: `https://www.xiaohongshu.com/user/profile/${expectedAuthorId}`,
   };

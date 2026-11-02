@@ -23,6 +23,13 @@ describe('scheduled creator clock and runner',()=>{
   const service={scheduleCreatorPhase:jest.fn(async(input:{round:string;creatorId:string;phase:'basic'|'media';batch?:number})=>{if(input.creatorId==='a')throw Error('synthetic local admission');return input.phase==='basic'?{taskId:'b-basic'}:{state:'nothing-to-archive'};}),task:jest.fn(async()=>({state:'completed',failed:0,remaining:0}))};
   const runner=new XhsScheduledRunner({xhsCreator:{findMany:async()=>[{id:'a'},{id:'b'}]}},service);await expect(runner.run('2026-10-31/09:15')).rejects.toThrow('XHS_SCHEDULE_ROUND_INCOMPLETE');expect(service.scheduleCreatorPhase.mock.calls.map(([v])=>[v.creatorId,v.phase])).toEqual([['a','basic'],['b','basic'],['b','media']]);
  });
+ it('collects comments for each eligible account and keeps another account running after local comment failure',async()=>{
+  const service={scheduleCreatorPhase:jest.fn(async(input:{round:string;creatorId:string;phase:'basic'|'media';batch?:number})=>input.phase==='basic'?{taskId:input.creatorId}:{state:'nothing-to-archive'}),task:jest.fn(async()=>({state:'completed',failed:0,remaining:0}))};
+  const engagement={collectScheduled:jest.fn(async(_round:string,creatorId:string)=>({pending:false,incomplete:creatorId==='a'}))};
+  const runner=new XhsScheduledRunner({xhsCreator:{findMany:async()=>[{id:'a'},{id:'b'}]}},service,engagement);
+  await expect(runner.run('2026-10-31/09:15')).rejects.toThrow('XHS_SCHEDULE_ROUND_INCOMPLETE');
+  expect(engagement.collectScheduled.mock.calls.map(([,id])=>id)).toEqual(['a','b']);
+ });
  it('does not continue media after an unknown basic result',async()=>{
   const service={scheduleCreatorPhase:jest.fn(async(_input:{round:string;creatorId:string;phase:'basic'|'media';batch?:number})=>({taskId:'basic'})),task:jest.fn(async()=>({state:'unknown'}))};
   const runner=new XhsScheduledRunner({xhsCreator:{findMany:async()=>[{id:'synthetic'}]}},service);

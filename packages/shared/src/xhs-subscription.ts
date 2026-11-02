@@ -53,6 +53,8 @@ export type XhsSubscriptionTask = {
   skipped: number;
   failed: number;
   remaining: number;
+  archiveConflicts?: number;
+  commentSummary?: {round:string;eligibleNotes:number;completedNotes:number;pendingNotes:number;failedNotes:number;unknownNotes:number;savedComments:number;savedReplies:number;discoveredRoots:number;completedRoots:number;incompleteRoots:number};
   snapshotsSaved?: number;
   mediaSummary?: {manifestNotes:number;declaredImages:number;recordedSavedImages:number;pendingImages:number;needsReviewNotes:number;blockedNotes:number;needsDetailRefreshNotes:number};
   code?: string;

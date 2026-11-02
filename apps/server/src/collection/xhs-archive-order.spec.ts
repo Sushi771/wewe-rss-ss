@@ -1,3 +1,4 @@
+import { scheduledTaskId } from './xhs-scheduled-admission';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -110,6 +111,26 @@ describe('complete archive before interaction, independent query (synthetic only
       },
     });
   }
+  it('publishes scheduled saved comments as immutable companions and preserves edited body',async()=>{
+    await seed('scheduled',true);
+    const noteId=key('scheduled'),round='2026-11-01/09:15',taskId=scheduledTaskId(round,'creator','basic');
+    const task={taskId,creatorId:'creator',state:'completed',schedule:{round,phase:'basic'},noteIds:[noteId],failed:0};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},'creator','completed',${JSON.stringify(task)},1)`;
+    try {
+      const api=new XiaohongshuService(db as any),directory=path.join(folder,'scheduled-archive');await fs.mkdir(directory);
+      const store=new LocalArticleStore(path.join(folder,'scheduled-settings.json'),directory),subscriptions:any=new XhsSubscriptionService(db as any,{} as any);
+      const savedPaths:string[]=[];const save=jest.fn(async(creator:any,id:string,target:string)=>{const result=await store.save(await api.prepareLocalDownload(creator.id,id),new Date(),target);savedPaths.push(result.markdownPath);return result;});
+      subscriptions.bindLocalSaver(async()=>directory,save);
+      expect(await subscriptions.archiveScheduled(round,'creator')).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(1);
+      const original=savedPaths[0];await fs.writeFile(original,'user-edited body');
+      expect(await subscriptions.archiveScheduled(round,'creator')).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(1);
+      await db.$transaction(tx=>saveCommentPage(tx,noteId,[{id:'root',rootId:null,parentId:null,content:'synthetic comment',authorId:null,authorName:null,likes:0,publishedAt:null,collectedAt:2}],{scope:'top',nextCursor:null,pages:1,state:'returned-end',code:null,collectedAt:2,cursors:['']}));
+      expect(await subscriptions.archiveScheduled(round,'creator')).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(2);
+      expect(await fs.readFile(original,'utf8')).toBe('user-edited body');
+      const files=await fs.readdir(path.dirname(original));const contents=await Promise.all(files.filter(n=>n.endsWith('.md')).map(n=>fs.readFile(path.join(path.dirname(original),n),'utf8')));
+      expect(contents.some(text=>text.includes('synthetic comment'))).toBe(true);
+    } finally {await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;}
+  },40000);
   it('distinguishes unattempted, missing, complete, excluded and uncertain basic results',async()=>{
     for(const id of ['a','b','c','d','e'])await seed(id);
     const task={taskId:'basic-test',creatorId:'creator',basicOnly:true,collectionScope:'selected',selectedIds:['a','b','c','d'].map(key),items:{[key('a')]:'completed',[key('b')]:'completed',[key('c')]:'failed'},basicResults:{[key('a')]:'complete',[key('b')]:'missing'}};

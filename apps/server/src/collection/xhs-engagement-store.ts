@@ -51,7 +51,7 @@ export async function readXhsMetrics(db: Db, kind: 'note' | 'creator') {
     return [r.owner_id, snapshot] as const;
   }));
 }
-export type PrivateCommentWindow = XhsCommentWindow & { cursors: string[] };
+export type PrivateCommentWindow = XhsCommentWindow & { cursors: string[]; pendingDispatch?: { fingerprint: string; state: 'started' }; scheduledRound?: string };
 export async function readCommentWindow(
   db: Db,
   note: string,
@@ -119,7 +119,7 @@ export async function readXhsComments(
   return {
     comments: rows.map((r) => JSON.parse(r.document) as XhsSavedComment),
     windows: windows.map((r) => {
-      const { cursors: _private, ...view } = JSON.parse(
+      const { cursors: _private, pendingDispatch: _dispatch, scheduledRound: _round, ...view } = JSON.parse(
         r.document,
       ) as PrivateCommentWindow;
       void _private;

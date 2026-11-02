@@ -12,6 +12,7 @@ import type { CombinedFilter } from '@web/utils/xhs-combined-filter';
 import { nextMetricOrder, nextTimeOrder, orderNotes } from '@web/utils/xhs-metric-sort';
 import type { MetricKey, MetricOrder } from '@web/utils/xhs-metric-sort';
 import XhsCreatorAvatar from '@web/components/XhsCreatorAvatar';
+import XhsSavedComments from '@web/components/XhsSavedComments';
 import XhsWholeCreator from '@web/components/XhsWholeCreator';
 import {
   ContentExportScope,
@@ -157,6 +158,7 @@ export default function Xiaohongshu() {
   const groups = trpc.xiaohongshu.groups.useQuery(undefined, { retry: false });
   const [creatorId, setCreatorId] = useState('');
   const [diagnosticOpen, setDiagnosticOpen] = useState(false);
+  const [commentTarget, setCommentTarget] = useState<{ creatorId: string; noteId: string } | null>(null);
   const sourceSettingsRef = useRef<HTMLDetailsElement>(null);
   const queuedDownloads = useRef<
     Array<{ creatorId: string; noteIds: string[]; confirmedDirectory?: string }>
@@ -1485,6 +1487,7 @@ export default function Xiaohongshu() {
             <p className="py-1 text-xs text-neutral-500">
               {taskNextStep(task)}
             </p>
+            <XhsCommentSummary task={task} />
             {task.mediaSummary && <p role="status" className="py-1 text-xs text-neutral-500">
               图片清单覆盖 {task.mediaSummary.manifestNotes} 篇，发现 {task.mediaSummary.declaredImages} 项；记录已保存 {task.mediaSummary.recordedSavedImages} 项，待处理 {task.mediaSummary.pendingImages} 项。
               {task.mediaSummary.needsReviewNotes > 0 && ` ${task.mediaSummary.needsReviewNotes} 篇图片清单待核对。`}
@@ -2068,7 +2071,7 @@ export default function Xiaohongshu() {
                   title={noteArchiveStatus(note)}
                 >
                   {{ pending: '尚未尝试', complete: '基础数据已取得', missing: '基础字段未取得', skipped: '已跳过', needs_review: '需核对' }[note.basicStatus] ?? '尚未尝试'}
-                  {' · '}{note.status === 'complete' ? '已归档' : '媒体未归档'}
+                  {' · '}{note.status === 'complete' ? '已归档' : '媒体未归档'} <button type="button" onClick={() => setCommentTarget({creatorId: note.creatorId, noteId: note.id})}>查看评论</button>
                 </span>
               </div>
             ))}
@@ -2108,6 +2111,11 @@ export default function Xiaohongshu() {
           void utils.xiaohongshu.list.invalidate();
         }}
       />
+      <SubscriptionDialog isOpen={commentTarget !== null} onClose={() => setCommentTarget(null)}>
+        <ModalContent><ModalHeader>已保存评论与回复</ModalHeader><ModalBody>
+          {commentTarget && <XhsSavedComments key={commentTarget.noteId} {...commentTarget} />}
+        </ModalBody><ModalFooter><Button onPress={() => setCommentTarget(null)}>关闭</Button></ModalFooter></ModalContent>
+      </SubscriptionDialog>
       <SubscriptionDialog isOpen={diagnosticOpen} onClose={() => setDiagnosticOpen(false)}>
         <ModalContent><ModalHeader>来源诊断</ModalHeader><ModalBody>
           <p>来源访问受限或需要验证时，采集会暂停。请检查来源状态后再继续。</p>
@@ -2285,4 +2293,14 @@ export default function Xiaohongshu() {
       </SubscriptionDialog>
     </main>
   );
+}
+
+
+type CommentSummary = { round: string; eligibleNotes: number; completedNotes: number; pendingNotes: number; failedNotes: number; unknownNotes: number; savedComments: number; savedReplies: number; discoveredRoots: number; completedRoots: number; incompleteRoots: number };
+export function XhsCommentSummary({ task }: { task: unknown }) {
+  const summary = (task as { commentSummary?: CommentSummary }).commentSummary;
+  const conflicts = (task as { archiveConflicts?: number }).archiveConflicts;
+  const archive = conflicts === undefined ? '归档冲突未核。' : conflicts > 0 ? `归档有 ${conflicts} 项冲突：已保留原附页并另存冲突版本，归档待核。` : '本次未发现归档冲突。';
+  if (!summary) return <p role="status">评论与回复进度待统计。{archive}</p>;
+  return <p role="status">评论轮次 {summary.round}：范围 {summary.eligibleNotes} 篇，完成 {summary.completedNotes}，待补 {summary.pendingNotes}，失败 {summary.failedNotes}，结果未知 {summary.unknownNotes}；本地已保存评论 {summary.savedComments} 条、回复 {summary.savedReplies} 条；已发现顶层评论 {summary.discoveredRoots} 条，回复窗口到末页 {summary.completedRoots}，未完成 {summary.incompleteRoots}。本地数量不代表平台总量。{archive}</p>;
 }

@@ -31,7 +31,7 @@ import {
   XhsShortLinkTransport,
   xhsPublicInputUrl,
 } from './xhs-short-link';
-import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, XhsPreDispatchError } from './xhs-subscription-errors';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import {
   checkedXhsCookies,
@@ -85,7 +85,7 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string}>();
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean}>();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
   private scopedMediaFailure?: (scope:TaskSourceScope)=>Promise<void>;
   bindScopedMediaFailure(fn:(scope:TaskSourceScope)=>Promise<void>){this.scopedMediaFailure ??= fn;}
@@ -366,6 +366,7 @@ export class XhsSubscriptionRuntime
   private generation = 0;
   private sessionAbort = new AbortController();
   private readonly transientMedia = new Map<string,{generation:number;expiresAt:number;version:string;getUrl:(key:string)=>string|undefined}>();
+  private readonly scheduledContextRebuild = new Map<string,{digest:string;next:number;stopped:boolean;running:boolean}>();
   private changing = false;
   private stored: boolean | null = null;
   private verified = false;
@@ -486,9 +487,11 @@ export class XhsSubscriptionRuntime
           if(request.method==='GET' && route==='/api/sns/web/v1/user/otherinfo'){phase='profile';target=url.searchParams.get('target_user_id')??'';}
           else if(request.method==='GET' && route==='/api/sns/web/v1/user_posted'){phase='list';target=url.searchParams.get('user_id')??'';cursor=url.searchParams.get('cursor')??'';}
           else if(request.method==='POST' && route==='/api/sns/web/v1/feed'){let body:any;try{body=JSON.parse(request.body??'');}catch{body=undefined;}if(typeof body?.source_note_id==='string'){phase='detail';target=body.source_note_id;}}
+          else if(request.method==='GET' && (route==='/api/sns/web/v2/comment/page'||route==='/api/sns/web/v2/comment/sub/page')){phase=route.endsWith('/sub/page')?'replies':'comments';target=url.searchParams.get('note_id')??'';cursor=url.searchParams.get('cursor')??'';}
           if(phase && /^[a-zA-Z0-9_-]{1,128}$/.test(target) && cursor.length<=4096){
-            const cursorHash=createHash('sha256').update(cursor).digest('hex');
-            scoped={taskId:task.taskId,creatorId:task.creatorId,phase,target,cursorHash,fingerprint:taskSourceFingerprint(task.creatorId,phase,target,cursorHash),owner:task.owner};
+            const rootId=phase==='replies'?(url.searchParams.get('root_comment_id')??''):undefined;
+            const cursorHash=createHash('sha256').update(phase==='comments'||phase==='replies'?JSON.stringify([rootId??'',cursor]):cursor).digest('hex');
+            scoped={taskId:task.taskId,creatorId:task.creatorId,phase,target,cursorHash,...(phase==='comments'||phase==='replies'?{cursor,rootId}:task.contextRestore&&phase==='list'?{cursor,contextRestore:true}:{}),fingerprint:taskSourceFingerprint(task.creatorId,phase,target,cursorHash),owner:task.owner};
             task.current=scoped;
           }
         }
@@ -682,6 +685,7 @@ export class XhsSubscriptionRuntime
     this.cookies = undefined;
     this.verified = false;
     this.adapter.clearAccessContext();
+    this.scheduledContextRebuild.clear();
     this.transientMedia.clear();
     this.originalLinks.clear();
   }
@@ -846,12 +850,13 @@ export class XhsSubscriptionRuntime
       return this.budgetScope.run({ id: '' }, () =>
         this.withSession(operation),
       );
-    this.requireSession();
+    try { this.requireSession(); }
+    catch(error) { if(error instanceof XhsSubscriptionError)throw new XhsPreDispatchError(error.code);throw error; }
     const generation = this.generation;
     const admission = this.budgetScope.getStore();
     if (admission) delete admission.failure;
     if (!this.riskStore && this.options.requirePersistentRisk)
-      return failure('XHS_SOURCE_RISK_UNAVAILABLE');
+      throw new XhsPreDispatchError('XHS_SOURCE_RISK_UNAVAILABLE');
     let riskOwner: string | undefined;
     if (
       this.riskStore &&
@@ -868,7 +873,7 @@ export class XhsSubscriptionRuntime
         // A live concurrent operation also owns a pending fence. Reject this
         // caller without poisoning the owner; a crash leaves the fence durable.
         if (code !== 'XHS_SOURCE_RISK_REVIEW_REQUIRED') this.stopCode = code;
-        return failure(code);
+        throw new XhsPreDispatchError(code);
       }
     }
     const taskScope=this.taskSourceContext.getStore();
@@ -1172,6 +1177,29 @@ export class XhsSubscriptionRuntime
     });
   }
   hasAuthorContext(authorId: string): boolean { return this.adapter.hasAuthorContext(authorId); }
+  hasNoteContext(authorId: string, noteId: string): boolean { return this.adapter.hasNoteContext(authorId,noteId); }
+  /** Rebuild only pages already checkpointed by this scheduled basic task.
+   * Each list request still passes the task/source owner and global budget. */
+  async restoreScheduledNoteContexts(authorId:string,cursors:Array<string|null>) {
+    const task=this.taskSourceContext.getStore();
+    if(!task || !this.sourceAdmission || !this.sourceDispatch || !Array.isArray(cursors) || !cursors.length || cursors.length>1000 || cursors.some(c=>c!==null&&(typeof c!=='string'||c.length>4096)) || new Set(cursors.map(c=>c??'')).size!==cursors.length) return failure('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    const digest=createHash('sha256').update(JSON.stringify([authorId,cursors])).digest('hex');
+    const existing=this.scheduledContextRebuild.get(task.taskId);
+    if(existing && (existing.digest!==digest || existing.stopped))return failure('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    const progress=existing??{digest,next:0,stopped:false,running:false};this.scheduledContextRebuild.set(task.taskId,progress);
+    if(progress.next===cursors.length)return;
+    if(progress.running)throw new XhsSubscriptionError('XHS_REQUEST_RATE_PAUSED');
+    progress.running=true;
+    try {
+      return await this.taskSourceContext.run({...task,contextRestore:true},()=>this.withSession(async()=>{
+        this.adapter.restoreDefaultAuthorAccess(authorId);
+        for(;progress.next<cursors.length;progress.next++) await this.adapter.list(authorId,cursors[progress.next]);
+      }));
+    } catch(error) {
+      if(!(error instanceof XhsSubscriptionError && error.code==='XHS_REQUEST_RATE_PAUSED'))progress.stopped=true;
+      throw error;
+    } finally { progress.running=false; }
+  }
   restoreCheckpointAuthorContext(profile:{id:string;profileUrl:string;collectedAt:number}) {
     const scope=this.wholeAuthorization.getStore();
     if(!scope?.generationId || scope.authorId!==profile?.id ||
@@ -1265,7 +1293,7 @@ export function createLocalXhsSubscriptionRuntime() {
   if (process.platform === 'win32' && path.isAbsolute(database))
     vault = new XhsDpapiSessionVault(path.dirname(database));
   return new XhsSubscriptionRuntime({
-    commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED === '1',
+    commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED !== '0',
     enabled: () => {
       writerLease?.check();
       return process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1' &&

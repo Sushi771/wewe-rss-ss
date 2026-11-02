@@ -1,3 +1,5 @@
+import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { scheduledTaskId } from './xhs-scheduled-admission';
 import { spawnSync } from 'node:child_process';
 import { LocalArticleStore, ArticlePreparation } from '../article-local-save';
 import { promises as fs } from 'node:fs';
@@ -353,7 +355,14 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       (name) => name.endsWith('.md') && name !== 'body.md',
     )!;
     await fs.writeFile(path.join(directory, part), 'HANDWRITTEN COMPANION');
-    await publish(saved);
+    const aggregateConflict=await publish(saved);
+    expect(aggregateConflict?.status).toBe('conflict-version');
+    const single=xhsLocalSnapshotPublisher(note,'synthetic small','synthetic comment')!;
+    const original=await single(saved);
+    await fs.writeFile(original!.path,'HANDWRITTEN SMALL COMPANION');
+    const conflict=await single(saved);
+    expect(conflict?.status).toBe('conflict-version');
+    expect(await fs.readFile(original!.path,'utf8')).toBe('HANDWRITTEN SMALL COMPANION');
     expect(await fs.readFile(path.join(directory, part), 'utf8')).toBe(
       'HANDWRITTEN COMPANION',
     );
@@ -743,6 +752,81 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     });
     expect((await readXhsComments(db, note)).totalSaved).toBe(2);
   });
+  it('keeps an uncertain comment dispatch across service restart and refuses both replay and restart', async () => {
+    const source={comments:jest.fn().mockRejectedValueOnce(new Error('synthetic transport'))};
+    const first=new XhsEngagementService(db as any,source as any);
+    const request={creatorId:creator,noteId:note,maxPages:1,maxItems:200};
+    const view=await first.collect(request);
+    expect(view.windows[0].state).toBe('failed');
+    expect(JSON.stringify(view)).not.toContain('pendingDispatch');
+    const next=new XhsEngagementService(db as any,source as any);
+    await expect(next.collect(request)).rejects.toThrow('XHS_COMMENT_RECEIPT_UNCERTAIN');
+    await expect(next.collect({...request,restart:true})).rejects.toThrow('XHS_COMMENT_RECEIPT_UNCERTAIN');
+    expect(source.comments).toHaveBeenCalledTimes(1);
+  });
+  it('does not retain an unknown dispatch for a known pre-dispatch budget refusal', async () => {
+    const source={comments:jest.fn().mockRejectedValueOnce(new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED')).mockResolvedValueOnce(page('root',null))};
+    const request={creatorId:creator,noteId:note,maxPages:1,maxItems:200},svc=new XhsEngagementService(db as any,source as any);
+    const first=await svc.collect(request);expect(first.windows[0].state).toBe('failed');
+    const second=await svc.collect(request);expect(second.totalSaved).toBe(1);expect(source.comments).toHaveBeenCalledTimes(2);
+  });
+  it('does not reserve a comment dispatch when the local note context is missing', async () => {
+    let ready=false;const source={hasNoteContext:()=>ready,comments:jest.fn().mockResolvedValue(page('root',null))};
+    const svc=new XhsEngagementService(db as any,source as any),request={creatorId:creator,noteId:note,maxPages:1,maxItems:200};
+    await expect(svc.collect(request)).rejects.toThrow('XHS_ACCESS_CONTEXT_EXPIRED');
+    expect(source.comments).not.toHaveBeenCalled();
+    const before=await db.$queryRaw<Array<{n:bigint}>>`SELECT COUNT(*) AS n FROM xhs_comment_windows WHERE note_id=${note}`;
+    expect(Number(before[0].n)).toBe(0);ready=true;
+    expect((await svc.collect(request)).totalSaved).toBe(1);expect(source.comments).toHaveBeenCalledTimes(1);
+  });
+  it('serializes two service instances before dispatching the same comment page', async () => {
+    let release!:()=>void; const gate=new Promise<void>(r=>{release=r});
+    let started!:()=>void; const entered=new Promise<void>(r=>{started=r});
+    const source={comments:jest.fn(async()=>{started();await gate;return page('root',null);})};
+    const a=new XhsEngagementService(db as any,source as any),b=new XhsEngagementService(db as any,source as any);
+    const request={creatorId:creator,noteId:note,maxPages:1,maxItems:200};
+    const first=a.collect(request);await entered;
+    try {await expect(b.collect(request)).rejects.toThrow('XHS_COMMENT_RECEIPT_UNCERTAIN');}
+    finally {release();await first;}
+    expect(source.comments).toHaveBeenCalledTimes(1);
+  });
+  it('retains one unknown note while another note and its root replies complete', async () => {
+    const other=key('note-1');
+    const source={comments:jest.fn(async (_author:string,id:string,_cursor:string,root?:string)=>{
+      if (id==='note-0' || id==='note') throw Error('synthetic unknown');
+      return root ? mapXhsComments({comments:[rawComment('reply')],has_more:false,cursor:''},root) : page('root',null);
+    })};
+    const svc=new XhsEngagementService(db as any,source as any);
+    await svc.collect({creatorId:creator,noteId:note,maxPages:1,maxItems:200});
+    const top=await svc.collect({creatorId:creator,noteId:other,maxPages:1,maxItems:200});
+    expect(top.comments[0]).toMatchObject({id:'root',rootId:null,likes:0});
+    const reply=await svc.collect({creatorId:creator,noteId:other,rootId:'root',maxPages:1,maxItems:200});
+    expect(reply.comments.find(c=>c.id==='reply')).toMatchObject({rootId:'root',likes:0});
+    await expect(new XhsEngagementService(db as any,source as any).collect({creatorId:creator,noteId:note,maxPages:1,maxItems:200})).rejects.toThrow('XHS_COMMENT_RECEIPT_UNCERTAIN');
+    expect(source.comments).toHaveBeenCalledTimes(3);
+  });
+  it('retries only a pre-dispatch context busy result on a later scheduled tick',async()=>{
+    const round='2026-11-01/09:15',taskId=scheduledTaskId(round,creator,'basic');
+    const doc={taskId,creatorId:creator,state:'completed',noteIds:[note],schedule:{round,phase:'basic'},failed:0,listFinished:true,cursorHistory:[null]};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creator},'completed',${JSON.stringify(doc)},1)`;
+    let ready=false,attempts=0;const source={hasNoteContext:()=>ready,restoreScheduledNoteContexts:jest.fn(async()=>{if(++attempts===1)throw new XhsSubscriptionError('XHS_REQUEST_RATE_PAUSED');ready=true;}),comments:jest.fn().mockResolvedValue(mapXhsComments({comments:[],has_more:false,cursor:''}))};
+    const svc=new XhsEngagementService(db as any,source as any);
+    try{expect(await svc.collectScheduled(round,creator)).toMatchObject({pending:true});expect(source.comments).toHaveBeenCalledTimes(0);expect(await svc.collectScheduled(round,creator)).toEqual({pending:false,incomplete:false});expect(source.comments).toHaveBeenCalledTimes(1);}finally{await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;}
+  });
+  it('collects scheduled top comments and root replies once per round without losing earlier rows', async () => {
+    const round='2026-11-01/09:15', nextRound='2026-11-01/14:00';
+    const createBasic=async (r:string)=>{const id=scheduledTaskId(r,creator,'basic');const doc=JSON.stringify({taskId:id,creatorId:creator,state:'completed',noteIds:[note,key('note-1')],schedule:{round:r,phase:'basic'},failed:0});await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${id},${creator},'completed',${doc},1)`;return id;};
+    const firstId=await createBasic(round),nextId=await createBasic(nextRound);
+    try {
+      const source={comments:jest.fn(async (_a:string,_n:string,_cursor:string,root?:string)=>root?mapXhsComments({comments:[rawComment('reply')],has_more:false,cursor:''},root):page('root',null))};
+      const svc=new XhsEngagementService(db as any,source as any);
+      expect(await svc.collectScheduled(round,creator)).toEqual({pending:false,incomplete:false});expect(source.comments).toHaveBeenCalledTimes(4);
+      const firstRows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${firstId}`;expect(JSON.parse(firstRows[0].document).commentSummary).toEqual({round,eligibleNotes:2,completedNotes:2,pendingNotes:0,failedNotes:0,unknownNotes:0,savedComments:2,savedReplies:2,discoveredRoots:2,completedRoots:2,incompleteRoots:0});
+      expect(await svc.collectScheduled(round,creator)).toEqual({pending:false,incomplete:false});expect(source.comments).toHaveBeenCalledTimes(4);
+      expect(await svc.collectScheduled(nextRound,creator)).toEqual({pending:false,incomplete:false});expect(source.comments).toHaveBeenCalledTimes(8);
+      const view=await svc.view({creatorId:creator,noteId:note});expect(view.totalSaved).toBe(2);expect(view.comments.find(x=>x.id==='reply')?.rootId).toBe('root');
+    } finally {await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id IN (${firstId},${nextId})`;}
+  });
   it('stops on signature rejection and preserves saved partial results and resume cursor', async () => {
     const source = {
       comments: jest
@@ -799,6 +883,16 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       nextCursor: '',
       code: 'XHS_COMMENT_ITEM_LIMIT',
     });
+  });
+  it('rejects a root from another note before source dispatch and leaves both pages intact', async () => {
+    const other=key('note-1');
+    await db.$transaction(tx=>saveCommentPage(tx,other,page('foreign-root',null).comments,{scope:'top',nextCursor:null,pages:1,state:'returned-end',code:null,collectedAt:1,cursors:['']}));
+    const source={comments:jest.fn().mockResolvedValue(page('child',null))};
+    const svc=new XhsEngagementService(db as any,source as any);
+    await expect(svc.collect({creatorId:creator,noteId:note,rootId:'foreign-root',maxPages:1,maxItems:200})).rejects.toThrow('XHS_COMMENT_ROOT_INVALID');
+    expect(source.comments).not.toHaveBeenCalled();
+    expect((await readXhsComments(db,note)).totalSaved).toBe(0);
+    expect((await readXhsComments(db,other)).totalSaved).toBe(1);
   });
   it('rolls back wrong root reassignment and rejected transaction without advancing cursor', async () => {
     const window = {
