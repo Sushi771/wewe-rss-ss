@@ -111,7 +111,7 @@ describe('verified read endpoint and private access context (synthetic only)', (
     controller.abort();
     await expect(
       api.getUserNotes(author.id, '', { signal: controller.signal }),
-    ).rejects.toThrow('transport');
+    ).rejects.toThrow('XHS_LOCAL_PRE_DISPATCH_FAILED');
     expect(transport).not.toHaveBeenCalled();
   });
   it('requires a reviewed profile parser and never guesses a name', async () => {
