@@ -32,6 +32,12 @@ import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, XhsPreDispatchError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
+function safeFailureKind(error:unknown):'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other' {
+  if(error instanceof TypeError)return 'TypeError';
+  if(error instanceof RangeError)return 'RangeError';
+  if(error instanceof SyntaxError)return 'SyntaxError';
+  return error instanceof Error?'Error':'Other';
+}
 import { saveXhsMetrics } from './xhs-engagement-store';
 import { selectMissingBasic } from './xhs-missing-basic';
 import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
@@ -48,6 +54,8 @@ export type XhsListedNote = {
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
   withTaskScope?<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T>;
+  resetTaskDiagnostic?():void;
+  taskDiagnostic?():{dispatched:false|'transport-entered'}|undefined;
   withCheckpointGroup?<T>(
     phase: 'profile' | 'list' | 'detail' | 'metrics',
     authorId: string,
@@ -123,7 +131,8 @@ type Task = XhsSubscriptionTask & {
   selectionComplete?: boolean;
   basicOnly?: boolean;
   basicResults?: Record<string, 'complete' | 'missing'>;
-  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:true}>;
+  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:true}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown'}>;
+  taskFailure?: {phase:'prepare'|'listing'|'details';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown'};
   mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string}>}>;
   reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
@@ -1189,6 +1198,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     return this.source?.withTaskScope ? this.source.withTaskScope({taskId:t.taskId,creatorId:t.creatorId},()=>this.runTask(t,directory)) : this.runTask(t,directory);
   }
   private async runTask(t: Task, directory?: string) {
+    this.source?.resetTaskDiagnostic?.();
     if (!active(t)) {
       this.pending.delete(t.taskId);
       return;
@@ -1232,6 +1242,8 @@ export class XhsSubscriptionService implements OnModuleInit {
           if (!active(t)) break;
           if (t.items[id] === 'completed' || t.items[id] === 'skipped')
             continue;
+          this.source?.resetTaskDiagnostic?.();
+          let failurePhase:'detail'|'local'='local';
           try {
             await this.creator(t.creatorId);
             const old = await this.db.xhsNote.findFirst({
@@ -1254,6 +1266,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               const tuple = JSON.parse(id);
               if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
               if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+              failurePhase='detail';
               await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
                 let projection: Awaited<ReturnType<NonNullable<XhsSubscriptionSource['basicDetailWithMedia']>>>;
                 try {
@@ -1323,6 +1336,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
                 if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+                failurePhase='detail';
                 await this.withSourceCheckpoint(
                   'detail',
                   creator.externalAuthorId!,
@@ -1453,6 +1467,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                 await this.persist(t);
                 continue;
               }
+              failurePhase='local';
               const saved = await this.save!(creator, id, directory!);
               if (saved.supplement && saved.supplement.status !== 'retained')
                 t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
@@ -1484,13 +1499,17 @@ export class XhsSubscriptionService implements OnModuleInit {
               }
             }
           } catch (error) {
-            if (!active(t)) break;
+            if (!active(t)) {
+              t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'}};
+              break;
+            }
             if(error instanceof XhsPreDispatchError && error.code==='XHS_LOCAL_PRE_DISPATCH_FAILED'){
               t.failed++;t.items[id]='failed';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
             if(error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
               t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:true}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
+            t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'}};
             t.failed++;
             t.items[id] = 'failed';
             // Unknown provider failures may be authentication/verification stops.
@@ -1518,6 +1537,7 @@ export class XhsSubscriptionService implements OnModuleInit {
           t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }
     } catch (error) {
+      t.taskFailure={phase:t.collectionStage ?? 'prepare',code:xhsPublicCode(error,'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'};
       if (active(t)) {
         // A failed last item checkpoint must not permanently turn confirmed
         // local results into a blocked task. The final persist below still has

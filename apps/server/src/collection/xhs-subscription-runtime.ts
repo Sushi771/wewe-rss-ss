@@ -85,8 +85,10 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean}>();
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered'}}>();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
+  resetTaskDiagnostic() { const scope=this.taskSourceContext.getStore();if(scope)scope.diagnostic={dispatched:false}; }
+  taskDiagnostic() { const scope=this.taskSourceContext.getStore();return scope?.diagnostic ? {...scope.diagnostic} : undefined; }
   private scopedMediaFailure?: (scope:TaskSourceScope)=>Promise<void>;
   bindScopedMediaFailure(fn:(scope:TaskSourceScope)=>Promise<void>){this.scopedMediaFailure ??= fn;}
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
@@ -507,6 +509,7 @@ export class XhsSubscriptionRuntime
               this.requestAttempts.comments++;
             else if (route.endsWith('/comment/sub/page'))
               this.requestAttempts.replies++;
+            if(task?.diagnostic)task.diagnostic.dispatched='transport-entered';
             this.observeSourceStage('transport');
             return api({ ...request, signal: signal(request.signal) }).then(value => {
               this.observeSourceStage('response',value.status);
@@ -524,6 +527,7 @@ export class XhsSubscriptionRuntime
         scoped={taskId:task.taskId,creatorId:task.creatorId,phase:'media',target,cursorHash,noteKey:task.mediaNoteKey,fingerprint:taskSourceFingerprint(task.creatorId,'media',target,cursorHash),owner:task.owner};task.current=scoped;
       }
       return this.guardTransport(() => {
+        if(task?.diagnostic)task.diagnostic.dispatched='transport-entered';
         this.observeSourceStage('transport');
         this.requestAttempts.media++;
         return media(url, { ...request, signal: AbortSignal.any([signal(request.signal), AbortSignal.timeout(10_000)]) });
