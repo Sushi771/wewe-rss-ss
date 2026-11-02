@@ -271,7 +271,7 @@ describe('whole creator durable offline closure', () => {
     40000,
   );
   let dispatchFixture = 0;
-  const dispatchClock = async (mode: string) => {
+  const dispatchClock = async (mode: string, delayBeforeSecond = 0) => {
     const creatorId = `synthetic-dispatch-${mode}-${++dispatchFixture}`;
     const profile = `https://www.xiaohongshu.com/user/profile/${creatorId}`;
     await db.xhsCreator.create({
@@ -325,7 +325,7 @@ describe('whole creator durable offline closure', () => {
     const spy = jest
       .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
       .mockImplementation(async function (this: XhsSqliteBudgetStore, id, now) {
-        if (mode === 'final-cancel' && id === jobId && localAdmitted === 1 && !forcedWait) {
+        if ((mode === 'final-cancel' || mode === 'interleave') && id === jobId && localAdmitted === 1 && !forcedWait) {
           forcedWait = true; signalWait(); return false;
         }
         const accepted = await original.call(this, id, now);
@@ -341,7 +341,7 @@ describe('whole creator durable offline closure', () => {
       return wait(ms);
     });
     const dispatch = (runtime as any).sourceDispatch;
-    if (mode === 'final-cancel') (runtime as any).sourceDispatch = async (...args: any[]) => {
+    if (mode === 'final-cancel' || mode === 'interleave') (runtime as any).sourceDispatch = async (...args: any[]) => {
       if (localAdmitted === 2) { signalFinal(); await finalGate; }
       return dispatch(...args);
     };
@@ -351,6 +351,7 @@ describe('whole creator durable offline closure', () => {
           SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId}`;
         jobId = rows[0].id;
         await runtime.resolve(profile);
+        if (delayBeforeSecond) await new Promise(resolve => setTimeout(resolve, delayBeforeSecond));
         await runtime.resolve(profile);
         return { taskId: 'synthetic-clock-list' };
       },
@@ -374,6 +375,7 @@ describe('whole creator durable offline closure', () => {
       if (mode === 'interleave' || mode === 'final-cancel') {
         expect(await Promise.race([legacyWaiting.then(() => true), (whole as any).lane.then(() => false)])).toBe(true);
         await ordinary.resolve(profile);
+        if (mode === 'interleave') releaseFinal();
         if (mode === 'final-cancel') {
           expect(
             await Promise.race([
@@ -443,6 +445,11 @@ describe('whole creator durable offline closure', () => {
     },
     40000,
   );
+  it('interleaves even after the first budget window has elapsed', () => {
+    const pending = dispatchClock('interleave', 1700);
+    nativeTests.push(pending);
+    return pending;
+  }, 40000);
   it('a non-dispatch receipt is consumed once even if cleanup is called again', async () => {
     let used = 0;
     const rollback = jest.fn(async () => {
@@ -1304,3 +1311,4 @@ describe('expired access context reconstruction', () => {
     expect(client.getUserNotes).not.toHaveBeenCalled();
   });
 });
+
