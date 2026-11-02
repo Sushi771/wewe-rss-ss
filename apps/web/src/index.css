@@ -1622,3 +1622,7 @@ button:active {
   overflow: hidden;
   overflow-wrap: anywhere;
 }
+
+@media (max-height: 700px) {
+  .article-date-calendar { max-height: min(240px, calc(100dvh - 24px)); }
+}

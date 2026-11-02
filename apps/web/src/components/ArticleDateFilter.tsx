@@ -70,7 +70,7 @@ function DateCalendarButton({
           <span>日历</span>
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="max-h-[calc(100dvh-24px)] max-w-[calc(100vw-16px)] overflow-y-auto p-1">
+      <PopoverContent className="article-date-calendar max-h-[calc(100dvh-24px)] max-w-[calc(100vw-16px)] overflow-y-auto p-1">
         {/* Scope Chinese month/week labels to this calendar, preserving app locale. */}
         <NextUIProvider locale="zh-CN" disableAnimation>
           <Calendar
