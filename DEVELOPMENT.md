@@ -58,7 +58,9 @@ after migration21; the actual synthetic upgrade/application rollback remains a
 separate acceptance requirement.
 
 - **Pre-commit**: `lint-staged` and `husky` will automatically format your code.
-- **CI**: Every PR to `main` is checked for linting and build success.
+- **Local installation acceptance**: GitHub remains the source-version and collaboration record; existing workflows stay in place, but cloud CI is not a prerequisite for local installation. Record cloud results when available without describing a failed or skipped run as passed.
+- Bind the exact source commit, source/input hashes, build outputs and complete installation package. Exercise the candidate in a separate local directory, synthetic database and unoccupied port, with real-source access and scheduled execution disabled during synthetic tests. Run the relevant build, backend, UI and failure/recovery checks for the change; distinguish synthetic results from live-source evidence. An unverified or failed core local acceptance blocks a completion claim.
+- Preserve existing database and user files, unknown dispatch receipts and other recovery fences. Before installation, create and verify a recoverable backup and record its identity and hash. Verify the permitted rollback path when the schema or recovery contract changes. After installation, verify the actual running package and process identity, database integrity, affected UI and configured scheduling; perform real-source acceptance only within the user's authorization and report missing or failed fields honestly. Do not delete old backups without authorization for the specific list.
 
 ## 自动刷新入口维护（2026-10-12）
 

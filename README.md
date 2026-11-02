@@ -55,7 +55,7 @@
 
 ## 🛠️ 开发与检查
 
-根目录`package.json`提供`pnpm lint`、`pnpm fmt.check`等命令，工作流按实际分支和事件触发，不保证覆盖所有PR。检查最终SHA的具体job结果；CI通过不等于已部署或真实来源可用。开发入门见[DEVELOPMENT.md](./DEVELOPMENT.md)，本轮受影响测试及发布顺序见[开发维护](docs/xiaohongshu/DEVELOPMENT.md)。来源诊断脚本不因列在package.json中就获得联网执行授权。
+根目录`package.json`提供`pnpm lint`、`pnpm fmt.check`等命令。GitHub用于代码版本管理，现有工作流保留；云端CI不是本机安装的必经条件，若已运行则如实记录其结果。安装前必须对精确候选在本机独立目录、数据库和端口完成相应验收，详见[开发与发布验收规范](./DEVELOPMENT.md#quality-gates)。本地合成通过不等于已部署或真实来源可用；来源诊断脚本不因列在package.json中就获得联网执行授权。小红书变更另见[开发维护](docs/xiaohongshu/DEVELOPMENT.md)。
 
 ## 🚀 部署
 
