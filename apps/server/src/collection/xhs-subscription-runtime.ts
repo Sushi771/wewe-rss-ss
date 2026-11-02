@@ -15,7 +15,7 @@ import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
   redbookResponseReason,
-  RedbookPauseError, RedbookPreDispatchError,
+  RedbookPauseError, RedbookPreDispatchError, RedbookTransportDiagnosticError, RedbookTransportFailureKind,
   RedbookTransport,
 } from './redbook-client';
 import { allowedRedbookMediaUrl, RedbookMediaTransport } from './redbook-response';
@@ -85,7 +85,7 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered'}}>();
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}}>();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
   resetTaskDiagnostic() { const scope=this.taskSourceContext.getStore();if(scope)scope.diagnostic={dispatched:false}; }
   taskDiagnostic() { const scope=this.taskSourceContext.getStore();return scope?.diagnostic ? {...scope.diagnostic} : undefined; }
@@ -904,6 +904,12 @@ export class XhsSubscriptionRuntime
         this.verified = true;
       return result;
     } catch (error) {
+      if(taskScope?.diagnostic && error instanceof RedbookPauseError && typeof error.httpStatus==='number' && Number.isInteger(error.httpStatus) && error.httpStatus>=100 && error.httpStatus<=599)taskScope.diagnostic.httpStatus=error.httpStatus;
+      if(taskScope?.diagnostic && error instanceof RedbookTransportDiagnosticError){
+        taskScope.diagnostic.transportFailure=error.transportFailure;
+        if(error.nativeCode)taskScope.diagnostic.nativeCode=error.nativeCode;
+        if(error.notSent)taskScope.diagnostic.dispatched=false;
+      }
       if(riskOwner && taskScope?.current?.owner===riskOwner && taskScope.current.phase==='media' && !taskScope.current.isolatedUnknown && this.scopedMediaFailure && error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code)){
         try{await this.scopedMediaFailure(taskScope.current);taskScope.current.isolatedUnknown=true;}catch{/* unknown or unconfirmed storage remains globally fenced */}
       }

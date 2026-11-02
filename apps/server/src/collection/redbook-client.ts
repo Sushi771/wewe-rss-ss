@@ -24,6 +24,14 @@ export class RedbookPauseError extends Error {
     this.name = 'RedbookPauseError';
   }
 }
+export type RedbookTransportFailureKind = 'guard-url'|'guard-route'|'guard-limits'|'guard-headers'|'guard-body'|'guard-aborted'|'request-create'|'request-start'|'request-error'|'response-error'|'response-aborted'|'timeout'|'abort'|'response-length'|'response-content-type'|'response-size'|'response-json'|'response-url'|'transport-other';
+export class RedbookTransportDiagnosticError extends RedbookPauseError {
+  readonly nativeCode?: string;
+  constructor(readonly transportFailure:RedbookTransportFailureKind, readonly notSent:boolean, nativeCode?:unknown, reason:'transport'|'response'='transport', httpStatus?:unknown) {
+    super(reason,typeof httpStatus==='number' && Number.isInteger(httpStatus) && httpStatus>=100 && httpStatus<=599 ? httpStatus : undefined);
+    if(typeof nativeCode==='string' && ['ENOTFOUND','EAI_AGAIN','ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','ERR_TLS_CERT_ALTNAME_INVALID','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(nativeCode))this.nativeCode=nativeCode;
+  }
+}
 
 /** A local error observed before invoking the source transport. */
 export class RedbookPreDispatchError extends Error {
@@ -252,13 +260,13 @@ export class RedbookClient {
       signal?.throwIfAborted();
     } catch (error) {
       if (error instanceof RedbookPauseError) {
-        if (invoked && error.reason === 'configuration') throw new RedbookPauseError('transport');
+        if (invoked && error.reason === 'configuration') throw new RedbookTransportDiagnosticError('transport-other',false);
         throw error;
       }
       if (!invoked) throw new RedbookPreDispatchError();
-      throw new RedbookPauseError('transport');
+      throw new RedbookTransportDiagnosticError('transport-other',false);
     }
-    if (response.url !== HOST + uri) throw new RedbookPauseError('transport');
+    if (response.url !== HOST + uri) throw new RedbookTransportDiagnosticError('response-url',false);
     const statusReason = redbookResponseReason(response.status, response.body);
     if (statusReason)
       throw new RedbookPauseError(
@@ -281,7 +289,7 @@ export class RedbookClient {
       response.status < 200 ||
       response.status >= 300
     )
-      throw new RedbookPauseError('response');
+      throw new RedbookPauseError('response',Number.isInteger(response.status) && response.status>=100 && response.status<=599 ? response.status : undefined);
     const envelope = response.body;
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope))
       throw new RedbookPauseError('response');

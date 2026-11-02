@@ -131,6 +131,53 @@ const mediaOptions = (signal = new AbortController().signal) => ({
   signal,
 });
 describe('native HTTPS metadata transport (injected synthetic request only)', () => {
+  it.each([
+    ['guard-url', {url:'https://evil.invalid/api/sns/web/v1/feed',method:'POST'}],
+    ['guard-route', {url:'https://edith.xiaohongshu.com/api/sns/web/v1/feed',method:'GET'}],
+    ['guard-limits', {timeoutMs:15001}],
+    ['guard-headers', {headers:{'x-unreviewed':'synthetic'}}],
+    ['guard-body', {body:'synthetic'}],
+    ['guard-aborted', {signal:AbortSignal.abort()}],
+  ] as const)('classifies %s without invoking HTTPS',async(kind,override)=>{
+    const f=httpsFixture();await expect(createRedbookHttpTransport(f.request)(input(override as any))).rejects.toMatchObject({reason:'transport',transportFailure:kind,notSent:true});expect(f.raw).not.toHaveBeenCalled();
+  });
+  it.each([['ENOTFOUND','ENOTFOUND'],['ECONNRESET','ECONNRESET'],['ETIMEDOUT','ETIMEDOUT'],['ERR_TLS_CERT_ALTNAME_INVALID','ERR_TLS_CERT_ALTNAME_INVALID'],['synthetic-private-code',undefined]])('keeps only allowlisted native network code %s',async(raw,expected)=>{
+    const request=jest.fn(()=>{const req=new EventEmitter() as any;req.destroy=jest.fn();req.end=jest.fn(()=>queueMicrotask(()=>req.emit('error',Object.assign(new Error('synthetic-private-token'),{code:raw}))));return req;});
+    const promise=createRedbookHttpTransport(request as unknown as XhsHttpsRequest)(input());
+    await expect(promise).rejects.toMatchObject({reason:'transport',transportFailure:'request-error',notSent:false,...(expected?{nativeCode:expected}:{})});
+    if(!expected)await expect(promise).rejects.not.toHaveProperty('nativeCode');
+    await expect(promise).rejects.not.toThrow('synthetic-private-token');expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('allows the real signed detail POST through the local guard', async () => {
+    const f=httpsFixture(),observed:string[]=[];
+    const transport=createRedbookHttpTransport(f.request,(stage)=>observed.push(stage));
+    const client=new RedbookClient({transport,cookies:()=>({a1:'synthetic-a1',web_session:'synthetic-session'})});
+    await client.getNoteById('synthetic-note','synthetic-token','pc_user');
+    expect(f.raw).toHaveBeenCalledTimes(1);
+    const [url,options]=f.raw.mock.calls[0];
+    expect(url.pathname).toBe('/api/sns/web/v1/feed');expect(options.method).toBe('POST');
+    expect(observed).toContain('response');
+  });
+  it('distinguishes request construction from a synchronous failure starting a request', async () => {
+    const construct=jest.fn(()=>{throw Object.assign(new Error('synthetic-private'),{code:'ENOTFOUND'});});
+    await expect(createRedbookHttpTransport(construct as unknown as XhsHttpsRequest)(input())).rejects.toMatchObject({transportFailure:'request-create',notSent:false,nativeCode:'ENOTFOUND'});
+    const start=jest.fn(()=>{const req=new EventEmitter() as any;req.destroy=jest.fn();req.end=()=>{throw new Error('synthetic-private');};return req;});
+    await expect(createRedbookHttpTransport(start as unknown as XhsHttpsRequest)(input())).rejects.toMatchObject({transportFailure:'request-start',notSent:false});
+  });
+  it('records a response stream error without its message', async () => {
+    const f=httpsFixture({hold:true});const pending=createRedbookHttpTransport(f.request)(input());
+    while(!f.response)await Promise.resolve();
+    f.response!.emit('error',Object.assign(new Error('synthetic-private'),{code:'ECONNRESET'}));
+    await expect(pending).rejects.toMatchObject({transportFailure:'response-error',nativeCode:'ECONNRESET',notSent:false});
+    await expect(pending).rejects.not.toThrow('synthetic-private');
+  });
+  it('distinguishes response interruption and transport deadline', async () => {
+    const f=httpsFixture({hold:true});const interrupted=createRedbookHttpTransport(f.request)(input());
+    while(!f.response)await Promise.resolve();f.response!.emit('aborted');
+    await expect(interrupted).rejects.toMatchObject({transportFailure:'response-aborted',notSent:false});
+    jest.useFakeTimers();
+    try{const slow=httpsFixture({hold:true});const pending=createRedbookHttpTransport(slow.request)(input({timeoutMs:10}));const result=expect(pending).rejects.toMatchObject({transportFailure:'timeout',notSent:false});await jest.advanceTimersByTimeAsync(10);await result;}finally{jest.useRealTimers();}
+  });
   it('sends only a reviewed route and parses a bounded fragmented JSON response', async () => {
     const f = httpsFixture({
       parts: [
@@ -183,11 +230,11 @@ describe('native HTTPS metadata transport (injected synthetic request only)', ()
     });
     await expect(
       createRedbookHttpTransport(declared.request)(input()),
-    ).rejects.toThrow('response');
+    ).rejects.toMatchObject({transportFailure:'response-length',notSent:false});
     const streamed = httpsFixture({ parts: [Buffer.alloc(1001, 65)] });
     await expect(
       createRedbookHttpTransport(streamed.request)(input()),
-    ).rejects.toThrow('response');
+    ).rejects.toMatchObject({transportFailure:'response-size',notSent:false});
     expect(streamed.destroy).toHaveBeenCalled();
   });
   it('rejects non-JSON and malformed JSON with fixed errors', async () => {
@@ -197,13 +244,13 @@ describe('native HTTPS metadata transport (injected synthetic request only)', ()
     });
     await expect(
       createRedbookHttpTransport(html.request)(input()),
-    ).rejects.toThrow('response');
+    ).rejects.toMatchObject({transportFailure:'response-content-type',notSent:false});
     const malformed = httpsFixture({
       parts: [Buffer.from('synthetic secret not json')],
     });
     await expect(
       createRedbookHttpTransport(malformed.request)(input()),
-    ).rejects.toThrow('response');
+    ).rejects.toMatchObject({transportFailure:'response-json',notSent:false});
   });
   it('honors cancellation before dispatch and during response streaming', async () => {
     const f = httpsFixture({ hold: true }),

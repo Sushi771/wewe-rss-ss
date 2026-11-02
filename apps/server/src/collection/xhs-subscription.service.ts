@@ -32,6 +32,7 @@ import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
 import { XhsSubscriptionError, XhsPreDispatchError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
+import type { RedbookTransportFailureKind } from './redbook-client';
 function safeFailureKind(error:unknown):'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other' {
   if(error instanceof TypeError)return 'TypeError';
   if(error instanceof RangeError)return 'RangeError';
@@ -55,7 +56,7 @@ export type XhsListedNote = {
 export interface XhsSubscriptionSource {
   withTaskScope?<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T>;
   resetTaskDiagnostic?():void;
-  taskDiagnostic?():{dispatched:false|'transport-entered'}|undefined;
+  taskDiagnostic?():{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}|undefined;
   withCheckpointGroup?<T>(
     phase: 'profile' | 'list' | 'detail' | 'metrics',
     authorId: string,
@@ -131,8 +132,8 @@ type Task = XhsSubscriptionTask & {
   selectionComplete?: boolean;
   basicOnly?: boolean;
   basicResults?: Record<string, 'complete' | 'missing'>;
-  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:true}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown'}>;
-  taskFailure?: {phase:'prepare'|'listing'|'details';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown'};
+  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}>;
+  taskFailure?: {phase:'prepare'|'listing'|'details';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number};
   mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string}>}>;
   reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
@@ -1500,16 +1501,16 @@ export class XhsSubscriptionService implements OnModuleInit {
             }
           } catch (error) {
             if (!active(t)) {
-              t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'}};
+              t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()}};
               break;
             }
             if(error instanceof XhsPreDispatchError && error.code==='XHS_LOCAL_PRE_DISPATCH_FAILED'){
               t.failed++;t.items[id]='failed';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
             if(error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
-              t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:true}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+              t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:'unknown',...this.source?.taskDiagnostic?.()}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
-            t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'}};
+            t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()}};
             t.failed++;
             t.items[id] = 'failed';
             // Unknown provider failures may be authentication/verification stops.
@@ -1537,7 +1538,7 @@ export class XhsSubscriptionService implements OnModuleInit {
           t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
       }
     } catch (error) {
-      t.taskFailure={phase:t.collectionStage ?? 'prepare',code:xhsPublicCode(error,'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:this.source?.taskDiagnostic?.()?.dispatched ?? 'unknown'};
+      t.taskFailure={phase:t.collectionStage ?? 'prepare',code:xhsPublicCode(error,'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()};
       if (active(t)) {
         // A failed last item checkpoint must not permanently turn confirmed
         // local results into a blocked task. The final persist below still has

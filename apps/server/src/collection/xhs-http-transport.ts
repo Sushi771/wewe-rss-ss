@@ -3,7 +3,7 @@ import type { SafeSourceStage } from './xhs-source-receipt';
 import { IncomingMessage, ClientRequest } from 'node:http';
 import { Readable, Transform } from 'node:stream';
 import { XhsMediaError, mediaHttpError } from './xhs-media-error';
-import { RedbookPauseError, RedbookTransport } from './redbook-client';
+import { RedbookPauseError, RedbookTransport, RedbookTransportDiagnosticError, RedbookTransportFailureKind } from './redbook-client';
 import {
   redbookErrorSummary,
   REDBOOK_ERROR_MAX_BYTES,
@@ -54,6 +54,7 @@ export function createRedbookHttpTransport(
   return (input) =>
     new Promise((resolve, reject) => {
       let url: URL;
+      let guard:RedbookTransportFailureKind='guard-url';
       try {
         url = new URL(input.url);
         if (
@@ -63,11 +64,12 @@ export function createRedbookHttpTransport(
           url.username ||
           url.password ||
           url.hash ||
-          /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(input.url) ||
-          METHODS[url.pathname] !== input.method ||
-          input.redirect !== 'error'
+          /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(input.url)
         )
           throw stop();
+        guard='guard-route';
+        if(METHODS[url.pathname] !== input.method || input.redirect !== 'error')throw stop();
+        guard='guard-limits';
         if (
           !Number.isSafeInteger(input.timeoutMs) ||
           input.timeoutMs <= 0 ||
@@ -77,6 +79,7 @@ export function createRedbookHttpTransport(
           input.maxResponseBytes > 8 * 1024 * 1024
         )
           throw stop();
+        guard='guard-headers';
         for (const [key, value] of Object.entries(input.headers))
           if (
             !API_HEADERS.has(key.toLowerCase()) ||
@@ -84,15 +87,16 @@ export function createRedbookHttpTransport(
             /[\r\n\x00]/.test(value)
           )
             throw stop();
+        guard='guard-body';
         if (
           input.body &&
           (input.method !== 'POST' || Buffer.byteLength(input.body) > 65536)
         )
           throw stop();
-        input.signal?.throwIfAborted();
+        guard='guard-aborted';input.signal?.throwIfAborted();
       } catch {
         observe?.('transport',undefined,true);
-        reject(stop());
+        reject(new RedbookTransportDiagnosticError(guard,true));
         return;
       }
       let req: ClientRequest | undefined,
@@ -108,7 +112,7 @@ export function createRedbookHttpTransport(
         for (const b of chunks) b.fill(0);
         chunks.length = 0;
       };
-      const fail = (reason:'transport'|'response'='transport') => {
+      const fail = (kind:RedbookTransportFailureKind='transport-other',reason:'transport'|'response'='transport',error?:unknown) => {
         if (done) return;
         done = true;
         clear();
@@ -118,9 +122,9 @@ export function createRedbookHttpTransport(
         // its optional diagnostic body is invalid, slow, interrupted or huge.
         if (errorStatus !== undefined)
           resolve({ status: errorStatus, url: input.url, body: {} });
-        else reject(reason==='response' ? new RedbookPauseError('response') : stop());
+        else reject(new RedbookTransportDiagnosticError(kind,false,(error as {code?:unknown})?.code,reason,res?.statusCode));
       };
-      const abort = () => fail();
+      const abort = () => fail('abort');
       try {
         req = request(
           url,
@@ -137,14 +141,16 @@ export function createRedbookHttpTransport(
             if (rejected) errorStatus = status;
             // Redirects never need body inspection and are never followed.
             if (status >= 300 && status < 400) {
-              fail();
+              fail('transport-other');
               return;
             }
             const limit = rejected
               ? Math.min(input.maxResponseBytes, REDBOOK_ERROR_MAX_BYTES)
               : input.maxResponseBytes;
+            let responseFailure:RedbookTransportFailureKind='response-length';
             try {
               contentLength(res, limit);
+              responseFailure='response-content-type';
               if (
                 !/^application\/json(?:;|$)/i.test(
                   String(res.headers['content-type'] ?? ''),
@@ -152,7 +158,7 @@ export function createRedbookHttpTransport(
               )
                 throw stop();
             } catch {
-              fail('response');
+              fail(responseFailure,'response');
               return;
             }
             res.on('data', (part: Buffer) => {
@@ -160,13 +166,13 @@ export function createRedbookHttpTransport(
               length += part.length;
               if (length > limit) {
                 part.fill(0);
-                fail('response');
+                fail('response-size','response');
                 return;
               }
               chunks.push(Buffer.from(part));
             });
-            res.on('error', () => fail());
-            res.on('aborted', () => fail());
+            res.on('error', (error) => fail('response-error','transport',error));
+            res.on('aborted', () => fail('response-aborted'));
             res.on('end', () => {
               if (done) return;
               let bytes: Buffer | undefined;
@@ -183,23 +189,24 @@ export function createRedbookHttpTransport(
                   body: rejected ? redbookErrorSummary(body) : body,
                 });
               } catch {
-                fail('response');
+                if(input.signal?.aborted)fail('abort');
+                else fail('response-json','response');
               } finally {
                 bytes?.fill(0);
               }
             });
           },
         );
-        req.on('error', () => fail());
+        req.on('error', (error) => fail('request-error','transport',error));
         req.once('finish', () => { if (!done) observe?.('sent'); });
-        timer = setTimeout(fail, input.timeoutMs);
+        timer = setTimeout(()=>fail('timeout'), input.timeoutMs);
         timer.unref?.();
         input.signal?.addEventListener('abort', abort, { once: true });
-        if (input.signal?.aborted) fail();
+        if (input.signal?.aborted) fail('abort');
         else req.end(input.body);
-      } catch {
+      } catch (error) {
         if (!req) observe?.('transport',undefined,true);
-        fail();
+        fail(req?'request-start':'request-create','transport',error);
       }
     });
 }
