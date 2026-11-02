@@ -110,6 +110,12 @@ const empty = {
   returned: 0,
   offset: 0,
 };
+test('retained metric values do not claim the latest attempt time', () => {
+  const f=fixture(empty), older=1600000000000, newer=1760000000000;
+  const snapshot={values:{likes:12,collects:7,shares:null,comments:0},collectedAt:newer,valueCollectedAt:{likes:newer,collects:older,comments:newer},evidence:'source-only'};
+  assert.ok(f.metric({snapshot}).props.title.includes(new Date(older).toLocaleString()));
+  assert.ok(f.text(f.metric({creator:true,snapshot:{...snapshot,values:{fans:82},valueCollectedAt:{fans:older}}})).includes(new Date(older).toLocaleString()));
+});
 test('following unknown is omitted, a measured zero and other unknown values stay distinct', () => {
   const f = fixture(empty),
     snapshot = {

@@ -15,7 +15,7 @@ export class XhsScheduledRunner {
       const b=await this.service.task({taskId:basic.taskId});
       if(['queued','running'].includes(b.state)){pending=true;continue;}
       const historyPartial=b.state==='partial' && b.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' && !b.failed;
-      const itemPartial=b.state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(b.code??'') && !!b.failed && b.remaining===0;
+      const itemPartial=b.state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(b.code??'') && !!b.failed && b.remaining===0;
       if(historyPartial||itemPartial)incomplete=true;
       if((b.state!=='completed'&&!historyPartial&&!itemPartial)||(b.failed&&!itemPartial)){incomplete=true;continue;}
       let mediaPending=false;

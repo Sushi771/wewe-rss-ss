@@ -557,7 +557,11 @@ export class XhsSubscriptionRuntime
     );
   }
   private async guardTransport<T>(operation: () => Promise<T>, charge?: Charge,scoped?:TaskSourceScope) {
-    this.requireSession();
+    try { this.requireSession(); } catch (error) {
+      const admission=this.budgetScope.getStore();
+      if(admission)admission.failure=error;
+      throw error;
+    }
     const context=this.reviewedContext.getStore();
     if(context){
       if(context.started||charge!==context.binding.phase)return failure('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
@@ -943,7 +947,7 @@ export class XhsSubscriptionRuntime
           ((known instanceof RedbookPreDispatchError) || (known instanceof RedbookPauseError && known.reason==='configuration') || (known instanceof XhsSourceParseError) ||
           (admission?.failure === known &&
             known instanceof XhsSubscriptionError &&
-            known.code === 'XHS_TASK_CANCELLED') ||
+            ['XHS_TASK_CANCELLED','XHS_SESSION_CHANGED','XHS_SESSION_REQUIRED','XHS_LIVE_ACCESS_DISABLED','XHS_SESSION_BUSY'].includes(known.code)) ||
           (known instanceof XhsSubscriptionError &&
             [
               'XHS_REQUEST_BUDGET_REQUIRED',

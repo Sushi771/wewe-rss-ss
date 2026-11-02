@@ -14,7 +14,7 @@ describe('scheduled creator clock and runner',()=>{
   clock=new XhsScheduledClock(()=>file,enqueue);await clock.tick(Date.parse('2026-10-31T01:15:30Z'));
   expect(enqueue).toHaveBeenCalledTimes(1);expect(enqueue.mock.calls[0][0]).toBe('2026-10-31/09:15');
  },15000);
- it.each(['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'])('continues other authors and completed-note media after %s',async(code)=>{
+ it.each(['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'])('continues other authors and completed-note media after %s',async(code)=>{
   const service={scheduleCreatorPhase:jest.fn(async(input:{round:string;creatorId:string;phase:'basic'|'media';batch?:number})=>input.phase==='media'? input.creatorId==='a' && input.batch===0?{taskId:'a-media'}:{state:'nothing-to-archive'}:{taskId:input.creatorId}),task:jest.fn(async(input:{taskId:string})=> input.taskId==='a'?{state:'partial',failed:1,remaining:0,code}:input.taskId==='b'?{state:'blocked',code:'XHS_LIST_PARSE_FAILED'}:{state:'completed',failed:0,remaining:0})};
   const runner=new XhsScheduledRunner({xhsCreator:{findMany:async()=>[{id:'a'},{id:'b'},{id:'c'}]}},service);await expect(runner.run('2026-10-31/09:15')).rejects.toThrow('XHS_SCHEDULE_ROUND_INCOMPLETE');
   expect(service.scheduleCreatorPhase.mock.calls.map(([v])=>[v.creatorId,v.phase])).toEqual([['a','basic'],['a','media'],['a','media'],['b','basic'],['c','basic'],['c','media']]);

@@ -163,7 +163,15 @@ export async function markWholeSourceStarted(
     }
     b.used[category]++;
   }
-  // Count is observation; prevent unsafe-integer corruption without imposing a business quota.
+  // Automatic generation media has an explicit per-generation bound.  Check
+  // and consume it under the same write lock that marks this dispatch started.
+  if (generationId && category==='media' && job.mediaRequest?.autoBounded===true) {
+    const request=job.mediaRequest, media=fence.mediaAttempt;
+    const noteKey=JSON.stringify(['xiaohongshu','note',fence.noteId]);
+    if(!media || request.taskId!==media.taskId || !Array.isArray(request.noteIds) || !request.noteIds.includes(noteKey))return bad();
+    if(grant.used.media>=grant.limits.media)throw new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED');
+  }
+  // Other paths retain their existing observation-only counter semantics.
   if (grant.used[category] >= Number.MAX_SAFE_INTEGER) return bad();
   grant.used[category]++;
   fence.state = 'started';

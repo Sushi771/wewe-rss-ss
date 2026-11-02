@@ -47,7 +47,7 @@ export async function admitScheduledXhs(tx:Tx,input:{round:string; creatorId:str
     const basicId=scheduledTaskId(round,creatorId,'basic');const predecessor=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${basicId}`;
     const basic=predecessor.length===1?JSON.parse(predecessor[0].document):undefined;
     const historyPartial=predecessor[0]?.state==='partial'&&basic?.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&basic?.failed===0;
-    const itemPartial=predecessor[0]?.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic?.code)&&basic?.failed>0&&basic?.remaining===0;
+    const itemPartial=predecessor[0]?.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(basic?.code)&&basic?.failed>0&&basic?.remaining===0;
     if(predecessor.length!==1||!(predecessor[0].state==='completed'||historyPartial||itemPartial)||(!itemPartial&&basic.failed!==0))reason='XHS_SCHEDULE_BASIC_INCOMPLETE';
     else {
       const ids=Array.isArray(basic.noteIds)?(itemPartial?basic.noteIds.filter((id:string)=>basic.items?.[id]==='completed'):basic.noteIds):undefined,expected=ids?.slice(batch*1000,(batch+1)*1000);

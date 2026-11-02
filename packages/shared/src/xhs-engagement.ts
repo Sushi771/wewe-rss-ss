@@ -12,6 +12,7 @@ export type XhsCreatorMetric = (typeof xhsCreatorMetricNames)[number];
 export type XhsMetricSnapshot = {
   values: Record<string, number | null>;
   collectedAt: number;
+  valueCollectedAt?: Record<string, number>;
   contract: string;
   evidence: 'source-only' | 'verified-response';
 };

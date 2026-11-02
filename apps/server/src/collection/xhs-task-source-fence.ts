@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Prisma } from '@prisma/client';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { scheduledTaskId } from './xhs-scheduled-admission';
-import { assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
+import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
 export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;contextRestore?:boolean};
@@ -55,7 +55,7 @@ async function taskRow(tx:Tx,scope:TaskSourceScope) {
     if(notes.length!==1)return bad();
   } else if(scope.phase==='comments'||scope.phase==='replies') {
     const round=task.schedule?.round,note=JSON.stringify(['xiaohongshu','note',scope.target]);
-    const itemPartial=task.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(task.code)&&task.remaining===0&&task.items?.[note]==='completed';
+    const itemPartial=task.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(task.code)&&task.remaining===0&&task.items?.[note]==='completed';
     const historyPartial=task.state==='partial'&&task.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&!task.failed;
     const scheduled=typeof round==='string'&&task.schedule?.phase==='basic'&&scheduledTaskId(round,scope.creatorId,'basic')===scope.taskId&&(task.state==='completed'||itemPartial||historyPartial);
     const manual=task.commentManual===true&&task.state==='running'&&!task.schedule&&Array.isArray(task.noteIds)&&task.noteIds.length===1;
@@ -65,11 +65,12 @@ async function taskRow(tx:Tx,scope:TaskSourceScope) {
     else if(scope.rootId)return bad();
   } else {
     const noteKey=scope.noteKey,round=task.schedule?.round,batch=task.schedule?.batch??0;
-    if(typeof noteKey!=='string'||scope.cursorHash!==createHash('sha256').update(noteKey).digest('hex')||!/^[a-f0-9]{64}$/.test(scope.target)||typeof round!=='string')return bad();
+    if(typeof noteKey!=='string'||scope.cursorHash!==createHash('sha256').update(noteKey).digest('hex')||!/^[a-f0-9]{64}$/.test(scope.target))return bad();
     let tuple:any;try{tuple=JSON.parse(noteKey);}catch{return bad();}
     if(!Array.isArray(tuple)||tuple[0]!=='xiaohongshu'||tuple[1]!=='note'||typeof tuple[2]!=='string')return bad();
-    const basicId=scheduledTaskId(round,scope.creatorId,'basic');
-    await assertScheduledMediaBinding(tx,{round,creatorId:scope.creatorId,taskId:scope.taskId,basicId,authorId:rows[0].author,noteId:noteKey,batch});
+    const basicId=typeof round==='string'?scheduledTaskId(round,scope.creatorId,'basic'):scope.taskId;
+    if(typeof round==='string')await assertScheduledMediaBinding(tx,{round,creatorId:scope.creatorId,taskId:scope.taskId,basicId,authorId:rows[0].author,noteId:noteKey,batch});
+    else await assertManualMediaBinding(tx,{creatorId:scope.creatorId,taskId:scope.taskId,authorId:rows[0].author,noteId:noteKey});
     const basic=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${scope.creatorId}`;
     if(basic.length!==1)return bad();let slot:any;try{slot=JSON.parse(basic[0].document).mediaManifests?.[noteKey];}catch{return bad();}
     if(slot?.manifest?.authorId!==rows[0].author||slot?.manifest?.noteId!==tuple[2]||!Array.isArray(slot?.manifest?.images)||!slot.manifest.images.some((image:any)=>image.resourceKey===scope.target))return bad();

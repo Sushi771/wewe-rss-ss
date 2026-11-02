@@ -14,7 +14,7 @@ export function XhsMetricLine({
   if (creator) {
     const fans = snapshot?.values.fans;
     const following = snapshot?.values.following;
-    const collectedAt = snapshot?.collectedAt;
+    const collectedAt = snapshot?.valueCollectedAt?.fans ?? snapshot?.collectedAt;
     const date = collectedAt != null && Number.isFinite(new Date(collectedAt).getTime())
       ? new Date(collectedAt).toLocaleString() : null;
     return (
@@ -28,10 +28,15 @@ export function XhsMetricLine({
   const fields = creator
     ? { fans: '粉丝', following: '关注' }
     : { likes: '赞', collects: '收藏', shares: '分享', comments: '评论' };
+  const fieldTimes = snapshot && Object.keys(fields)
+    .filter(key => snapshot.values[key] != null)
+    .map(key => snapshot.valueCollectedAt?.[key] ?? snapshot.collectedAt)
+    .filter(value => Number.isFinite(value) && value > 0);
+  const oldestValueAt = fieldTimes?.length ? Math.min(...fieldTimes) : snapshot?.collectedAt;
   return (
     <span
       className="text-default-500 text-xs"
-      title={`历史快照 · ${snapshot ? new Date(snapshot.collectedAt).toLocaleString() : '未保存'} · ${snapshot?.evidence === 'verified-response' ? '已核响应' : '响应契约待核实'}`}
+      title={`历史快照 · ${oldestValueAt ? new Date(oldestValueAt).toLocaleString() : '未保存'} · ${snapshot?.evidence === 'verified-response' ? '已核响应' : '响应契约待核实'}`}
     >
       {Object.entries(fields)
         .filter(

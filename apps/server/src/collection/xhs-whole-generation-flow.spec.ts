@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { AsyncResource } from 'node:async_hooks';
 import { createRedbookHttpTransport } from './xhs-http-transport';
+import * as signing from './redbook-vendor/signing';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import { RedbookPauseError } from './redbook-client';
@@ -610,7 +611,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
     directory(['note','safe']);const normal=api.getMockImplementation()!;
     api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
-    await whole.prepareGeneration(input);const id=(await read()).generation.id;
+    await whole.prepareGeneration(input);const limited=await read(),id=limited.generation.id;limited.sourceGrant.used.media=limited.sourceGrant.limits.media;await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(limited)} WHERE id='job'`;
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
     const job=await read(),task=(await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask}`)[0].document;
     const saved=JSON.parse(task).mediaManifests[safe];expect(saved.state).toBe('pending');expect(saved.manifest.images).toHaveLength(1);
@@ -782,7 +783,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     const afterChildren=await db.$queryRaw<Array<{n:bigint}>>`SELECT COUNT(*) AS n FROM xhs_subscription_tasks WHERE creator_id='creator'`;expect(Number(afterChildren[0].n)-Number(beforeChildren[0].n)).toBe(1);
     expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
   }, 40000);
-  it('explicitly resumes selected media without repeating detail and refuses the historical unknown',async()=>{
+  it('automatically saves selected media and later resumes without repeating it or the historical unknown',async()=>{
     const safe=JSON.stringify(['xiaohongshu','note','safe']);
     await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
     directory(['note','safe']);const normal=api.getMockImplementation()!;
@@ -791,7 +792,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
     await whole.prepareGeneration(input);const id=(await read()).generation.id;
     await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
-    const before=await read();expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();
+    const before=await read();expect(requestedDetails()).toEqual(['safe']);expect(media).toHaveBeenCalledTimes(1);expect(before.generation.mediaResults[safe]).toBe('complete');
     await expect(whole.resumeMedia({jobId:'job',generationId:id,noteIds:[noteKey]})).rejects.toThrow();
     await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[safe]});await drain();
     const after=await read();expect(after.state).toBe('partial');expect(after.generation.mediaResults[safe]).toBe('complete');
@@ -801,6 +802,52 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     await whole.resumeMedia({jobId:'job',generationId:id,noteIds:[safe]});await drain();expect(media).toHaveBeenCalledTimes(1);
     await assertUnknownPreserved();
   }, 40000);
+  it('does not start automatic media when its generation limit is exhausted, including after restart',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
+    await whole.prepareGeneration(input);const prepared=await read(),id=prepared.generation.id;
+    prepared.sourceGrant.used.media=prepared.sourceGrant.limits.media;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(prepared)} WHERE id='job'`;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();expect((await read()).generation.basicCompleted).toBe(true);await assertUnknownPreserved();
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();await drain();
+    expect(requestedDetails()).toEqual(['safe']);expect(media).not.toHaveBeenCalled();await assertUnknownPreserved();
+  },40000);
+  it('continues whole-generation media for a completed note after a confirmed pre-dispatch detail failure',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),ids=['safe-a','safe-b'];
+    for(const id of ids)await db.xhsNote.create({data:{id:key(id),creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note',...ids]);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
+    const originalSign=signing.signMainApi;let failed=false;jest.spyOn(signing,'signMainApi').mockImplementation((...args)=>{if(args[0]==='POST'&&!failed){failed=true;throw Error('synthetic signing failure');}return originalSign(...args);});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:ids.map(key)});await drain();
+    const after=await read();expect(requestedDetails()).toEqual(['safe-b']);expect(media).toHaveBeenCalledTimes(1);expect(after.generation.basicCompleted).toBe(false);expect(after.generation.missingIds).toContain(key('safe-a'));expect(after.generation.mediaResults[key('safe-b')]).toBe('complete');await assertUnknownPreserved();
+  },40000);
+  it('stops automatic whole media at its remaining budget and does not dispatch on restart',async()=>{
+    const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]),ids=['safe-a','safe-b'];
+    for(const id of ids)await db.xhsNote.create({data:{id:key(id),creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note',...ids]);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:`https://sns-webpic.xhscdn.com/${JSON.parse(req.body).source_note_id}.png?token=synthetic-secret`}];return result;});
+    const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=','base64');media.mockImplementation(async()=>new Response(png,{status:200,headers:{'content-type':'image/png'}}));
+    await whole.prepareGeneration(input);const prepared=await read(),id=prepared.generation.id;prepared.sourceGrant.used.media=prepared.sourceGrant.limits.media-1;
+    await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(prepared)} WHERE id='job'`;
+    await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:ids.map(key)});await drain();
+    expect(media).toHaveBeenCalledTimes(1);const before=await read();expect(before.sourceGrant.used.media).toBe(before.sourceGrant.limits.media);expect(before.state).not.toBe('completed');const risk=await db.$queryRaw<Array<{code:string|null}>>`SELECT code FROM xhs_source_risk WHERE id='source'`;expect(risk[0].code).not.toBe('XHS_SOURCE_RISK_REVIEW_REQUIRED');await assertUnknownPreserved();
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();await drain();expect(media).toHaveBeenCalledTimes(1);await assertUnknownPreserved();
+  },40000);
+  it('does not replay an unknown automatic media request after restart',async()=>{
+    const safe=JSON.stringify(['xiaohongshu','note','safe']);
+    await db.xhsNote.create({data:{id:safe,creatorId:'creator',title:'listed',publishTime:0,kind:'image-text',status:'listed'}});
+    directory(['note','safe']);const normal=api.getMockImplementation()!;
+    api.mockImplementation(async(req:any)=>{const result=await normal(req);if(new URL(req.url).pathname.endsWith('/feed'))result.body.data.items[0].note_card.image_list=[{url_default:'https://sns-webpic.xhscdn.com/a.png?token=synthetic-secret'}];return result;});
+    media.mockImplementation(async()=>{throw Error('synthetic unknown after media entry');});
+    await whole.prepareGeneration(input);const id=(await read()).generation.id;await whole.executeGeneration({jobId:'job',generationId:id,confirmUnknown:true,selectedIds:[safe]});await drain();
+    expect(media).toHaveBeenCalledTimes(1);const before=await read();expect(before.state).not.toBe('completed');expect(before.generation.activeFence?.state).toBe('started');
+    await whole.onModuleDestroy();await subscriptions.onModuleDestroy();runtime.onModuleDestroy();services();await whole.onModuleInit();await drain();
+    expect(media).toHaveBeenCalledTimes(1);expect(requestedDetails()).toEqual(['safe']);await assertUnknownPreserved();
+  },40000);
   it('repairs only eight selected missing basics and reuses fourteen complete notes',async()=>{
     await useDurableWal();
     const key=(v:string)=>JSON.stringify(['xiaohongshu','note',v]), names=Array.from({length:22},(_,i)=>'repair-'+String(i).padStart(2,'0'));

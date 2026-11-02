@@ -294,6 +294,14 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
     })();
     return resetPromise;
   }, 40000);
+  it('retains the last real fan count and timestamp when a newer profile is unknown', async () => {
+    const id='synthetic-fan-preserve';
+    await saveXhsMetrics(db,'creator',id,{values:{fans:82,following:null},collectedAt:100,contract:'synthetic',evidence:'source-only'});
+    await saveXhsMetrics(db,'creator',id,{values:{fans:null,following:null},collectedAt:200,contract:'synthetic',evidence:'source-only'});
+    expect((await readXhsMetrics(db,'creator')).get(id)).toMatchObject({values:{fans:82},collectedAt:100});
+    await saveXhsMetrics(db,'creator',id,{values:{fans:0,following:null},collectedAt:300,contract:'synthetic',evidence:'source-only'});
+    expect((await readXhsMetrics(db,'creator')).get(id)).toMatchObject({values:{fans:0},collectedAt:300});
+  });
   afterEach(async () => {
     // A hook deadline is not cancellation. Keep its failure, but join reset
     // before another fixture or final disconnect can use the same connection.

@@ -2175,7 +2175,7 @@ export class TrpcRouter {
       .input(z.object({ id: z.string().min(1).max(128), scope: z.enum(['recent','all','selected']).optional(), noteIds: z.array(z.string().min(1).max(300)).min(1).max(1000).optional() }).strict())
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSubscriptions!.refreshFull({ ...input, scope: input.scope === 'selected' ? 'selected' : 'all', basicOnly: true, reuseCompleteCache: true });
+        return this.xhsSubscriptions!.refreshFull({ ...input, scope: input.scope ?? 'all', basicOnly: true, reuseCompleteCache: false });
       }),
     refresh: this.trpcService.protectedProcedure
       .input(

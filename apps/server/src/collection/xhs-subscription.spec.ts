@@ -348,6 +348,42 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       service.subscribe({ resolutionId: 'expired' }),
     ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
   });
+  it('archives an eligible manual refresh using the real local saver',async()=>{
+    const taskId='manual-archive-test',noteId=noteKey('manual-archive-test');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual synthetic',publishTime:1760000000,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const result=await (service as any).archiveTask(taskId,creatorId);expect(result).toEqual({incomplete:false});
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:false});
+  },40000);
+  it('retains a manual archive conflict as incomplete',async()=>{
+    const taskId='manual-archive-conflict',noteId=noteKey('manual-archive-conflict'),target=path.join(root,'synthetic-conflict-original.txt');
+    await fs.writeFile(target,'synthetic original');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual synthetic',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    service.bindLocalSaver(async()=>root,async()=>({mediaComplete:true,supplement:{status:'conflict-version'}} as any));
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:true});expect(await fs.readFile(target,'utf8')).toBe('synthetic original');
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'conflict'});
+  },40000);
+  it('reconciles a manual archive after the saved file acknowledgement is lost',async()=>{
+    const taskId='manual-archive-interrupt',noteId=noteKey('manual-archive-interrupt');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual interrupted synthetic',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const realSave=(service as any).save;let first=true,receiptPath='';
+    const save=jest.fn(async(...args:any[])=>{const result=await realSave(...args);if(first){first=false;receiptPath=result.markdownPath;throw Error('synthetic lost acknowledgement');}expect(result.alreadySaved).toBe(true);return result;});
+    service.bindLocalSaver(async()=>root,save);
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:true});
+    expect((await fs.stat(receiptPath)).isFile()).toBe(true);
+    let rows=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(rows[0].state).toBe('partial');expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'failed'});
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(2);
+    rows=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+  },40000);
   it('does not acknowledge a scheduled archive if note data changes during saving',async()=>{
     const round='2026-11-01/09:15',taskId=scheduledTaskId(round,creatorId,'basic'),noteId=noteKey('archive-race');
     await db.xhsNote.create({data:{id:noteId,creatorId,title:'Before',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<p>body</p>'}});
@@ -362,14 +398,14 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
       destination=path.join(root,'other-synthetic');expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(3);
       await db.xhsNote.update({where:{id:noteId},data:{title:'More'}});save.mockResolvedValueOnce({alreadySaved:false,mediaComplete:false});
-      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(4);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(5);
       await db.xhsNote.update({where:{id:noteId},data:{title:'Conflict'}});
       (save as any).mockResolvedValueOnce({alreadySaved:true,mediaComplete:true,supplement:{status:'conflict-version'}});
       expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});
       row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
       expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'conflict'});
       expect((await service.task({taskId})).archiveConflicts).toBe(1);
-      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(5);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(6);
     } finally {await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;}
   },40000);
   it('persists a checked avatar through subscription and preserves it when a later source has none', async () => {

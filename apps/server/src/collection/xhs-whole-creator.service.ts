@@ -52,7 +52,7 @@ type Job = {
   lastPauseCode?: string;
   currentNote?: string;
   stage?: string;
-  mediaRequest?: { taskId:string; noteIds:string[] };
+  mediaRequest?: { taskId:string; noteIds:string[]; autoBounded?:true };
   basicRepairRequest?: { noteIds:string[]; taskId?:string; bounds?:{profile:number;list:number;detail:number;media:number;used:{profile:number;list:number;detail:number;media:number};detailIds:string[]} };
   sourceGrant?: {
     creatorId: string;
@@ -873,6 +873,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       await this.check(job);
       const task = await this.subscriptions.task({ taskId });
       if (!['queued', 'running'].includes(task.state)) {
+        if (job.generation && taskId===job.listTask && task.state==='partial' && task.code==='XHS_LOCAL_PRE_DISPATCH_FAILED' && task.remaining===0) return;
         if (task.state !== 'completed')
           throw new XhsSubscriptionError(task.code ?? 'XHS_LIST_INCOMPLETE');
         return;
@@ -1084,8 +1085,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             });
             cacheComplete=false;return;
           }
-          if (job.mediaRequest) {
-            const request=job.mediaRequest;
+          const executeGenerationMedia=async(request:NonNullable<Job['mediaRequest']>)=>{
             for(const noteId of request.noteIds){
               await this.check(job);
               const rows=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${request.taskId} AND creator_id=${job.creatorId}`;
@@ -1106,6 +1106,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
                 await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(current)} WHERE id=${job.id} AND state='running'`;
               });
             }
+          };
+          if (job.mediaRequest) {
+            await executeGenerationMedia(job.mediaRequest);
             delete job.mediaRequest;
             cacheComplete=false;
             return;
@@ -1168,7 +1171,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             localStage='list-wait';
             await this.waitList(job);
             job.listEnd = true;
-            if (job.generation) job.generation.directoryIds = job.generation.selectedIds ? await this.subscriptions.confirmedSelection({taskId: job.listTask!, creatorId: job.creatorId, noteIds: job.generation.selectedIds, basicOnly: true}) : await this.subscriptions.confirmedDirectory({ taskId: job.listTask! });
+            if (job.generation) job.generation.directoryIds = job.generation.selectedIds ? await this.subscriptions.confirmedSelection({taskId: job.listTask!, creatorId: job.creatorId, noteIds: job.generation.selectedIds, basicOnly: true,allowLocalPartial:true}) : await this.subscriptions.confirmedDirectory({ taskId: job.listTask!,allowLocalPartial:true });
             await this.save(job);
           }
           const cachedNotes = await this.db.xhsNote.findMany({
@@ -1185,10 +1188,32 @@ export class XhsWholeCreatorService implements OnModuleInit {
           }
           for (const note of notes) job.items[note.id] ??= {};
           if (job.generation) {
-            // The child has positively completed both listing and all cache
-            // details; do not manufacture local archive/export receipts.
-            // Basic fields are persisted; media is a separate pending phase.
-            job.generation.basicCompleted = true;
+            // Persist the basic result before binding any media work.  The
+            // existing whole-source owner and phase limits remain authoritative.
+            const child=await this.subscriptions.task({taskId:job.listTask!});
+            job.generation.basicCompleted = child.state==='completed';
+            if(child.state==='partial'){
+              const rows=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask!} AND creator_id=${job.creatorId}`;
+              if(rows.length!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+              const task=JSON.parse(rows[0].document);
+              job.generation.missingIds=[...new Set([...(job.generation.missingIds??[]),...Object.entries(task.items??{}).filter(([,state])=>state==='failed').map(([id])=>id)])];
+            }
+            await this.save(job);
+            const request=await this.write(async tx=>{
+              await this.check(job,tx);
+              const rows=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_whole_creator_jobs WHERE id=${job.id} AND state='running'`;
+              const tasks=await tx.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${job.listTask!} AND creator_id=${job.creatorId}`;
+              if(rows.length!==1||tasks.length!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+              const current=JSON.parse(rows[0].document) as Job,g=current.generation,task=JSON.parse(tasks[0].document);
+              if(!g||g.id!==job.generation!.id||!generationMatches(current)||!generationReviewSettled(current)||activeWholeFence(current)||!current.listEnd||current.listTask!==job.listTask||!Array.isArray(g.directoryIds)||!current.sourceGrant||current.mediaRequest)throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
+              const excluded=new Set([g.origin.fence,...(g.reviews??[]).map((r:any)=>r.fence)].filter((f:any)=>typeof f?.noteId==='string').map((f:any)=>JSON.stringify(['xiaohongshu','note',f.noteId])));
+              const noteIds=g.directoryIds.filter((noteId:string)=>!excluded.has(noteId)&&task.items?.[noteId]==='completed'&&task.mediaManifests?.[noteId]?.manifest).slice(0,1000);
+              if(!noteIds.length || !current.sourceGrant.phases.includes('detail') || (current.sourceGrant.limits?.media??0)<=(current.sourceGrant.used?.media??0))return undefined;
+              current.mediaRequest={taskId:job.listTask!,noteIds,autoBounded:true};
+              if(await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(current)},updated_at=${BigInt(Date.now())} WHERE id=${job.id} AND state='running' AND document=${rows[0].document}`!==1)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+              return current.mediaRequest;
+            });
+            if(request){job.mediaRequest=request;await executeGenerationMedia(request);delete job.mediaRequest;}
             cacheComplete = false;
             return;
           }

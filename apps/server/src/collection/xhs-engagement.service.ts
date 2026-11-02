@@ -145,7 +145,7 @@ export class XhsEngagementService {
     const rows=await this.db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${creatorId}`;
     if(rows.length!==1)return {pending:false,incomplete:true};
     let basic:any;try{basic=JSON.parse(rows[0].document);}catch{return {pending:false,incomplete:true};}
-    const itemPartial=rows[0].state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN'].includes(basic.code) && basic.remaining===0;
+    const itemPartial=rows[0].state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(basic.code) && basic.remaining===0;
     const historyPartial=rows[0].state==='partial' && basic.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' && !basic.failed;
     if(basic.creatorId!==creatorId||basic.taskId!==basicId||basic.schedule?.round!==round||basic.schedule?.phase!=='basic'||!Array.isArray(basic.noteIds)||!['completed','partial'].includes(rows[0].state)|| (rows[0].state==='partial'&&!itemPartial&&!historyPartial))return {pending:false,incomplete:true};
     const excluded=new Set(Array.isArray(basic.historyExcludedIds)?basic.historyExcludedIds:[]);

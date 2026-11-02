@@ -15,6 +15,13 @@ export async function saveXhsMetrics(
 ) {
   if (!snapshot) return;
   let document: XhsDiagnosedMetrics = snapshot;
+  if (kind === 'creator' && !(Number.isSafeInteger(snapshot.values.fans) && (snapshot.values.fans as number) >= 0)) {
+    const rows = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind=${kind} AND owner_id=${owner}`;
+    if (rows.length) {
+      const previous: XhsMetricSnapshot = JSON.parse(rows[0].document);
+      if (Number.isSafeInteger(previous.values?.fans) && (previous.values.fans as number) >= 0) return;
+    }
+  }
   if (kind === 'note') {
     const rows = await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind=${kind} AND owner_id=${owner}`;
     const previous: XhsDiagnosedMetrics | undefined = rows.length ? JSON.parse(rows[0].document) : undefined;
