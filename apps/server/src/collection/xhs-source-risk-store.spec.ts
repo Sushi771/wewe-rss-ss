@@ -15,9 +15,16 @@ import { XhsEngagementService } from './xhs-engagement.service';
 import { XhsScheduledRunner } from './xhs-scheduled-runner';
 import { extractXhsMediaManifest } from './xhs-native-media';
 import { scheduledTaskId } from './xhs-scheduled-admission';
-import { RedbookPauseError } from './redbook-client';
+import { RedbookClient, RedbookPauseError } from './redbook-client';
+import * as signing from './redbook-vendor/signing';
 
 describe('durable synthetic source risk fence', () => {
+  it('does not treat a transport-thrown configuration error as undispatched', async () => {
+    const transport=jest.fn(async()=>{throw new RedbookPauseError('configuration')});
+    const client=new RedbookClient({transport,cookies:()=>({a1:'synthetic-a1',web_session:'synthetic-session'})});
+    await expect(client.getNoteById('synthetic-note','synthetic-token')).rejects.toMatchObject({reason:'transport'});
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
   let db: PrismaClient, folder: string;
   beforeAll(async () => {
     folder = await fs.mkdtemp(path.join(os.tmpdir(), 'xhs-risk-synthetic-'));
@@ -83,22 +90,36 @@ describe('durable synthetic source risk fence', () => {
     await expect(run()).rejects.toThrow('XHS_MEDIA_RESPONSE_INVALID');const rows=await db.$queryRaw<Array<{state:string;code:string}>>`SELECT state,code FROM xhs_source_risk WHERE id='source'`;
     expect(rows[0]).toMatchObject({state:'blocked',code:'XHS_SOURCE_RISK_REVIEW_REQUIRED'});await expect(run()).rejects.toThrow();expect(media).toHaveBeenCalledTimes(1);expect(JSON.stringify(rows)).not.toContain('verification');runtime.onModuleDestroy();
   },20000);
-  it.each(['parse','unknown'] as const)('keeps a %s detail incomplete and saves the next detail using the real runtime',async(mode)=>{
+  it.each(['parse','unknown','unknown-full'] as const)('keeps a %s detail incomplete and saves the next detail using the real runtime',async(mode)=>{
     const creatorId='parse-creator',author='parse-author',keys=['parse-a','parse-b'].map(n=>JSON.stringify(['xiaohongshu','note',n]));
     await db.xhsCreator.create({data:{id:creatorId,externalAuthorId:author,profileUrl:'https://example.invalid/parse-author',displayName:'Synthetic'}});
     for(const id of keys)await db.xhsNote.create({data:{id,creatorId,title:'Old',publishTime:0,kind:'image-text',status:'listed'}});
-    const task:any={taskId:'parse-task',creatorId,kind:'list',state:'queued',collectionStage:'details',collectDetails:true,basicOnly:true,reuseCompleteCache:false,noteIds:keys,items:{},total:2,completed:0,skipped:0,failed:0,remaining:2};
+    const task:any={taskId:'parse-task',creatorId,kind:'list',state:'queued',collectionStage:'details',collectDetails:true,basicOnly:mode!=='unknown-full',reuseCompleteCache:false,noteIds:keys,items:{},total:2,completed:0,skipped:0,failed:0,remaining:2};
     await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-task',${creatorId},'queued',${JSON.stringify(task)},1)`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
-    const api=jest.fn(async(request:any)=>{const note=JSON.parse(request.body).source_note_id;if(note==='parse-a'&&mode==='unknown')throw Error('synthetic detail connection lost');return {status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:note,note_card:{note_id:note,user:{user_id:author},type:note==='parse-a'?'unrecognized':'normal',time:1760000000000,title:'New',desc:'saved body',image_list:[],interact_info:{liked_count:'0',comment_count:'0'}}}]}}};});
+    const api=jest.fn(async(request:any)=>{const note=JSON.parse(request.body).source_note_id;if(note==='parse-a'&&mode.startsWith('unknown'))throw Error('synthetic detail connection lost');return {status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:note,note_card:{note_id:note,user:{user_id:author},type:note==='parse-a'&&mode==='parse'?'unrecognized':'normal',time:1760000000000,title:'New',desc:'saved body',image_list:[],interact_info:{liked_count:'0',comment_count:'0'}}}]}}};});
     const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
     for(const note of ['parse-a','parse-b'])(runtime as any).adapter.tokens.set(JSON.stringify([author,note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});
     const service:any=new XhsSubscriptionService(db as any,runtime);service.write=async(_bytes:number,fn:any)=>db.$transaction(fn);await service.run(task);
-    expect(api).toHaveBeenCalledTimes(2);expect(task).toMatchObject({state:'partial',failed:1,completed:1,code:mode==='parse'?'XHS_DETAIL_PARSE_FAILED':'XHS_DETAIL_OUTCOME_UNKNOWN',items:{[keys[0]]:'failed',[keys[1]]:'completed'},basicResults:{[keys[0]]:'missing'}});
+    expect(api).toHaveBeenCalledTimes(2);expect(task).toMatchObject({state:'partial',failed:1,completed:1,code:mode==='parse'?'XHS_DETAIL_PARSE_FAILED':'XHS_DETAIL_OUTCOME_UNKNOWN',items:{[keys[0]]:'failed',[keys[1]]:'completed'},...(mode==='unknown-full'?{}:{basicResults:{[keys[0]]:'missing'}})});
     const notes=await db.xhsNote.findMany({where:{creatorId},orderBy:{id:'asc'}});expect(notes[0].contentHtml).toBeNull();expect(notes[1].contentHtml).toContain('saved body');const risk=await db.$queryRaw<any[]>`SELECT state FROM xhs_source_risk WHERE id='source'`;expect(risk[0].state).toBe('clear');
     const metrics=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${keys[1]}`;expect(JSON.parse(metrics[0].document).values).toMatchObject({likes:0,comments:0,collects:null,shares:null});
-    if(mode==='unknown'){const next={...task,taskId:'parse-task-2',state:'queued',noteIds:[keys[0]],items:{},basicResults:{},total:1,completed:0,skipped:0,failed:0,remaining:1,code:undefined};await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-task-2',${creatorId},'queued',${JSON.stringify(next)},1)`;await service.run(next);expect(next).toMatchObject({state:'partial',failed:1,code:'XHS_DETAIL_OUTCOME_UNKNOWN'});expect(api).toHaveBeenCalledTimes(2);}
+    if(mode.startsWith('unknown'))expect(task.sourceFailures[keys[0]]).toEqual({phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:true});
+    if(mode.startsWith('unknown')){const next={...task,taskId:'parse-task-2',state:'queued',noteIds:[keys[0]],items:{},basicResults:{},total:1,completed:0,skipped:0,failed:0,remaining:1,code:undefined};await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-task-2',${creatorId},'queued',${JSON.stringify(next)},1)`;await service.run(next);expect(next).toMatchObject({state:'partial',failed:1,code:'XHS_DETAIL_OUTCOME_UNKNOWN'});expect(api).toHaveBeenCalledTimes(2);}
     runtime.onModuleDestroy();
+  },40000);
+  it.each(['sign','configuration'] as const)('records a %s failure before dispatch and continues the next normal detail',async(mode)=>{
+    const creatorId='parse-creator',author='parse-author',first=mode==='configuration'?'invalid!':'parse-a',keys=[first,'parse-b'].map(n=>JSON.stringify(['xiaohongshu','note',n]));
+    await db.xhsCreator.create({data:{id:creatorId,externalAuthorId:author,profileUrl:'https://example.invalid/parse-author',displayName:'Synthetic'}});
+    for(const id of keys)await db.xhsNote.create({data:{id,creatorId,title:'Old',publishTime:0,kind:'image-text',status:'listed'}});
+    const task:any={taskId:'parse-task',creatorId,kind:'list',state:'queued',collectionStage:'details',collectDetails:true,basicOnly:false,noteIds:keys,items:{},total:2,completed:0,skipped:0,failed:0,remaining:2};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('parse-task',${creatorId},'queued',${JSON.stringify(task)},1)`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+    const api=jest.fn(async(request:any)=>({status:200,url:request.url,body:{success:true,code:0,data:{items:[{id:'parse-b',note_card:{note_id:'parse-b',user:{user_id:author},type:'normal',time:1760000000000,title:'New',desc:'saved body',image_list:[],interact_info:{liked_count:'0',comment_count:'0'}}}]}}}));
+    const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));bindXhsSourceTotalBudget(db as any,runtime);await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});
+    for(const note of [first,'parse-b'])(runtime as any).adapter.tokens.set(JSON.stringify([author,note]),{token:'synthetic-token',source:'pc_user',expiresAt:Date.now()+60000});
+    const sign=mode==='sign'?jest.spyOn(signing,'signMainApi').mockImplementationOnce(()=>{throw Error('synthetic private signing failure')}):undefined;
+    try {const service:any=new XhsSubscriptionService(db as any,runtime);service.write=async(_bytes:number,fn:any)=>db.$transaction(fn);await service.run(task);expect(api).toHaveBeenCalledTimes(1);expect(task.sourceFailures[keys[0]]).toEqual({phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false});expect(task.items[keys[0]]).toBe('failed');const rows=await db.$queryRaw<any[]>`SELECT state FROM xhs_source_risk WHERE id='source'`;expect(rows[0].state).toBe('clear');const saved=await db.$queryRaw<any[]>`SELECT document FROM xhs_subscription_tasks WHERE id='parse-task'`;expect(JSON.parse(saved[0].document).sourceFailures[keys[0]]).toEqual(task.sourceFailures[keys[0]]);expect(saved[0].document).not.toContain('synthetic private signing failure');}finally{sign?.mockRestore();runtime.onModuleDestroy();}
   },40000);
   it('isolates a durable unknown list request across accounts and never replays it after restart',async()=>{
     const people=[['task-a','creator-a','author-a'],['task-b','creator-b','author-b'],['task-c','creator-c','author-c'],['task-d','creator-d','author-d']];

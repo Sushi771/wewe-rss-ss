@@ -15,7 +15,7 @@ import { privateOnlineMode } from '../private-access';
 import {
   RedbookClient,
   redbookResponseReason,
-  RedbookPauseError,
+  RedbookPauseError, RedbookPreDispatchError,
   RedbookTransport,
 } from './redbook-client';
 import { allowedRedbookMediaUrl, RedbookMediaTransport } from './redbook-response';
@@ -930,7 +930,7 @@ export class XhsSubscriptionRuntime
             : error;
         const code =
           this.stopCode ??
-          ((known instanceof XhsSourceParseError) ||
+          ((known instanceof RedbookPreDispatchError) || (known instanceof RedbookPauseError && known.reason==='configuration') || (known instanceof XhsSourceParseError) ||
           (admission?.failure === known &&
             known instanceof XhsSubscriptionError &&
             known.code === 'XHS_TASK_CANCELLED') ||
@@ -962,6 +962,7 @@ export class XhsSubscriptionRuntime
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       if(isolatedPhase)throw new XhsTaskSourceUnknownError(isolatedPhase);
+      if(error instanceof RedbookPreDispatchError || (error instanceof RedbookPauseError && error.reason==='configuration'))throw new XhsPreDispatchError('XHS_LOCAL_PRE_DISPATCH_FAILED');
       // RedbookClient intentionally wraps transport failures. Preserve only the
       // local pre-dispatch admission result, never provider text or responses.
       if (!this.stopCode && admission?.failure) throw admission.failure;

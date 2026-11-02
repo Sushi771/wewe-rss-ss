@@ -20,6 +20,7 @@ export class XhsTaskSourceUnknownError extends XhsSubscriptionError {
 }
 const codes = new Set([
   'XHS_LOCAL_PROGRAM_ERROR',
+  'XHS_LOCAL_PRE_DISPATCH_FAILED',
   'XHS_LOCAL_OPERATION_FAILED',
   'XHS_RESUME_DIRECTORY_CHANGED',
   'XHS_SAVE_DIRECTORY_SELECTION_REQUIRED',

@@ -25,6 +25,11 @@ export class RedbookPauseError extends Error {
   }
 }
 
+/** A local error observed before invoking the source transport. */
+export class RedbookPreDispatchError extends Error {
+  constructor() { super('XHS_LOCAL_PRE_DISPATCH_FAILED'); }
+}
+
 export interface RedbookRequest {
   url: string;
   method: 'GET' | 'POST';
@@ -199,7 +204,10 @@ export class RedbookClient {
     if (!this.options.transport || !this.options.cookies)
       throw new RedbookPauseError('configuration');
     let response: RedbookResponse;
-    const uri = method === 'GET' ? buildGetUri(path, params) : path;
+    let uri: string;
+    try { uri = method === 'GET' ? buildGetUri(path, params) : path; }
+    catch { throw new RedbookPreDispatchError(); }
+    let invoked = false;
     try {
       signal?.throwIfAborted();
       const cookies = { ...this.options.cookies() };
@@ -220,7 +228,7 @@ export class RedbookClient {
           throw new RedbookPauseError('authentication');
         }
       }
-      response = await this.options.transport({
+      const request: RedbookRequest = {
         url: HOST + uri,
         method,
         headers: {
@@ -238,10 +246,16 @@ export class RedbookClient {
         timeoutMs: 15_000,
         maxResponseBytes: 8 * 1024 * 1024,
         ...(signal ? { signal } : {}),
-      });
+      };
+      invoked = true;
+      response = await this.options.transport(request);
       signal?.throwIfAborted();
     } catch (error) {
-      if (error instanceof RedbookPauseError) throw error;
+      if (error instanceof RedbookPauseError) {
+        if (invoked && error.reason === 'configuration') throw new RedbookPauseError('transport');
+        throw error;
+      }
+      if (!invoked) throw new RedbookPreDispatchError();
       throw new RedbookPauseError('transport');
     }
     if (response.url !== HOST + uri) throw new RedbookPauseError('transport');

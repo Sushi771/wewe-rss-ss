@@ -31,7 +31,7 @@ import type { XhsMediaManifest } from './xhs-native-media';
 import { verifiedDownloadBody } from '../article-verified-download';
 import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
-import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsPreDispatchError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
 import { saveXhsMetrics } from './xhs-engagement-store';
 import { selectMissingBasic } from './xhs-missing-basic';
 import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
@@ -123,6 +123,7 @@ type Task = XhsSubscriptionTask & {
   selectionComplete?: boolean;
   basicOnly?: boolean;
   basicResults?: Record<string, 'complete' | 'missing'>;
+  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:true}>;
   mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string}>}>;
   reuseCompleteCache?: boolean;
   collectionStage?: 'listing' | 'details';
@@ -1321,6 +1322,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                 const tuple = JSON.parse(id);
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
+                if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
                 await this.withSourceCheckpoint(
                   'detail',
                   creator.externalAuthorId!,
@@ -1483,8 +1485,11 @@ export class XhsSubscriptionService implements OnModuleInit {
             }
           } catch (error) {
             if (!active(t)) break;
-            if(t.basicOnly && t.collectDetails && error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
-              t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+            if(error instanceof XhsPreDispatchError && error.code==='XHS_LOCAL_PRE_DISPATCH_FAILED'){
+              t.failed++;t.items[id]='failed';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+            }
+            if(error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
+              t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:true}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
             t.failed++;
             t.items[id] = 'failed';
