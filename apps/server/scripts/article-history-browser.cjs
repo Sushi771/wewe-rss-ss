@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
+const { createHash } = require('node:crypto');
 const { spawn } = require('node:child_process');
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,6 +49,7 @@ const cdpMethods = new Set([
 const traceEvents = new Set([
   'input',
   'server-ready',
+  'startup-probe',
   'spawn',
   'port-poll',
   'http-start',
@@ -107,11 +109,16 @@ function createBrowserTrace({
       'cpuSystemTicks',
       'rssPages',
       'threads',
+      'browserSizeBytes',
+      'browserModifiedMs',
     ])
       if (Number.isSafeInteger(data[key]) && data[key] >= 0)
         row[key] = data[key];
     for (const key of ['exited', 'profileRemoved'])
       if (typeof data[key] === 'boolean') row[key] = data[key];
+    if (['chrome','edge','chromium','other'].includes(data.browserKind)) row.browserKind=data.browserKind;
+    if (['ok','denied','error'].includes(data.profileWrite)) row.profileWrite=data.profileWrite;
+    if (/^[a-f0-9]{64}$/.test(data.browserSha256 ?? '')) row.browserSha256=data.browserSha256;
     if (cdpMethods.has(data.method)) row.method = data.method;
     if (codes.has(data.code)) row.code = data.code;
     if (
@@ -243,6 +250,19 @@ function createBrowserTrace({
       } catch {} // Diagnostics must never change the validation outcome.
     },
   };
+}
+
+// Only fixed metadata is recorded; paths, filenames, and error text remain private.
+function startupProbe(executable, profile) {
+  const name=path.basename(executable).toLowerCase();
+  const result={browserKind:name==='chrome.exe'||name==='google-chrome'?'chrome':name==='msedge.exe'?'edge':name.startsWith('chromium')?'chromium':'other'};
+  try {const stat=fs.statSync(executable);result.browserSizeBytes=stat.size;result.browserModifiedMs=Math.floor(stat.mtimeMs);if(stat.isFile() && stat.size<=32*1024*1024)result.browserSha256=createHash('sha256').update(fs.readFileSync(executable)).digest('hex');} catch {}
+  const probe=path.join(profile,'.synthetic-write-probe');
+  let created=false;
+  try {fs.writeFileSync(probe,'',{flag:'wx'});created=true;result.profileWrite='ok';}
+  catch(error) {result.profileWrite=['EACCES','EPERM'].includes(error?.code)?'denied':'error';}
+  finally {if(created)try {fs.unlinkSync(probe);} catch {}}
+  return result;
 }
 let trace;
 function abortable(operation, signal) {
@@ -478,6 +498,7 @@ async function main(signal) {
     profile = fs.mkdtempSync(
       path.join(os.tmpdir(), 'article-history-browser-'),
     );
+    if (trace.enabled) trace.record('startup-probe', startupProbe(executable, profile));
     child = spawn(
       executable,
       [
@@ -760,4 +781,4 @@ if (require.main === module) {
       }
     });
 }
-module.exports = { waitForDevToolsPort, diagnostic, createBrowserTrace };
+module.exports = { waitForDevToolsPort, diagnostic, createBrowserTrace, startupProbe };
