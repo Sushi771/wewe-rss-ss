@@ -5,7 +5,7 @@ import { scheduledTaskId } from './xhs-scheduled-admission';
 import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
-export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;confirmedResponse?:boolean;contextRestore?:boolean};
+export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;confirmedResponse?:boolean;contextRestore?:boolean;preflightConfirmed?:boolean};
 const prefix='xhs:dispatch-pending:unknown:';
 const bad=():never=>{throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');};
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');
@@ -18,6 +18,14 @@ export const taskUnknownMarker=(scope:TaskSourceScope)=>prefix+scope.fingerprint
 export async function hasTaskDetailUnknown(tx:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteId:string) {
   const targetHash=hash(noteId),cursorHash=hash(''),fp=taskSourceFingerprint(creatorId,'detail',noteId,cursorHash),marker=prefix+fp;
   const rows=await tx.$queryRaw<Array<{id:string}>>`SELECT t.id FROM xhs_subscription_tasks t JOIN xhs_request_budgets b ON b.id=${marker} AND b.used=1 AND b.request_limit=1, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j WHERE t.creator_id=${creatorId} AND json_extract(j.value,'$.marker')=${marker} AND json_extract(j.value,'$.fingerprint')=${fp} AND json_extract(j.value,'$.targetHash')=${targetHash} AND json_extract(j.value,'$.cursorHash')=${cursorHash} AND json_extract(j.value,'$.phase')='detail' AND json_extract(j.value,'$.outcome')='unknown' AND json_extract(j.value,'$.classification')='request-outcome-unknown' AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id LIMIT 1`;
+  return rows.length===1;
+}
+
+/** A locally failed admission is not an unknown remote response, but is held
+ * for review across new tasks using the same legacy-compatible marker. */
+export async function hasTaskDetailLocalReview(tx:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteId:string) {
+  const targetHash=hash(noteId),cursorHash=hash(''),fp=taskSourceFingerprint(creatorId,'detail',noteId,cursorHash),marker=prefix+fp;
+  const rows=await tx.$queryRaw<Array<{id:string}>>`SELECT t.id FROM xhs_subscription_tasks t JOIN xhs_request_budgets b ON b.id=${marker} AND b.used=1 AND b.request_limit=1, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j WHERE t.creator_id=${creatorId} AND json_extract(j.value,'$.marker')=${marker} AND json_extract(j.value,'$.fingerprint')=${fp} AND json_extract(j.value,'$.targetHash')=${targetHash} AND json_extract(j.value,'$.cursorHash')=${cursorHash} AND json_extract(j.value,'$.phase')='detail' AND json_extract(j.value,'$.outcome')='not-dispatched' AND json_extract(j.value,'$.classification')='local-pre-dispatch-review' AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id LIMIT 1`;
   return rows.length===1;
 }
 
@@ -92,6 +100,37 @@ async function taskRow(tx:Tx,scope:TaskSourceScope) {
   return {raw:rows[0].document,task};
 }
 
+/** Bind a detail target to its pending source owner before budget admission. */
+export async function prepareTaskDetailAdmission(tx:Tx,scope:TaskSourceScope) {
+  if(scope.phase!=='detail')return bad();
+  const {raw,task}=await taskRow(tx,scope);
+  if(task.sourceActive)return bad();
+  const risk=await tx.$queryRaw<Array<{owner:string}>>`SELECT owner FROM xhs_source_risk WHERE id='source' AND state='pending' AND owner=${scope.owner}`;
+  if(risk.length!==1)return bad();
+  task.sourcePreflight={fingerprint:scope.fingerprint,phase:'detail',targetHash:hash(scope.target),cursorHash:scope.cursorHash,owner:scope.owner,outcome:'prepared'};
+  if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(task)} WHERE id=${scope.taskId} AND document=${raw}`!==1)return bad();
+}
+
+/** Only a committed preflight and matching pending owner can produce a
+ * no-dispatch review marker. Caller must also prove there is no other pending
+ * dispatch while holding the same transaction. */
+export async function settleTaskDetailPreDispatch(tx:Tx,scope:TaskSourceScope) {
+  if(scope.phase!=='detail')return bad();
+  const {raw,task}=await taskRow(tx,scope),prepared=task.sourcePreflight;
+  if(task.sourceActive||prepared?.outcome!=='prepared'||prepared.phase!=='detail'||prepared.owner!==scope.owner||prepared.fingerprint!==scope.fingerprint||prepared.targetHash!==hash(scope.target)||prepared.cursorHash!==scope.cursorHash)return bad();
+  const risk=await tx.$queryRaw<Array<{owner:string}>>`SELECT owner FROM xhs_source_risk WHERE id='source' AND state='pending' AND owner=${scope.owner} AND code IS NULL AND http_status IS NULL AND endpoint IS NULL`;
+  if(risk.length!==1)return bad();
+  const marker=taskUnknownMarker(scope);
+  if((await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id=${marker}`).length)return bad();
+  if(task.sourceUnknowns!==undefined&&!Array.isArray(task.sourceUnknowns))return bad();
+  const history=task.sourceUnknowns??[];if(history.length>=1000)return bad();
+  history.push({marker,fingerprint:scope.fingerprint,phase:'detail',targetHash:hash(scope.target),cursorHash:scope.cursorHash,outcome:'not-dispatched',classification:'local-pre-dispatch-review',taskId:scope.taskId,creatorId:scope.creatorId,owner:scope.owner});
+  task.sourceUnknowns=history;delete task.sourcePreflight;
+  await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES(${marker},1,1,0,0)`;
+  if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(task)} WHERE id=${scope.taskId} AND document=${raw}`!==1)return bad();
+  if(await tx.$executeRaw`UPDATE xhs_source_risk SET state='clear',owner=NULL,code=NULL,http_status=NULL,endpoint=NULL,updated_at=${BigInt(Date.now())} WHERE id='source' AND state='pending' AND owner=${scope.owner} AND code IS NULL AND http_status IS NULL AND endpoint IS NULL`!==1)return bad();
+}
+
 /** A response stream failed after headers. The resource store must already
  * contain its own unknown receipt before this can release the shared owner. */
 export async function settleTaskMediaStreamUnknown(tx:Tx,scope:TaskSourceScope) {
@@ -118,9 +157,9 @@ export async function verifiedUnknownMarkers(tx:Tx,scope:TaskSourceScope):Promis
   if(risk.length!==1)return bad();
   const markers=await tx.$queryRaw<Array<{id:string;used:number;request_limit:number}>>`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE ${prefix+'%'}`;
   if(!markers.length)return [];
-  const rows=await tx.$queryRaw<Array<{id:string;creator_id:string;entry:string}>>`SELECT t.id,t.creator_id,j.value AS entry FROM xhs_subscription_tasks t, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j JOIN xhs_request_budgets b ON b.id=json_extract(j.value,'$.marker') AND b.used=1 AND b.request_limit=1 WHERE b.id LIKE ${prefix+'%'} AND json_extract(j.value,'$.outcome')='unknown' AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id AND json_extract(t.document,'$.creatorId')=t.creator_id`;
+  const rows=await tx.$queryRaw<Array<{id:string;creator_id:string;entry:string}>>`SELECT t.id,t.creator_id,j.value AS entry FROM xhs_subscription_tasks t, json_each(CASE WHEN json_valid(t.document) THEN t.document ELSE '{}' END,'$.sourceUnknowns') j JOIN xhs_request_budgets b ON b.id=json_extract(j.value,'$.marker') AND b.used=1 AND b.request_limit=1 WHERE b.id LIKE ${prefix+'%'} AND json_extract(j.value,'$.outcome') IN ('unknown','not-dispatched') AND json_extract(j.value,'$.taskId')=t.id AND json_extract(j.value,'$.creatorId')=t.creator_id AND json_extract(t.document,'$.creatorId')=t.creator_id`;
   const counts=new Map<string,number>();
-  for(const row of rows){let entry:any;try{entry=JSON.parse(row.entry);}catch{return bad();}const fp=entry.fingerprint;if(typeof fp==='string' && entry.marker===prefix+fp && entry.classification==='request-outcome-unknown' && ['profile','list','detail','media','comments','replies'].includes(entry.phase)&&/^[a-f0-9]{64}$/.test(entry.targetHash??'')&&/^[a-f0-9]{64}$/.test(entry.cursorHash??'')&&fingerprint(row.creator_id,entry.phase,entry.targetHash,entry.cursorHash)===fp)counts.set(entry.marker,(counts.get(entry.marker)??0)+1);}
+  for(const row of rows){let entry:any;try{entry=JSON.parse(row.entry);}catch{return bad();}const fp=entry.fingerprint;const classification=(entry.outcome==='unknown'&&entry.classification==='request-outcome-unknown')||(entry.outcome==='not-dispatched'&&entry.classification==='local-pre-dispatch-review'&&entry.phase==='detail'&&/^[a-f0-9-]{36}$/.test(entry.owner??''));if(typeof fp==='string' && entry.marker===prefix+fp && classification && ['profile','list','detail','media','comments','replies'].includes(entry.phase)&&/^[a-f0-9]{64}$/.test(entry.targetHash??'')&&/^[a-f0-9]{64}$/.test(entry.cursorHash??'')&&fingerprint(row.creator_id,entry.phase,entry.targetHash,entry.cursorHash)===fp)counts.set(entry.marker,(counts.get(entry.marker)??0)+1);}
   return markers.filter(({id,used,request_limit})=>used===1&&request_limit===1&&/^[a-f0-9]{64}$/.test(id.slice(prefix.length))&&id.slice(prefix.length)!==scope.fingerprint&&counts.get(id)===1).map(({id})=>id);
 }
 
@@ -129,12 +168,13 @@ export async function startTaskSource(tx:Tx,scope:TaskSourceScope) {
   if(task.sourceActive)return bad();
   // Task identity survives task replacement; neither a missing marker nor a
   // new task ID is permission to replay a recorded or unresolved request.
-  const prior=await tx.$queryRaw<Array<{id:string}>>`SELECT t.id FROM xhs_subscription_tasks t WHERE json_valid(t.document) AND (json_extract(t.document,'$.sourceActive.fingerprint')=${scope.fingerprint} OR EXISTS(SELECT 1 FROM json_each(t.document,'$.sourceUnknowns') j WHERE json_extract(j.value,'$.fingerprint')=${scope.fingerprint} AND json_extract(j.value,'$.outcome')='unknown')) LIMIT 1`;
+  const prior=await tx.$queryRaw<Array<{id:string}>>`SELECT t.id FROM xhs_subscription_tasks t WHERE json_valid(t.document) AND (json_extract(t.document,'$.sourceActive.fingerprint')=${scope.fingerprint} OR EXISTS(SELECT 1 FROM json_each(t.document,'$.sourceUnknowns') j WHERE json_extract(j.value,'$.fingerprint')=${scope.fingerprint} AND json_extract(j.value,'$.outcome') IN ('unknown','not-dispatched'))) LIMIT 1`;
   if(prior.length)return bad();
   const existing=await tx.$queryRaw<Array<{id:string}>>`SELECT id FROM xhs_request_budgets WHERE id=${taskUnknownMarker(scope)}`;
   if(existing.length)return bad();
   const risk=await tx.$queryRaw<Array<{owner:string}>>`SELECT owner FROM xhs_source_risk WHERE id='source' AND state='pending' AND owner=${scope.owner}`;
   if(risk.length!==1)return bad();
+  if(task.sourcePreflight?.owner===scope.owner)delete task.sourcePreflight;
   task.sourceActive={fingerprint:scope.fingerprint,phase:scope.phase,targetHash:hash(scope.target),cursorHash:scope.cursorHash,owner:scope.owner,outcome:'started'};
   if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(task)} WHERE id=${scope.taskId} AND document=${raw}`!==1)return bad();
 }

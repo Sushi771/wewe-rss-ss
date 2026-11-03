@@ -93,6 +93,8 @@ export class XhsSubscriptionRuntime
   taskDiagnostic() { const scope=this.taskSourceContext.getStore();return scope?.diagnostic ? {...scope.diagnostic} : undefined; }
   private scopedMediaFailure?: (scope:TaskSourceScope)=>Promise<void>;
   bindScopedMediaFailure(fn:(scope:TaskSourceScope)=>Promise<void>){this.scopedMediaFailure ??= fn;}
+  private scopedLocalAdmissionFailure?: (scope:TaskSourceScope)=>Promise<void>;
+  bindScopedLocalAdmissionFailure(fn:(scope:TaskSourceScope)=>Promise<void>){this.scopedLocalAdmissionFailure ??= fn;}
   private readonly reviewedSingle = new AsyncLocalStorage<{ scope: AttemptScope; started: boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly reviewedContext = new AsyncLocalStorage<{ binding: ContextBinding; started:boolean; dispatch:<T>(operation:()=>Promise<T>)=>Promise<T> }>();
   private readonly budgetScope = new AsyncLocalStorage<RequestAdmission>();
@@ -958,7 +960,11 @@ export class XhsSubscriptionRuntime
       // Preserve its pending owner for local review instead of recording a
       // platform restriction or releasing an unconfirmed reservation.
       const localTransactionUncertain=!!riskOwner && admission?.failureBeforeDispatch===true && admission.failure instanceof Prisma.PrismaClientKnownRequestError && admission.failure.code==='P2028' && !this.stopCode;
-      if(localTransactionUncertain){riskOwner=undefined;this.persistedRisk='XHS_SOURCE_RISK_REVIEW_REQUIRED';}
+      let localAdmissionSettled=false;
+      if(localTransactionUncertain && taskScope && taskScope.current && taskScope.current.owner===riskOwner && taskScope.current.phase==='detail' && taskScope.current.preflightConfirmed===true && taskScope.diagnostic?.guardStage==='source-admission' && this.scopedLocalAdmissionFailure){
+        try{await this.scopedLocalAdmissionFailure(taskScope.current);localAdmissionSettled=true;riskOwner=undefined;this.persistedRisk=undefined;}catch{/* retain pending owner when proof or settlement fails */}
+      }
+      if(localTransactionUncertain && !localAdmissionSettled){riskOwner=undefined;this.persistedRisk='XHS_SOURCE_RISK_REVIEW_REQUIRED';}
       const safeDetailMismatch=!!riskOwner && !this.wholeSourceGroup.getStore() && !this.stopCode && error instanceof XhsDetailIdentityMismatchError && taskScope?.current?.owner===riskOwner && taskScope.current.phase==='detail' && taskScope.current.confirmedResponse===true;
       if (riskOwner) {
         const known =
@@ -999,6 +1005,7 @@ export class XhsSubscriptionRuntime
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       if(isolatedPhase)throw new XhsTaskSourceUnknownError(isolatedPhase);
+      if(localAdmissionSettled)throw new XhsPreDispatchError('XHS_LOCAL_PRE_DISPATCH_FAILED');
       if(safeDetailMismatch)throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED');
       if(error instanceof RedbookPreDispatchError || (error instanceof RedbookPauseError && error.reason==='configuration'))throw new XhsPreDispatchError('XHS_LOCAL_PRE_DISPATCH_FAILED');
       // RedbookClient intentionally wraps transport failures. Preserve only the

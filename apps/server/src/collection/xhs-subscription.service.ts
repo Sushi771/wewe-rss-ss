@@ -4,7 +4,7 @@ import { readHistoryHandoffs } from './xhs-history-handoff';
 import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 import { resumeXhsMedia } from './xhs-native-media';
 import { XhsMediaLocalResponseError } from './xhs-media-error';
-import { hasTaskDetailUnknown, hasTaskMediaUnknown, terminalStartedDetail } from './xhs-task-source-fence';
+import { hasTaskDetailUnknown, hasTaskDetailLocalReview, hasTaskMediaUnknown, terminalStartedDetail } from './xhs-task-source-fence';
 import { xhsMediaTaskStore } from './xhs-media-task-store';
 import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
@@ -117,7 +117,8 @@ type Task = XhsSubscriptionTask & {
   schedule?: {round:string;phase:'basic'|'media';batch?:number};
   scheduledContext?: {authorId:string;used:1;state:'started'|'confirmed'};
   sourceActive?: {fingerprint:string;phase:string;targetHash:string;cursorHash:string;owner:string;outcome:'started'};
-  sourceUnknowns?: Array<{marker:string;fingerprint:string;phase:string;targetHash:string;cursorHash:string;outcome:'unknown';classification:'request-outcome-unknown';taskId:string;creatorId:string}>;
+  sourcePreflight?: {fingerprint:string;phase:'detail';targetHash:string;cursorHash:string;owner:string;outcome:'prepared'};
+  sourceUnknowns?: Array<{marker:string;fingerprint:string;phase:string;targetHash:string;cursorHash:string;taskId:string;creatorId:string}&({outcome:'unknown';classification:'request-outcome-unknown'}|{outcome:'not-dispatched';classification:'local-pre-dispatch-review';owner:string})>;
   historyExcludedIds?: string[];
   scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
   noteIds: string[];
@@ -805,6 +806,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     // Source fences are written by dispatch transactions and may never be
     // removed by a stale in-memory task snapshot.
     if (saved?.sourceActive) t.sourceActive=saved.sourceActive; else delete t.sourceActive;
+    if (saved?.sourcePreflight) t.sourcePreflight=saved.sourcePreflight; else delete t.sourcePreflight;
     if (saved?.sourceUnknowns) t.sourceUnknowns=saved.sourceUnknowns; else delete t.sourceUnknowns;
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
@@ -1309,6 +1311,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               if (!this.source?.basicDetail && !this.source?.basicDetailWithMedia) return reject('XHS_SOURCE_UNCONFIGURED');
               const tuple = JSON.parse(id);
               if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
+              if(await hasTaskDetailLocalReview(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_LOCAL_PRE_DISPATCH_FAILED';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
               if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
               failurePhase='detail';
               await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
@@ -1398,6 +1401,7 @@ export class XhsSubscriptionService implements OnModuleInit {
                 const tuple = JSON.parse(id);
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
+                if(await hasTaskDetailLocalReview(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_LOCAL_PRE_DISPATCH_FAILED';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
                 if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
                 failurePhase='detail';
                 await this.withSourceCheckpoint(
@@ -1567,7 +1571,7 @@ export class XhsSubscriptionService implements OnModuleInit {
               break;
             }
             if(error instanceof XhsPreDispatchError && error.code==='XHS_LOCAL_PRE_DISPATCH_FAILED'){
-              t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+              const diagnostic=this.source?.taskDiagnostic?.();t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.sourceFailures={...t.sourceFailures,[id]:{...(diagnostic?.guardCode==='P2028'?diagnostic:{}),phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
             }
             if(error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
               t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:'unknown',...this.source?.taskDiagnostic?.()}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;

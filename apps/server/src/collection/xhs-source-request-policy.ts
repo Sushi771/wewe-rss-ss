@@ -3,7 +3,7 @@ import type { AttemptScope } from './xhs-reviewed-attempt';
 import { retainedGenerationMarkers } from './xhs-whole-generation';
 import { readHistoryHandoffs } from './xhs-history-handoff';
 import { writeSourceReceipt } from './xhs-source-receipt';
-import { startTaskSource, settleTaskSource, settleTaskMediaStreamUnknown, verifiedUnknownMarkers, type TaskSourceScope } from './xhs-task-source-fence';
+import { startTaskSource, settleTaskSource, settleTaskMediaStreamUnknown, prepareTaskDetailAdmission, settleTaskDetailPreDispatch, verifiedUnknownMarkers, type TaskSourceScope } from './xhs-task-source-fence';
 import { RedbookPauseError } from './redbook-client';
 import { XhsMediaError } from './xhs-media-error';
 import { randomUUID } from 'node:crypto';
@@ -187,6 +187,7 @@ async function hasPendingDispatch(
     SELECT id FROM xhs_request_budgets WHERE id LIKE ${DISPATCH_PREFIX + '%'} AND id <> ${owned} AND id NOT IN (${Prisma.join(retained.length ? retained : [''])}) LIMIT 1`;
   return rows.length > 0;
 }
+
 async function pendingWaitExpired(
   db: PrismaService,
   waiting: { since?: number },
@@ -363,6 +364,10 @@ export function bindXhsSourceTotalBudget(
 ) {
   runtime.bindWholeReceipt?.((scope,receipt) => write(db, tx => writeSourceReceipt(tx,scope,receipt)));
   runtime.bindScopedMediaFailure?.(scope=>write(db,tx=>settleTaskMediaStreamUnknown(tx,scope)));
+  runtime.bindScopedLocalAdmissionFailure?.(scope=>write(db,async tx=>{
+    if(await hasPendingDispatch(tx,'',[],scope))fail('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    await settleTaskDetailPreDispatch(tx,scope);
+  }));
   runtime.bindSourceAdmission(
     async (alreadyBudgeted, group, ready,scoped) => {
       const store = new XhsSqliteBudgetStore(db);
@@ -371,6 +376,10 @@ export function bindXhsSourceTotalBudget(
       if (!(await store.read(SOURCE_TOTAL))) {
         if (!alreadyBudgeted) fail('XHS_REQUEST_BUDGET_REQUIRED');
         return;
+      }
+      if(scoped?.phase==='detail' && !group){
+        await write(db,tx=>prepareTaskDetailAdmission(tx,scoped));
+        scoped.preflightConfirmed=true;
       }
       const budget = new XhsRequestBudget({
         rollback: () => write(db, (tx) => rollbackTotal(tx)),

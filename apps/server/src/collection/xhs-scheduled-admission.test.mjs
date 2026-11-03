@@ -49,3 +49,10 @@ test('paired unknown permits unrelated admission; tampered or unpaired evidence 
   assert.equal((await commit(db,()=>admitScheduledXhs(tx,input()))).kind,variant==='valid'?'created':'blocked');db.close();
  }
 });
+test('a bound local admission review permits another scheduled account but rejects tampering',async()=>{
+ const {createHash}=await import('node:crypto');const hash=s=>createHash('sha256').update(s).digest('hex');
+ for(const variant of ['valid','wrong-owner','wrong-target']){const {db,tx}=fixture(),creatorId='other',phase='detail',targetHash=hash('note'),cursorHash=hash(''),fingerprint=hash(JSON.stringify([creatorId,phase,targetHash,cursorHash])),marker='xhs:dispatch-pending:unknown:'+fingerprint;
+  db.prepare('insert into xhs_request_budgets(id,used,request_limit) values(?,1,1)').run(marker);const entry={marker,fingerprint,phase,targetHash:variant==='wrong-target'?hash('other'):targetHash,cursorHash,outcome:'not-dispatched',classification:'local-pre-dispatch-review',owner:variant==='wrong-owner'?'invalid':'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',taskId:'old',creatorId};db.prepare('insert into xhs_subscription_tasks values(?,?,?,?,?)').run('old',creatorId,'blocked',JSON.stringify({creatorId,sourceUnknowns:[entry]}),1);
+  assert.equal((await commit(db,()=>admitScheduledXhs(tx,input()))).kind,variant==='valid'?'created':'blocked');db.close();
+ }
+});
