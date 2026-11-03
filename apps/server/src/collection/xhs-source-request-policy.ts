@@ -27,6 +27,7 @@ import {
   incrementalWrite,
   assertIncrementalWriteAdmission,
   assertIncrementalTransaction,
+  withIncrementalTransactionChecks,
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import {
@@ -50,10 +51,10 @@ async function write<T>(
   return incrementalWrite(db, reserveBytes, () =>
     sqliteWrites.write(async () => {
       await assertIncrementalWriteAdmission();
-      return db.$transaction(async (tx) => {
+      return db.$transaction(tx => withIncrementalTransactionChecks(async () => {
         await assertIncrementalTransaction(tx);
         return run(tx);
-      });
+      }));
     }),
   );
 }

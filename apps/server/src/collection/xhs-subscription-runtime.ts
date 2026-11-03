@@ -4,7 +4,7 @@ import { consumeReviewedTransportPermit, consumeReviewedContextPermit, type Cont
 import type { AttemptScope } from './xhs-reviewed-attempt';
 import { createDispatchOwner } from './xhs-dispatch-owner';
 import { taskSourceFingerprint, type TaskSourceScope } from './xhs-task-source-fence';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { setTimeout as waitForRate } from 'node:timers/promises';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { XhsRequestBudget } from './xhs-request-budget';
@@ -62,6 +62,7 @@ type RequestAdmission = {
   budget?: XhsRequestBudget;
   id: string;
   failure?: unknown;
+  failureBeforeDispatch?: boolean;
   parent?: RequestAdmission;
   sourceTotalCovered?: boolean;
 };
@@ -672,7 +673,7 @@ export class XhsSubscriptionRuntime
           /* retain conservatively */
         }
       }
-      if (!dispatched && admission) admission.failure = error;
+      if (!dispatched && admission) {admission.failure = error;admission.failureBeforeDispatch=true;}
       throw error;
     }
     if (generation !== this.generation || signal.aborted)
@@ -876,7 +877,7 @@ export class XhsSubscriptionRuntime
     catch(error) { if(error instanceof XhsSubscriptionError)throw new XhsPreDispatchError(error.code);throw error; }
     const generation = this.generation;
     const admission = this.budgetScope.getStore();
-    if (admission) delete admission.failure;
+    if (admission) {delete admission.failure;delete admission.failureBeforeDispatch;}
     if (!this.riskStore && this.options.requirePersistentRisk)
       throw new XhsPreDispatchError('XHS_SOURCE_RISK_UNAVAILABLE');
     let riskOwner: string | undefined;
@@ -951,6 +952,11 @@ export class XhsSubscriptionRuntime
       const isolatedPhase=riskOwner && !this.stopCode && taskScope?.current?.owner===riskOwner && taskScope.current.isolatedUnknown &&
         (taskScope.current.phase==='media' ? error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code) : error instanceof RedbookPauseError && error.reason==='transport') ? taskScope.current.phase : undefined;
       if(isolatedPhase){riskOwner=undefined;this.persistedRisk=undefined;}
+      // A failed pre-dispatch Prisma transaction has no reliable commit receipt.
+      // Preserve its pending owner for local review instead of recording a
+      // platform restriction or releasing an unconfirmed reservation.
+      const localTransactionUncertain=!!riskOwner && admission?.failureBeforeDispatch===true && admission.failure instanceof Prisma.PrismaClientKnownRequestError && admission.failure.code==='P2028' && !this.stopCode;
+      if(localTransactionUncertain){riskOwner=undefined;this.persistedRisk='XHS_SOURCE_RISK_REVIEW_REQUIRED';}
       const safeDetailMismatch=!!riskOwner && !this.wholeSourceGroup.getStore() && !this.stopCode && error instanceof XhsDetailIdentityMismatchError && taskScope?.current?.owner===riskOwner && taskScope.current.phase==='detail' && taskScope.current.confirmedResponse===true;
       if (riskOwner) {
         const known =

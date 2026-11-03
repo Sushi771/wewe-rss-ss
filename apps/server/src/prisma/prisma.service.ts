@@ -152,7 +152,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
             // The startup audit may have changed during admission wait.
             assertDatabaseWritesAllowed();
             return next(params);
-          });
+          }, params.runInTransaction === true);
       }
       return next(params);
     });
