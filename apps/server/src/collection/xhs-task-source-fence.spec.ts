@@ -2,7 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { startTaskSource,settleTaskSource,taskSourceFingerprint,taskUnknownMarker,verifiedUnknownMarkers,TaskSourceScope } from './xhs-task-source-fence';
+import { startTaskSource,settleTaskSource,taskSourceFingerprint,taskUnknownMarker,verifiedUnknownMarkers,terminalStartedDetail,TaskSourceScope } from './xhs-task-source-fence';
 
 describe('task-scoped source uncertainty (synthetic SQLite)',()=>{
  let db:PrismaClient,dir:string;
@@ -66,5 +66,20 @@ describe('task-scoped source uncertainty (synthetic SQLite)',()=>{
   const replacement=JSON.stringify({taskId:'replacement',creatorId:a.creatorId,state:'running',noteIds:[note,other]});await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES('replacement',${a.creatorId},'running',${replacement})`;await db.$executeRaw`UPDATE xhs_source_risk SET state='pending',owner=${owner}`;
   expect(await verifiedUnknownMarkers(db as any,detail('replacement','note-b'))).toEqual([taskUnknownMarker(first)]);expect(await verifiedUnknownMarkers(db as any,detail('replacement','note-a'))).toEqual([]);await expect(db.$transaction(tx=>startTaskSource(tx,detail('replacement','note-a')))).rejects.toThrow();
   await expect(db.$transaction(tx=>startTaskSource(tx,detail('replacement','not-selected')))).rejects.toThrow();
+ });
+ it('only identifies a bound terminal started detail when the shared owner is clear',async()=>{
+  const note=JSON.stringify(['xiaohongshu','note','note-a']);
+  await db.$executeRaw`INSERT INTO xhs_notes VALUES(${note},${a.creatorId})`;
+  const doc=JSON.stringify({taskId:a.taskId,creatorId:a.creatorId,state:'running',noteIds:[note]});await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${doc} WHERE id=${a.taskId}`;
+  const emptyHash=require('node:crypto').createHash('sha256').update('').digest('hex');
+  const scope:TaskSourceScope={taskId:a.taskId,creatorId:a.creatorId,phase:'detail',target:'note-a',cursorHash:emptyHash,fingerprint:taskSourceFingerprint(a.creatorId,'detail','note-a',emptyHash),owner};
+  await db.$transaction(tx=>startTaskSource(tx,scope));
+  let record=JSON.parse((await db.$queryRaw<any[]>`SELECT document FROM xhs_subscription_tasks WHERE id=${a.taskId}`)[0].document);record.state='blocked';
+  await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked',document=${JSON.stringify(record)} WHERE id=${a.taskId}`;
+  expect(await terminalStartedDetail(db as any,a.creatorId,'note-a')).toBeNull(); // current owner still active
+  await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',owner=NULL`;
+  expect(await terminalStartedDetail(db as any,a.creatorId,'note-a')).toBe(a.taskId);
+  record.sourceActive.targetHash='b'.repeat(64);await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(record)} WHERE id=${a.taskId}`;
+  expect(await terminalStartedDetail(db as any,a.creatorId,'note-a')).toBeNull();
  });
 });

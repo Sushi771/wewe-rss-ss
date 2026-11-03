@@ -21,6 +21,20 @@ export async function hasTaskDetailUnknown(tx:Pick<Prisma.TransactionClient,'$qu
   return rows.length===1;
 }
 
+/** A terminal task can retain an interrupted detail dispatch across restarts.
+ * This only identifies a candidate to skip; it never settles or deletes it. */
+export async function terminalStartedDetail(tx:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteId:string):Promise<string|null> {
+  const targetHash=hash(noteId),cursorHash=hash(''),fp=taskSourceFingerprint(creatorId,'detail',noteId,cursorHash);
+  const rows=await tx.$queryRaw<Array<{id:string;creator_id:string;state:string;document:string}>>`SELECT id,creator_id,state,document FROM xhs_subscription_tasks WHERE json_valid(document) AND json_extract(document,'$.sourceActive.fingerprint')=${fp}`;
+  if(rows.length!==1)return null;
+  const row=rows[0];let task:any;try{task=JSON.parse(row.document);}catch{return null;}
+  const active=task.sourceActive,note=JSON.stringify(['xiaohongshu','note',noteId]);
+  if(row.creator_id!==creatorId||!['blocked','failed','partial','cancelled'].includes(row.state)||task.taskId!==row.id||task.creatorId!==creatorId||task.state!==row.state||!Array.isArray(task.noteIds)||!task.noteIds.includes(note)||active?.phase!=='detail'||active.outcome!=='started'||active.targetHash!==targetHash||active.cursorHash!==cursorHash||typeof active.owner!=='string'||!/^[a-f0-9-]{36}$/.test(active.owner))return null;
+  const risk=await tx.$queryRaw<Array<{state:string;owner:string|null;code:string|null;http_status:number|null;endpoint:string|null}>>`SELECT state,owner,code,http_status,endpoint FROM xhs_source_risk WHERE id='source'`;
+  if(risk.length!==1||risk[0].state!=='clear'||risk[0].owner!==null||risk[0].code!==null||risk[0].http_status!==null||risk[0].endpoint!==null)return null;
+  return row.id;
+}
+
 /** A verified prior media unknown is displayed as incomplete without acquiring
  * the shared lane or attempting the same resource in a later round. */
 export async function hasTaskMediaUnknown(tx:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteKey:string,resources:Array<string|null>) {

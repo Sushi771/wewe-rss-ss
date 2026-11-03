@@ -4,7 +4,7 @@ import { readHistoryHandoffs } from './xhs-history-handoff';
 import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 import { resumeXhsMedia } from './xhs-native-media';
 import { XhsMediaLocalResponseError } from './xhs-media-error';
-import { hasTaskDetailUnknown, hasTaskMediaUnknown } from './xhs-task-source-fence';
+import { hasTaskDetailUnknown, hasTaskMediaUnknown, terminalStartedDetail } from './xhs-task-source-fence';
 import { xhsMediaTaskStore } from './xhs-media-task-store';
 import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
@@ -135,7 +135,7 @@ type Task = XhsSubscriptionTask & {
   basicOnly?: boolean;
   basicResults?: Record<string, 'complete' | 'missing'>;
   basicImageChecks?: Record<string, { count: number; otherwiseComplete: boolean }>;
-  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}>;
+  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:false|'transport-entered'|'unknown';fenceReason?:'prior-started';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}>;
   taskFailure?: {phase:'prepare'|'listing'|'details';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number};
   mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string;markerVersion?:string;markerOrdinal?:number}>}>;
   reuseCompleteCache?: boolean;
@@ -1282,6 +1282,18 @@ export class XhsSubscriptionService implements OnModuleInit {
               where: { id, creatorId: creator.id },
             });
             if (!old) return reject('XHS_SELECTION_CHANGED');
+            // Preserve the original unknown dispatch; a terminal task alone is
+            // not sufficient while its worker is still present in this process.
+            if(t.collectDetails){
+              const tuple=JSON.parse(id);
+              if(!Array.isArray(tuple)||tuple[0]!=='xiaohongshu'||tuple[1]!=='note'||typeof tuple[2]!=='string')return reject('XHS_NOTE_ID_INVALID');
+              const prior=await terminalStartedDetail(this.db,creator.id,tuple[2]);
+              if(prior && !this.pending.has(prior) && !this.uncertain.has(prior)){
+                t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};
+                t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:false,fenceReason:'prior-started'}};
+                t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+              }
+            }
             if (t.basicOnly && t.reuseCompleteCache && old.publishTime > 0 && old.contentHtml) {
               let reusable = false;
               try {
