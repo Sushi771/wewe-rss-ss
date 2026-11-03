@@ -35,6 +35,19 @@ function reviewedContextFailure(error:unknown,stage:'准备'|'执行') {
   return reason ? `单篇恢复${stage}未完成：${reason}（${raw}）不会自动重发。` : `单篇恢复${stage}未确认，请查看当前回执；不会自动重发。`;
 }
 
+export function XhsLegacyPendingOwnerReview({refresh}:{refresh:()=>Promise<unknown>}) {
+  const [snapshot,setSnapshot]=useState<{digest:string;taskId:string;creatorId:string;noteKey:string}>();
+  const [checked,setChecked]=useState(false),[error,setError]=useState('');
+  const prepare=trpc.xiaohongshu.prepareLegacyPendingOwnerReview.useMutation({retry:false});
+  const confirm=trpc.xiaohongshu.confirmLegacyPendingOwnerReview.useMutation({retry:false});
+  return <details className="my-2 rounded border p-2"><summary>核查历史待处理的本地故障</summary>
+    <p>旧记录未保存 owner 与请求目标的绑定，不能证明它属于这篇笔记。排除已知失败笔记仅是保守保护；恢复后可能再次读取此前未记录的任何账号、列表、正文或媒体页面。原记录和预算计数会保留，确认前自动建立并验证本机备份。</p>
+    <button disabled={prepare.isLoading||confirm.isLoading} onClick={async()=>{setChecked(false);setSnapshot(undefined);try{setSnapshot(await prepare.mutateAsync());setError('');}catch{setError('当前状态不满足复核条件，未修改记录。');}}}>核查当前状态</button>
+    {snapshot&&<><p>将保守排除的已知失败目标：{snapshot.noteKey}。旧 owner 的真实目标仍未知。</p><label><input type="checkbox" checked={checked} onChange={e=>setChecked(e.target.checked)}/>我已核查登录与验证状态，理解可能重复读取其他账号或页面，同意保留未知历史并继续。</label><button disabled={!checked||confirm.isLoading} onClick={async()=>{setChecked(false);try{await confirm.mutateAsync({digest:snapshot.digest,acknowledgedUnknownScope:true});setSnapshot(undefined);await refresh();}catch{setSnapshot(undefined);setError('备份或状态核对未确认，未自动重试；请重新核查。');}}}>确认并恢复</button></>}
+    {error&&<p role="alert">{error}</p>}
+  </details>;
+}
+
 export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { creatorId: string; selectedNoteIds?: string[] }) {
   const [limit, setLimit] = useState(100),
     [error, setError] = useState("");
@@ -141,6 +154,7 @@ export default function XhsWholeCreator({ creatorId, selectedNoteIds = [] }: { c
       >
         开始整号互动同步
       </button>
+      <XhsLegacyPendingOwnerReview refresh={()=>jobs.refetch()} />
       {error && <p role="alert">{error}</p>}
       {jobs.error && <p role="alert">覆盖状态读取失败，未开始新请求。</p>}
       {(jobs.data ?? []).map((job) => (

@@ -27,6 +27,16 @@ import { reviewGenerationUnknown } from './xhs-generation-review';
 import { prepareHistoryHandoff, confirmHistoryHandoff,prepareGenericRiskReview,confirmGenericRiskReview,readHistoryHandoffs } from './xhs-history-handoff';
 import { resumeWholeMedia } from './xhs-whole-media-resume';
 import { selectMissingBasic } from './xhs-missing-basic';
+import { prepareLegacyPendingReview,confirmLegacyPendingReview } from './xhs-legacy-pending-review';
+import { createVerifiedSqliteBackup } from './sqlite-backup';
+import { realpath,stat } from 'node:fs/promises';
+
+async function legacyReviewDatabaseFingerprint(database:string) {
+  return JSON.stringify(await Promise.all([database,database+'-wal',database+'-journal'].map(async(file)=>{
+    try{const value=await stat(file,{bigint:true});if(!value.isFile()||!value.ino)throw new Error('XHS_DATABASE_IDENTITY_UNPROVED');return [value.dev,value.ino,value.size,value.mtimeNs,value.ctimeNs].map(String);}
+    catch(error){if(file!==database&&(error as NodeJS.ErrnoException).code==='ENOENT')return null;throw error;}
+  })));
+}
 
 type Item = {
   started?: Record<string, boolean>;
@@ -549,6 +559,29 @@ export class XhsWholeCreatorService implements OnModuleInit {
       const rows=await tx.$queryRaw<Array<{code:string|null}>>`SELECT code FROM xhs_source_risk WHERE id='source'`;
       return rows[0]?.code==='XHS_SOURCE_RISK_REVIEW_REQUIRED' ? prepareGenericRiskReview(tx,input.jobId,input.generationId) : prepareHistoryHandoff(tx,input.jobId,input.generationId);
     });
+  }
+  private assertLegacyPendingIdle(ownConfirmation=false) {
+    if(this.running.size||this.reviewing.size||this.starting.size>(ownConfirmation?1:0)||this.subscriptions.hasLocalSourceWork()||this.runtime.hasActiveSourceSessions()||this.runtime.hasBlockingSourceState())throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+  }
+  async prepareLegacyPendingOwnerReview() {
+    await this.readyForMutation();this.assertLegacyPendingIdle();
+    const result=await this.db.$transaction(tx=>prepareLegacyPendingReview(tx));
+    this.assertLegacyPendingIdle();
+    return {kind:result.kind,digest:result.digest,taskId:result.taskId,creatorId:result.creatorId,noteKey:result.noteKey};
+  }
+  async confirmLegacyPendingOwnerReview(input:{digest:string;acknowledgedUnknownScope:true}) {
+    await this.readyForMutation();this.assertLegacyPendingIdle();this.starting.add('legacy-pending-review');
+    try{
+      let backupSha256='',database='',version='';
+      const result=await sqliteWrites.protectedWrite(async()=>{
+        this.assertLegacyPendingIdle(true);
+        const rows=await this.db.$queryRawUnsafe<Array<{name:string;file:string}>>('PRAGMA database_list');const main=rows.find(row=>row.name==='main');if(!main?.file)throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+        database=await realpath(main.file);version=await legacyReviewDatabaseFingerprint(database);const report=await createVerifiedSqliteBackup();const verified=report as {source?:unknown;backup?:unknown;sha256?:unknown;integrityCheck?:unknown;recoveryOrigin?:{format?:unknown;kind?:unknown}};
+        if(typeof verified.source!=='string'||await realpath(verified.source)!==database||typeof verified.backup!=='string'||!verified.backup||typeof verified.sha256!=='string'||!/^[a-f0-9]{64}$/.test(verified.sha256)||verified.integrityCheck!=='ok'||verified.recoveryOrigin?.format!=='sqlite-recovery-origin-v1'||verified.recoveryOrigin.kind!=='protected')throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+        backupSha256=verified.sha256;
+      },()=>this.write(async tx=>{this.assertLegacyPendingIdle(true);const rows=await tx.$queryRawUnsafe<Array<{name:string;file:string}>>('PRAGMA database_list');const main=rows.find(row=>row.name==='main');if(!main?.file||await realpath(main.file)!==database||await legacyReviewDatabaseFingerprint(database)!==version)throw new Error('XHS_DATABASE_CHANGED');return confirmLegacyPendingReview(tx,{...input,backupSha256});}));
+      await this.runtime.refreshAfterHistoryHandoff();return result;
+    }finally{this.starting.delete('legacy-pending-review');}
   }
   async confirmHistoryHandoff(input:{jobId:string;generationId:string;digest:string;confirm:true;acknowledgedLoginAndVerification?:boolean}) {
     await this.readyForMutation();

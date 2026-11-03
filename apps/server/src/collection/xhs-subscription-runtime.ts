@@ -87,6 +87,9 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
+  private activeSourceSessions=0;
+  hasActiveSourceSessions() { return this.activeSourceSessions>0; }
+  hasBlockingSourceState() { return !!this.stopCode && this.stopCode!=='XHS_SOURCE_RISK_REVIEW_REQUIRED'; }
   private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}&Partial<SourceTransactionDiagnostic>} >();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
   resetTaskDiagnostic() { const scope=this.taskSourceContext.getStore();if(scope)scope.diagnostic={dispatched:false}; }
@@ -877,6 +880,10 @@ export class XhsSubscriptionRuntime
       return this.budgetScope.run({ id: '' }, () =>
         this.withSession(operation),
       );
+    this.activeSourceSessions++;
+    try{return await this.withSessionOwned(operation);}finally{this.activeSourceSessions--;}
+  }
+  private async withSessionOwned<T>(operation: () => Promise<T>): Promise<T> {
     try { this.requireSession(); }
     catch(error) { if(error instanceof XhsSubscriptionError)throw new XhsPreDispatchError(error.code);throw error; }
     const generation = this.generation;

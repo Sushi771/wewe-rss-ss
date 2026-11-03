@@ -118,6 +118,7 @@ type Task = XhsSubscriptionTask & {
   scheduledContext?: {authorId:string;used:1;state:'started'|'confirmed'};
   sourceActive?: {fingerprint:string;phase:string;targetHash:string;cursorHash:string;owner:string;outcome:'started'};
   sourcePreflight?: {fingerprint:string;phase:'detail';targetHash:string;cursorHash:string;owner:string;outcome:'prepared'};
+  legacyPendingReviews?: unknown[];
   sourceUnknowns?: Array<{marker:string;fingerprint:string;phase:string;targetHash:string;cursorHash:string;taskId:string;creatorId:string}&({outcome:'unknown';classification:'request-outcome-unknown'}|{outcome:'not-dispatched';classification:'local-pre-dispatch-review';owner:string})>;
   historyExcludedIds?: string[];
   scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
@@ -191,6 +192,7 @@ export function subscriptionUrl(raw: string) {
 
 @Injectable()
 export class XhsSubscriptionService implements OnModuleInit {
+  hasLocalSourceWork() { return this.pending.size>0 || this.uncertain.size>0 || this.reconciling.size>0; }
   private startupRecovery: Promise<void> = Promise.resolve();
   private startupRecoveryStarted = false;
   private destroyed = false;
@@ -807,6 +809,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     // removed by a stale in-memory task snapshot.
     if (saved?.sourceActive) t.sourceActive=saved.sourceActive; else delete t.sourceActive;
     if (saved?.sourcePreflight) t.sourcePreflight=saved.sourcePreflight; else delete t.sourcePreflight;
+    if (saved?.legacyPendingReviews) t.legacyPendingReviews=saved.legacyPendingReviews; else delete t.legacyPendingReviews;
     if (saved?.sourceUnknowns) t.sourceUnknowns=saved.sourceUnknowns; else delete t.sourceUnknowns;
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;

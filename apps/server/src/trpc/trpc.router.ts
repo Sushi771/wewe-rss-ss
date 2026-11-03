@@ -2031,6 +2031,11 @@ export class TrpcRouter {
     confirmXhsHistoryHandoff: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),digest:z.string().regex(/^[a-f0-9]{64}$/),confirm:z.literal(true),acknowledgedLoginAndVerification:z.boolean().optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.confirmHistoryHandoff(input));}),
+    prepareLegacyPendingOwnerReview: this.trpcService.protectedProcedure
+      .mutation(({ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.prepareLegacyPendingOwnerReview());}),
+    confirmLegacyPendingOwnerReview: this.trpcService.protectedProcedure
+      .input(z.object({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownScope:z.literal(true)}).strict())
+      .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.confirmLegacyPendingOwnerReview(input));}),
     reviewWholeCreatorGeneration: this.trpcService.protectedProcedure
       .input(z.object({jobId:z.string().min(1).max(128),generationId:z.string().uuid(),confirmUnknown:z.literal(true),excludeUnknown:z.literal(true).optional()}).strict())
       .mutation(({input,ctx})=>{this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(()=>this.xhsWhole!.reviewGeneration(input));}),
