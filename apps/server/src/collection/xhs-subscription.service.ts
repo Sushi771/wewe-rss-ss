@@ -58,7 +58,7 @@ export type XhsListedNote = {
 export interface XhsSubscriptionSource {
   withTaskScope?<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T>;
   resetTaskDiagnostic?():void;
-  taskDiagnostic?():{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}|undefined;
+  taskDiagnostic?():{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}&Partial<import('./xhs-source-request-policy').SourceTransactionDiagnostic>|undefined;
   withCheckpointGroup?<T>(
     phase: 'profile' | 'list' | 'detail' | 'metrics',
     authorId: string,

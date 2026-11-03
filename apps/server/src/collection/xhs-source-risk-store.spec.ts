@@ -9,7 +9,7 @@ import { XhsRequestBudget } from './xhs-request-budget';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { XhsMediaError } from './xhs-media-error';
 import { downloadRedbookMedia } from './redbook-response';
-import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
+import { bindXhsSourceTotalBudget,configureXhsSourceBudget } from './xhs-source-request-policy';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsEngagementService } from './xhs-engagement.service';
 import { XhsScheduledRunner } from './xhs-scheduled-runner';
@@ -210,6 +210,14 @@ describe('durable synthetic source risk fence', () => {
     const api=jest.fn();const runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));runtime.bindSourceAdmission(async()=>{throw new Prisma.PrismaClientKnownRequestError('synthetic-private-transaction',{code:'P2028',clientVersion:'5.10.1'});});await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});successfulProfile(runtime,author);
     const service:any=new XhsSubscriptionService(db as any,runtime);service.write=async(_bytes:number,fn:any)=>db.$transaction(fn);
     try{const started=await service.refreshFull({id:creatorId,scope:'selected',noteIds:[key],basicOnly:true,reuseCompleteCache:false});await service.lane;const row=(await db.$queryRaw<any[]>`SELECT document FROM xhs_subscription_tasks WHERE id=${started.taskId}`)[0].document;const task=JSON.parse(row);expect(api).not.toHaveBeenCalled();expect(task.taskFailure).toMatchObject({phase:'listing',code:'XHS_STORAGE_FAILED',dispatched:false,guardStage:'source-admission',guardCode:'P2028'});expect(row).not.toContain('synthetic-private-transaction');const risk=(await db.$queryRaw<any[]>`SELECT state,owner,code,http_status FROM xhs_source_risk WHERE id='source'`)[0];expect(risk.state).toBe('pending');expect(risk.owner).toBeTruthy();expect(risk.code).toBeNull();expect(risk.http_status).toBeNull();}finally{runtime.onModuleDestroy();}
+  },40000);
+  it('persists only safe P2028 source transaction diagnostics in a task',async()=>{
+    const creatorId='parse-creator',author='parse-author',key=JSON.stringify(['xiaohongshu','note','parse-a']);
+    await db.xhsCreator.create({data:{id:creatorId,externalAuthorId:author,profileUrl:'https://example.invalid/parse-author',displayName:'Synthetic'}});await db.xhsNote.create({data:{id:key,creatorId,title:'Old',publishTime:0,kind:'image-text',status:'listed'}});
+    const api=jest.fn(),runtime=new XhsSubscriptionRuntime({enabled:()=>true,api,requirePersistentRisk:true});runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+    runtime.bindSourceAdmission(async()=>{const spy=jest.spyOn(db,'$transaction').mockImplementation((()=>{throw new Prisma.PrismaClientKnownRequestError('synthetic-private-start',{code:'P2028',clientVersion:'5.10.1',meta:{error:'Unable to start transaction: synthetic-private'}});}) as any);try{await configureXhsSourceBudget(db as any,{purpose:'resolution'},100,1000);}finally{spy.mockRestore();}});
+    await runtime.connectSession({a1:'synthetic-a1',webSession:'synthetic-session'});successfulProfile(runtime,author);const service:any=new XhsSubscriptionService(db as any,runtime);service.write=async(_bytes:number,fn:any)=>db.$transaction(fn);
+    try{const started=await service.refreshFull({id:creatorId,scope:'selected',noteIds:[key],basicOnly:true,reuseCompleteCache:false});await service.lane;const row=(await db.$queryRaw<any[]>`SELECT document FROM xhs_subscription_tasks WHERE id=${started.taskId}`)[0].document;const task=JSON.parse(row);expect(api).not.toHaveBeenCalled();expect(task.taskFailure).toMatchObject({code:'XHS_STORAGE_FAILED',guardCode:'P2028',transactionStage:'opening',transactionError:'start-failed',transactionTotalMs:expect.any(Number),transactionOpenMs:expect.any(Number)});expect(row).not.toContain('synthetic-private');expect((await db.$queryRaw<any[]>`SELECT state FROM xhs_source_risk WHERE id='source'`)[0].state).toBe('pending');}finally{runtime.onModuleDestroy();}
   },40000);
   it('persists a fixed pre-dispatch guard failure without exposing its message',async()=>{
     const creatorId='parse-creator',author='parse-author',key=JSON.stringify(['xiaohongshu','note','parse-a']);

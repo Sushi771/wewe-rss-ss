@@ -40,6 +40,29 @@ import {
 const SOURCE_TOTAL = 'xhs:source-total';
 const DISPATCH_PREFIX = 'xhs:dispatch-pending:';
 class AdmissionUnavailable extends Error {}
+export type SourceTransactionDiagnostic = {
+  transactionStage:'preflight'|'opening'|'checking-before'|'durability'|'operation'|'checking-after'|'committing';
+  transactionError:'expired'|'closed'|'not-found'|'start-failed'|'commit-failed'|'other';
+  transactionTotalMs:number;
+  transactionOpenMs?:number;
+  transactionCallbackMs?:number;
+};
+const sourceTransactionDiagnostics = new WeakMap<object,SourceTransactionDiagnostic>();
+/** Fixed categories and bounded timings only; never expose Prisma messages. */
+export function sourceTransactionDiagnostic(error:unknown):SourceTransactionDiagnostic|undefined {
+  return error && typeof error==='object' ? sourceTransactionDiagnostics.get(error) : undefined;
+}
+function transactionErrorKind(error:Prisma.PrismaClientKnownRequestError):SourceTransactionDiagnostic['transactionError'] {
+  const meta=error.meta?.error;
+  const message=typeof meta==='string'?meta:error.message;
+  if(/expired/i.test(message))return 'expired';
+  if(/(?:committed|rolled back) transaction/i.test(message))return 'closed';
+  if(/transaction (?:already |is )?closed/i.test(message))return 'closed';
+  if(/transaction (?:not found|does not exist)/i.test(message))return 'not-found';
+  if(/unable to start|failed to start/i.test(message))return 'start-failed';
+  if(/unable to commit|failed to commit/i.test(message))return 'commit-failed';
+  return 'other';
+}
 function fail(code: string): never {
   throw new XhsSubscriptionError(code);
 }
@@ -48,15 +71,34 @@ async function write<T>(
   run: (tx: Prisma.TransactionClient) => Promise<T>,
   reserveBytes=8192,
 ) {
-  return incrementalWrite(db, reserveBytes, () =>
+  const started=performance.now();let requested:number|undefined,entered:number|undefined,finished:number|undefined;
+  let transactionStage:SourceTransactionDiagnostic['transactionStage']='preflight';
+  const elapsed=(a:number,b:number)=>Math.min(60000,Math.max(0,Math.round(b-a)));
+  try{return await incrementalWrite(db, reserveBytes, () =>
     sqliteWrites.write(async () => {
       await assertIncrementalWriteAdmission();
-      return db.$transaction(tx => withIncrementalTransactionChecks(async () => {
+      requested=performance.now();transactionStage='opening';
+      return db.$transaction(async tx => {
+        entered=performance.now();transactionStage='checking-before';
+        const result=await withIncrementalTransactionChecks(async () => {
+        transactionStage='durability';
         await assertIncrementalTransaction(tx);
-        return run(tx);
-      }));
+        transactionStage='operation';
+        const value=await run(tx);
+        transactionStage='checking-after';
+        return value;
+        });
+        finished=performance.now();transactionStage='committing';
+        return result;
+      });
     }),
-  );
+  );}catch(error){
+    if(error instanceof Prisma.PrismaClientKnownRequestError && error.code==='P2028'){
+      const end=performance.now();
+      sourceTransactionDiagnostics.set(error,{transactionStage,transactionError:transactionErrorKind(error),transactionTotalMs:elapsed(started,end),...(requested===undefined?{}:{transactionOpenMs:elapsed(requested,entered??end)}),...(entered===undefined?{}:{transactionCallbackMs:elapsed(entered,finished??end)})});
+    }
+    throw error;
+  }
 }
 async function policyId(db: PrismaService, scope: XhsSourceBudgetScope) {
   if (scope.purpose === 'resolution') return 'xhs:resolution';

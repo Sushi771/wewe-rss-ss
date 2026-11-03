@@ -32,6 +32,7 @@ import {
   xhsPublicInputUrl,
 } from './xhs-short-link';
 import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, XhsPreDispatchError, XhsDetailIdentityMismatchError } from './xhs-subscription-errors';
+import { sourceTransactionDiagnostic, type SourceTransactionDiagnostic } from './xhs-source-request-policy';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import {
   checkedXhsCookies,
@@ -86,7 +87,7 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}}>();
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}&Partial<SourceTransactionDiagnostic>} >();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
   resetTaskDiagnostic() { const scope=this.taskSourceContext.getStore();if(scope)scope.diagnostic={dispatched:false}; }
   taskDiagnostic() { const scope=this.taskSourceContext.getStore();return scope?.diagnostic ? {...scope.diagnostic} : undefined; }
@@ -658,6 +659,7 @@ export class XhsSubscriptionRuntime
           diagnostic.guardErrorKind=error instanceof TypeError?'TypeError':error instanceof RangeError?'RangeError':error instanceof Error?'Error':'Other';
           const code=error && typeof error==='object' && 'code' in error ? error.code : undefined;
           if(typeof code==='string' && ['XHS_TASK_CANCELLED','XHS_SESSION_CHANGED','XHS_SESSION_REQUIRED','XHS_SESSION_BUSY','XHS_LIVE_ACCESS_DISABLED','XHS_REQUEST_BUDGET_REQUIRED','XHS_REQUEST_BUDGET_EXHAUSTED','XHS_REQUEST_RATE_PAUSED','XHS_SOURCE_RISK_REVIEW_REQUIRED','XHS_STORAGE_FAILED','P2028','P2034'].includes(code))diagnostic.guardCode=code;
+          Object.assign(diagnostic,sourceTransactionDiagnostic(error));
         }
       }
       // Only a known non-dispatch permits reservation-specific CAS rollback.
