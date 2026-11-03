@@ -13,7 +13,7 @@ import {
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import { XhsAuthor } from '@wewe-rss/shared';
 import { XhsShortLinkResolver } from './xhs-short-link';
-import { XhsSubscriptionError, XhsSourceParseError } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError, XhsDetailIdentityMismatchError } from './xhs-subscription-errors';
 import { extractXhsMediaManifest, selectXhsNativeDetail } from './xhs-native-media';
 import { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 import {
@@ -380,7 +380,9 @@ export class RedbookSubscriptionAdapter implements XhsSubscriptionSource {
       const detail = raw as any;
       const item = Array.isArray(detail?.items) && detail.items.length === 1 ? detail.items[0] : undefined;
       const card = item?.note_card;
-      if (item?.id !== noteId || card?.note_id !== noteId || card?.user?.user_id !== authorId) throw error;
+      const validId=(value:unknown):value is string=>typeof value==='string' && !!value && value.length<=128 && !/\s|[\u0000-\u001f\u007f]/.test(value);
+      if (!validId(item?.id) || !validId(card?.note_id) || !validId(card?.user?.user_id)) throw error;
+      if (item.id !== noteId || card.note_id !== noteId || card.user.user_id !== authorId) throw new XhsDetailIdentityMismatchError();
       throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED');
     }
     // Media is optional: malformed or absent images must never discard the basic response.

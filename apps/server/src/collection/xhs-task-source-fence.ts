@@ -5,7 +5,7 @@ import { scheduledTaskId } from './xhs-scheduled-admission';
 import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
 
 type Tx=Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>;
-export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;contextRestore?:boolean};
+export type TaskSourceScope={taskId:string;creatorId:string;phase:'profile'|'list'|'detail'|'media'|'comments'|'replies';target:string;cursorHash:string;cursor?:string;rootId?:string;fingerprint:string;owner:string;noteKey?:string;isolatedUnknown?:boolean;confirmedResponse?:boolean;contextRestore?:boolean};
 const prefix='xhs:dispatch-pending:unknown:';
 const bad=():never=>{throw new XhsSubscriptionError('XHS_SOURCE_RISK_REVIEW_REQUIRED');};
 const hash=(value:string)=>createHash('sha256').update(value).digest('hex');

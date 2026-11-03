@@ -270,7 +270,7 @@ async function dispatchSource<T>(
       });
       dispatchCommitted = true;
       const result=await response!;gotResponse=true;
-      if(scoped && !group)await write(db,tx=>settleTaskSource(tx,scoped,'response'));
+      if(scoped && !group){await write(db,tx=>settleTaskSource(tx,scoped,'response'));scoped.confirmedResponse=true;}
       return result;
     } catch (error) {
       // A dispatch transaction can fail after transport entry. Its network promise

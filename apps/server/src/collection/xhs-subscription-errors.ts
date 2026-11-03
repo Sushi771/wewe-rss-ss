@@ -10,6 +10,8 @@ export class XhsSubscriptionError extends Error {
 }
 /** Raised only before source-session ownership or physical dispatch begins. */
 export class XhsPreDispatchError extends XhsSubscriptionError {}
+/** Identity of a received detail did not match the requested target. */
+export class XhsDetailIdentityMismatchError extends Error {}
 /** Only raised by pure parsing after a source response was received. */
 export class XhsSourceParseError extends XhsSubscriptionError {
   constructor(code: 'XHS_LIST_PARSE_FAILED' | 'XHS_DETAIL_PARSE_FAILED' | 'XHS_COMMENT_PARSE_FAILED') { super(code); }

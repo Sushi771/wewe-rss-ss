@@ -31,7 +31,7 @@ import {
   XhsShortLinkTransport,
   xhsPublicInputUrl,
 } from './xhs-short-link';
-import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, XhsPreDispatchError } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsSourceParseError, XhsTaskSourceUnknownError, XhsPreDispatchError, XhsDetailIdentityMismatchError } from './xhs-subscription-errors';
 import { XhsSubscriptionSource } from './xhs-subscription.service';
 import {
   checkedXhsCookies,
@@ -85,7 +85,7 @@ const failure = (code: string): never => {
 export class XhsSubscriptionRuntime
   implements XhsSubscriptionSource, OnModuleDestroy
 {
-  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}}>();
+  private readonly taskSourceContext = new AsyncLocalStorage<{taskId:string;creatorId:string;owner?:string;current?:TaskSourceScope;mediaNoteKey?:string;contextRestore?:boolean;diagnostic?:{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}}>();
   withTaskScope<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T> { return this.taskSourceContext.run({...scope},work); }
   resetTaskDiagnostic() { const scope=this.taskSourceContext.getStore();if(scope)scope.diagnostic={dispatched:false}; }
   taskDiagnostic() { const scope=this.taskSourceContext.getStore();return scope?.diagnostic ? {...scope.diagnostic} : undefined; }
@@ -589,6 +589,7 @@ export class XhsSubscriptionRuntime
     const totalCovered = scopes.some((scope) => scope.sourceTotalCovered);
     const undo: Array<() => Promise<void>> = [];
     let dispatched = false;
+    let guardStage:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch'='budget-check';
     const ready = async (tx?: Prisma.TransactionClient) => {
       const batch = this.batchDispatchScope.getStore();
       if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
@@ -623,6 +624,7 @@ export class XhsSubscriptionRuntime
       // Reject already-known failures before any reservation, including generic operator caps.
       for (const scope of scopes) await scope.budget!.check(scope.id);
       if (!totalCovered && this.sourceAdmission) {
+        guardStage='source-admission';
         const release = await this.sourceAdmission(
           scopes.length > 0,
           this.wholeSourceGroup.getStore(),
@@ -631,9 +633,12 @@ export class XhsSubscriptionRuntime
         );
         if (release) undo.push(release);
       }
+      guardStage='budget-reserve';
       for (const scope of scopes)
         undo.push(await scope.budget!.reserve(scope.id));
+      guardStage='ready';
       await ready();
+      guardStage='source-dispatch';
       result = this.sourceDispatch
         ? await this.sourceDispatch(
             dispatch,
@@ -645,6 +650,15 @@ export class XhsSubscriptionRuntime
         : await dispatch();
       this.batchDispatchScope.getStore()?.onReceipt();
     } catch (error) {
+      if(!dispatched){
+        const diagnostic=this.taskSourceContext.getStore()?.diagnostic;
+        if(diagnostic){
+          diagnostic.guardStage=guardStage;
+          diagnostic.guardErrorKind=error instanceof TypeError?'TypeError':error instanceof RangeError?'RangeError':error instanceof Error?'Error':'Other';
+          const code=error && typeof error==='object' && 'code' in error ? error.code : undefined;
+          if(typeof code==='string' && ['XHS_TASK_CANCELLED','XHS_SESSION_CHANGED','XHS_SESSION_REQUIRED','XHS_SESSION_BUSY','XHS_LIVE_ACCESS_DISABLED','XHS_REQUEST_BUDGET_REQUIRED','XHS_REQUEST_BUDGET_EXHAUSTED','XHS_REQUEST_RATE_PAUSED','XHS_SOURCE_RISK_REVIEW_REQUIRED','XHS_STORAGE_FAILED','P2028','P2034'].includes(code))diagnostic.guardCode=code;
+        }
+      }
       // Only a known non-dispatch permits reservation-specific CAS rollback.
       const group=this.wholeSourceGroup.getStore();
       if(group?.generationId && error && typeof error==='object' && 'code' in error && typeof error.code==='string' && /^P\d{4}$/.test(error.code)) {
@@ -937,6 +951,7 @@ export class XhsSubscriptionRuntime
       const isolatedPhase=riskOwner && !this.stopCode && taskScope?.current?.owner===riskOwner && taskScope.current.isolatedUnknown &&
         (taskScope.current.phase==='media' ? error instanceof XhsMediaError && ['XHS_MEDIA_TRANSPORT_FAILED','XHS_MEDIA_TIMEOUT'].includes(error.code) : error instanceof RedbookPauseError && error.reason==='transport') ? taskScope.current.phase : undefined;
       if(isolatedPhase){riskOwner=undefined;this.persistedRisk=undefined;}
+      const safeDetailMismatch=!!riskOwner && !this.wholeSourceGroup.getStore() && !this.stopCode && error instanceof XhsDetailIdentityMismatchError && taskScope?.current?.owner===riskOwner && taskScope.current.phase==='detail' && taskScope.current.confirmedResponse===true;
       if (riskOwner) {
         const known =
           admission?.failure instanceof XhsSubscriptionError
@@ -944,7 +959,7 @@ export class XhsSubscriptionRuntime
             : error;
         const code =
           this.stopCode ??
-          ((known instanceof RedbookPreDispatchError) || (known instanceof RedbookPauseError && known.reason==='configuration') || (known instanceof XhsSourceParseError) ||
+          (safeDetailMismatch || (known instanceof RedbookPreDispatchError) || (known instanceof RedbookPauseError && known.reason==='configuration') || (known instanceof XhsSourceParseError) ||
           (admission?.failure === known &&
             known instanceof XhsSubscriptionError &&
             ['XHS_TASK_CANCELLED','XHS_SESSION_CHANGED','XHS_SESSION_REQUIRED','XHS_LIVE_ACCESS_DISABLED','XHS_SESSION_BUSY'].includes(known.code)) ||
@@ -976,6 +991,7 @@ export class XhsSubscriptionRuntime
       if (generation !== this.generation) return failure('XHS_SESSION_CHANGED');
       if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
       if(isolatedPhase)throw new XhsTaskSourceUnknownError(isolatedPhase);
+      if(safeDetailMismatch)throw new XhsSourceParseError('XHS_DETAIL_PARSE_FAILED');
       if(error instanceof RedbookPreDispatchError || (error instanceof RedbookPauseError && error.reason==='configuration'))throw new XhsPreDispatchError('XHS_LOCAL_PRE_DISPATCH_FAILED');
       // RedbookClient intentionally wraps transport failures. Preserve only the
       // local pre-dispatch admission result, never provider text or responses.
