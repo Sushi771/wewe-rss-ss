@@ -14,9 +14,9 @@ const directoryIdentity = (at) => {
   return [s.dev, s.ino, s.birthtimeNs].map(String);
 };
 function fixture(run) {
-  const base = fs.mkdtempSync(
+  const base = fs.realpathSync.native(fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-reference-adapter-'),
-  );
+  ));
   const installed = path.join(base, 'installed'),
     registry = path.join(base, 'registry'),
     project = path.join(base, 'project');
@@ -218,7 +218,7 @@ function fixture(run) {
     run(f);
   } finally {
     assert(
-      path.dirname(base) === os.tmpdir() &&
+      path.dirname(base) === fs.realpathSync.native(os.tmpdir()) &&
         path.basename(base).startsWith('wewe-reference-adapter-'),
     );
     fs.rmSync(base, { recursive: true, force: true });
@@ -229,6 +229,170 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+
+function sameSchemaPair(f) {
+  const manifests = f.packages.slice(0, 2).map((pkg, index) => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(pkg.path, 'release.json')));
+    manifest.schemaCompatibility = 'current'; manifest.files = {}; manifest.links = {};
+    for (const [name, text] of Object.entries({ 'server/prisma/schema.prisma': 'model Example {\n id Int @id\n}\n',
+      'server/prisma/migrations/001/migration.sql': 'SELECT 1;\n', 'server/prisma/migrations/migration_lock.toml': 'provider = "sqlite"\n' })) {
+      const bytes = Buffer.from(index ? text : text.replace(/\n/g, '\r\n'));
+      fs.mkdirSync(path.dirname(path.join(pkg.path, name)), { recursive: true }); fs.writeFileSync(path.join(pkg.path, name), bytes);
+      manifest.files[name] = sha(bytes);
+    }
+    f.write(path.join(pkg.path, 'release.json'), manifest); f.policy.packageProofs[pkg.id] = f.pin(path.join(pkg.path, 'release.json')).sha256;
+    return manifest;
+  });
+  f.proof.kind = 'same-schema-unknown-claim-rollback'; delete f.proof.checks.additiveSchema;
+  f.proof.checks.sameSchema = f.proof.checks.isolatedRuntimeStarted = true;
+  f.proof.rollback = { id: 'current', sourceCommit: manifests[0].sourceCommit, manifestSha256: f.policy.packageProofs.current };
+  f.proof.candidate.manifestSha256 = f.policy.packageProofs.candidate;
+  f.proof.schemaProofSha256 = hash(require('./preserving-contract.cjs').validateSameSchema(...manifests, {
+    oldRoot: f.packages[0].path, candidateRoot: f.packages[1].path,
+    oldManifestSha256: f.policy.packageProofs.current, candidateManifestSha256: f.policy.packageProofs.candidate,
+  }));
+  f.policy.preservingUpdate = { format: 1, operation: 'restart', effects: ['new-output-only', 'approved-active-switch'], active: {
+    pointer: f.pointer, pointerSha256: f.pin(f.pointer).sha256, currentId: 'current', candidateId: 'candidate',
+    currentManifestSha256: f.policy.packageProofs.current, candidateManifestSha256: f.policy.packageProofs.candidate,
+    oldProcess: { pid: 10, startUtc: f.native.processesBefore[0].startUtc, executableSha256: f.pin(path.join(f.packages[0].path, 'runtime.exe')).sha256 },
+  } };
+  f.native.format = 2; f.native.complete = false; f.native.observationComplete = true; f.native.categories.shortcuts = 'not_applicable';
+  f.repinProof();
+}
+test('same-schema reference proof uses the exact preserving pair and keeps native categories mandatory', () => fixture((f) => {
+  sameSchemaPair(f); const result = f.run(); assert.deepEqual(result.errors, []); assert.equal(result.observationComplete, true);
+  assert.equal(result.compatibility.verified, true); assert.equal(result.complete, false);
+  f.native.categories.tasks = 'not_applicable'; reject(f, 'REFERENCE_NATIVE_QUERY_INCOMPLETE');
+}));
+for (const mutation of ['runtime evidence', 'schema bytes', 'schema digest', 'active manifest', 'additive disguise'])
+  test('same-schema reference proof refuses changed ' + mutation, () => fixture((f) => {
+    sameSchemaPair(f);
+    if (mutation === 'runtime evidence') f.proof.checks.isolatedRuntimeStarted = false;
+    if (mutation === 'schema bytes') fs.appendFileSync(path.join(f.packages[1].path, 'server/prisma/migrations/001/migration.sql'), 'SELECT 2;');
+    if (mutation === 'schema digest') f.proof.schemaProofSha256 = 'f'.repeat(64);
+    if (mutation === 'active manifest') f.policy.preservingUpdate.active.candidateManifestSha256 = 'f'.repeat(64);
+    if (mutation === 'additive disguise') delete f.proof.checks.sameSchema;
+    f.repinProof(); reject(f, 'REFERENCE_COMPATIBILITY_UNPROVEN');
+  }));
+function projectEffectFixture(f) {
+  sameSchemaPair(f); const audit=path.join(f.base,'audit');fs.mkdirSync(audit);
+  f.policy.format=2;f.policy.roots.push({path:audit});
+  f.policy.preservingUpdate.effectScope={format:1,container:f.installed,allocations:[{path:audit,mode:'audit-children'}],taskIdentities:['\\SyntheticLogon'],lifecycleSha256:null};
+  const self={pid:200,executable:f.controller,argv:[f.controller,'probe.cjs'],collectorExecutable:f.worker,collectorArgv:[f.worker,'collector.ps1']};
+  const own=[f.process(200,99,f.controller,`${quote(f.controller)} probe.cjs`),f.process(201,200,f.worker,`${quote(f.worker)} collector.ps1`)];
+  f.native.processesBefore.push(...own);f.native.processesAfter.push(...structuredClone(own));
+  f.run=()=>probe(f.policy,f.native,{callerPid:99,self});return self;
+}
+function installCallerFixture(f) {
+  projectEffectFixture(f);
+  f.policy.preservingUpdate.operation = 'install';
+  f.policy.preservingUpdate.effects = ['new-output-only'];
+  f.policy.preservingUpdate.effectScope.allocations = [{ path: f.packages[1].path, mode: 'exclusive-package' }];
+  const folder = path.join(f.project, 'scripts/local-release');
+  fs.mkdirSync(folder, { recursive: true });
+  const entry = path.join(folder, 'install-lifecycle.cjs');
+  const plan = path.join(f.registry, 'reviewed-install-plan.json');
+  f.write(entry, '// inert reviewed install entry');
+  f.write(plan, { root: f.installed, plan: { current: 'current', candidate: f.packages[1].path, rollback: f.packages[2].path } });
+  const tokens = [f.controller, entry, '--plan', plan];
+  for (const list of [f.native.processesBefore, f.native.processesAfter])
+    list.find(p => p.pid === 99).commandLine = tokens.map(quote).join(' ');
+  f.policy.windowsReferences.launchers.push({
+    entry, argv: tokens, executable: f.pin(f.controller), files: [f.pin(entry), f.pin(plan)],
+    workingDirectory: f.project, cwdIndependent: true, pointerPath: f.pointer,
+  });
+  return { entry, plan, tokens };
+}
+test('install caller: existing exact launcher resolves the reviewed original-project entry', () => fixture(f => {
+  installCallerFixture(f);
+  const r = f.run();
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.observationComplete, true);
+  assert.equal(r.complete, false);
+  assert.equal(r.categories.inflight, true);
+  assert(r.records.some(row => row.kind === 'processes' && row.pid === 99 && row.packageId === 'current'));
+  assert(r.records.some(row => row.kind === 'processes' && row.pid === 10));
+  assert.equal(r.records.filter(row => row.kind === 'tasks').length, 1);
+}));
+for (const mutation of ['entry-bytes', 'plan-bytes', 'extra-argument', 'wrong-plan-argument', 'native-executable', 'executable-bytes', 'changed-start', 'changed-command', 'missing-caller', 'wrong-parent', 'extra-project-script', 'late-writer-child'])
+  test('install caller: existing launcher refuses ' + mutation, () => fixture(f => {
+    const c = installCallerFixture(f);
+    const before = f.native.processesBefore.find(p => p.pid === 99);
+    const after = f.native.processesAfter.find(p => p.pid === 99);
+    if (mutation === 'entry-bytes') fs.appendFileSync(c.entry, '// changed');
+    if (mutation === 'plan-bytes') fs.appendFileSync(c.plan, ' ');
+    if (mutation === 'extra-argument') before.commandLine = after.commandLine += ' --unexpected';
+    if (mutation === 'wrong-plan-argument') before.commandLine = after.commandLine = [f.controller, c.entry, '--plan', f.compatibility].map(quote).join(' ');
+    if (mutation === 'native-executable') before.executable = after.executable = f.worker;
+    if (mutation === 'executable-bytes') fs.appendFileSync(f.controller, 'changed');
+    if (mutation === 'changed-start') after.startUtc = '2026-02-01T00:00:00.000Z';
+    if (mutation === 'changed-command') after.commandLine += ' --unexpected';
+    if (mutation === 'missing-caller') before.commandLine = '';
+    if (mutation === 'wrong-parent') f.native.processesBefore.find(p => p.pid === 200).parentPid = 1;
+    if (mutation === 'extra-project-script') {
+      const script = path.join(f.project, 'unapproved.cjs'); f.write(script, '// inert');
+      const row = f.process(804, 1, f.worker, [f.worker, script].map(quote).join(' '));
+      f.native.processesBefore.push(row); f.native.processesAfter.push(structuredClone(row));
+    }
+    if (mutation === 'late-writer-child') f.native.processesAfter.push(f.process(804, 99, f.worker, quote(f.worker)));
+    const r = f.run(); assert.notEqual(r.observationComplete, true); assert(r.errors.length);
+    assert.equal(r.complete, false);
+    if (mutation === 'native-executable') assert(r.errors.includes('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED'));
+  }));
+test('effect references observe only the bound project without claiming whole-host completeness',()=>fixture(f=>{
+  projectEffectFixture(f);
+  const unknown={pid:800,parentPid:1,name:'unrelated',executable:'',commandLine:'',startUtc:null};
+  const shell=f.process(801,1,f.worker,`${quote(f.worker)} -Command unrelated`);
+  f.native.processesBefore.push(unknown,shell);f.native.processesAfter.push(structuredClone(unknown),structuredClone(shell));
+  const unrelated={identity:'\\Unrelated',actions:[{execute:'%UNKNOWN%',arguments:'-Command unrelated',workingDirectory:''}]};
+  f.native.tasks.push(unrelated);f.native.tasksAfter.push(structuredClone(unrelated));
+  f.native.tasksAfter.find(t=>t.identity==='\\Unrelated').actions[0].arguments='-Command unrelated-later';
+  const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.complete,false);assert.equal(r.observationComplete,true);assert.equal(r.processObservation,'preserving-project-only');
+  assert(r.records.some(x=>x.kind==='processes'&&x.pid===10));assert.equal(r.records.filter(x=>x.kind==='tasks').length,1);
+  assert.equal(r.records.find(x=>x.kind==='tasks').identity,hash([f.native.tasks[0].identity,f.native.tasks[0].actions[0]]));
+  assert(!r.records.some(x=>x.pid===800||x.pid===801));
+  delete f.policy.preservingUpdate.effectScope;assert(f.run().errors.includes('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE'));
+}));
+for(const mutation of ['old process fields','extra project task','missing project task','unknown writer child','unapproved project script','control changed','unknown collector child'])
+  test('effect references refuse '+mutation,()=>fixture(f=>{
+    projectEffectFixture(f);
+    if(mutation==='old process fields')for(const list of [f.native.processesBefore,f.native.processesAfter])list.find(p=>p.pid===10).commandLine='';
+    if(mutation==='extra project task'){const t={...f.native.tasks[0],identity:'\\UnapprovedProjectTask'};f.native.tasks.push(t);f.native.tasksAfter.push(structuredClone(t));}
+    if(mutation==='missing project task')f.native.tasks=f.native.tasksAfter=[];
+    if(mutation==='unknown writer child'){const p={pid:802,parentPid:10,name:'unknown',executable:'',commandLine:'',startUtc:null};f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    if(mutation==='unapproved project script'){const script=path.join(f.project,'unapproved.cjs');fs.writeFileSync(script,'// inert');const p=f.process(804,1,f.worker,`${quote(f.worker)} ${quote(script)}`);f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    if(mutation==='control changed')f.native.processesAfter.find(p=>p.pid===200).startUtc='2026-01-02T00:00:00Z';
+    if(mutation==='unknown collector child'){const p=f.process(803,201,f.worker,quote(f.worker));f.native.processesBefore.push(p);f.native.processesAfter.push(structuredClone(p));}
+    assert.equal(f.run().observationComplete,undefined);assert(f.run().errors.length);
+  }));
+test('preserving build records shortcuts as not applicable without asserting complete coverage', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.shortcuts = 'not_applicable'; f.native.categories.tasks = 'not_applicable';
+    f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
+    const result = f.run();
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.complete, false);
+    assert.equal(result.observationComplete, true);
+    assert.equal(result.categories.shortcuts, 'not_applicable');
+    assert.equal(result.categories.processes, true);
+    assert.equal(result.categories.tasks, 'not_applicable');
+  }));
+test('preserving observation rejects changed process and incomplete task evidence', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.shortcuts = 'not_applicable'; f.native.categories.tasks = 'not_applicable';
+    f.native.shortcuts = []; f.native.shortcutCoverage = []; f.native.shortcutDirectories = [];
+    f.native.processesAfter[0].startUtc = '2026-02-01T00:00:00.000Z';
+    assert.equal(f.run().observationComplete, undefined);
+    f.native.processesAfter = structuredClone(f.native.processesBefore);
+    f.native.categories.tasks = true;
+    assert.equal(f.run().observationComplete, undefined);
+  }));
 test('real contract emits all six complete categories from pinned synthetic sources', () =>
   fixture((f) => {
     const r = f.run();
@@ -849,3 +1013,133 @@ test('build-only probe retains real reference coverage without claiming pair com
     f.native.categories.tasks = false;
     assert.equal(f.run().complete, false);
   }));
+
+test('preserving build never reads inapplicable malformed task or launcher data', () =>
+  fixture((f) => {
+    f.policy.phase = 'build-only';
+    f.policy.preservingUpdate = { format: 1, operation: 'build', effects: ['new-output-only'] };
+    f.native.format = 2; f.native.complete = false; f.native.observationComplete = true;
+    f.native.categories.tasks = f.native.categories.shortcuts = 'not_applicable';
+    let taskQueries=0, launcherReads=0;
+    for (const key of ['tasks','tasksAfter','shortcuts','shortcutCoverage','shortcutDirectories'])
+      Object.defineProperty(f.native,key,{get(){taskQueries++;throw Error('inapplicable native query');}});
+    Object.defineProperty(f.policy.windowsReferences,'launchers',{get(){launcherReads++;throw Error('inapplicable launcher read');}});
+    const result=f.run(); assert.deepEqual(result.errors,[]);
+    assert.equal(result.observationComplete,true); assert.equal(result.complete,false);
+    assert.equal(result.categories.tasks,'not_applicable');
+    assert.equal(taskQueries,0);assert.equal(launcherReads,0);
+    assert(result.records.some(r=>r.kind==='processes'));
+    assert(!result.records.some(r=>['tasks','shortcuts'].includes(r.kind)));
+    f.state.claim={id:'foreign',root:f.installed,outputs:[f.packages[1].path]};f.saveState();
+    assert.equal(f.run().observationComplete,undefined);
+  }));
+test('preserving invalid build effects reject before any native observation', () =>
+  fixture((f) => {
+    f.policy.phase='build-only';
+    f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only','approved-active-switch']};
+    let reads=0;Object.defineProperty(f.native,'categories',{get(){reads++;throw Error('native should not be touched');}});
+    assert.equal(f.run().observationComplete,undefined);assert.equal(reads,0);
+  }));
+
+test('preserving restart and original mode do not accept build task exemptions', () =>
+  fixture((f) => {
+    f.native.categories.tasks = 'not_applicable';
+    assert.equal(f.run().complete, false);
+    f.policy.preservingUpdate = { format: 1, operation: 'restart', effects: ['new-output-only','approved-active-switch'], active: {
+      pointer: f.pointer, currentId: 'current', candidateId: 'candidate',
+      pointerSha256: f.pin(f.pointer).sha256,
+      currentManifestSha256: f.pin(path.join(f.packages[0].path,'release.json')).sha256,
+      candidateManifestSha256: f.pin(path.join(f.packages[1].path,'release.json')).sha256,
+      oldProcess: { pid: 10, startUtc: f.native.processesBefore[0].startUtc,
+        executableSha256: f.pin(path.join(f.packages[0].path,'runtime.exe')).sha256 },
+    } };
+    f.native.format=2;f.native.complete=false;f.native.observationComplete=true;
+    f.native.categories.shortcuts='not_applicable';
+    assert.equal(f.run().observationComplete, undefined);
+    f.native.categories.tasks=true;
+    const r=f.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);
+    assert.equal(r.categories.tasks,true);assert(r.records.some(x=>x.kind==='tasks'));
+  }));
+
+function buildControlFixture(f){
+ const fresh=path.join(f.base,'fresh');fs.mkdirSync(fresh);const st=fs.lstatSync(f.pointer,{bigint:true});
+ f.policy.format=2;f.policy.phase='build-only';f.policy.roots=[{path:fresh}];f.policy.buildOnly={outputRoot:fresh};
+ f.policy.preservingUpdate={format:1,operation:'build',effects:['new-output-only'],rootRoles:{format:1,readOnlyRoots:[{path:f.installed,identity:directoryIdentity(f.installed)}],controls:[{...f.pin(f.pointer),identity:[st.dev,st.ino,st.birthtimeNs].map(String)}]}};
+ f.native.format=2;f.native.complete=false;f.native.observationComplete=true;f.native.categories.tasks=f.native.categories.shortcuts='not_applicable';
+ const self={pid:200,executable:f.controller,argv:[f.controller,'probe.cjs'],collectorExecutable:f.worker,collectorArgv:[f.worker,'collector.ps1']};
+ const own=[f.process(200,99,f.controller,`${quote(f.controller)} probe.cjs`),f.process(201,200,f.worker,`${quote(f.worker)} collector.ps1`)];
+ f.native.processesBefore.push(...own);f.native.processesAfter.push(...structuredClone(own));
+ return {fresh,self,run:()=>probe(f.policy,f.native,{callerPid:99,self})};
+}
+test('preserving split build observes bound controls without claiming global process coverage',()=>fixture(f=>{
+ const c=buildControlFixture(f),r=c.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);assert.equal(r.complete,false);assert.equal(r.processObservation,'build-control-only');assert.equal(r.categories.inflight,true);assert.equal(r.categories.tasks,'not_applicable');assert.equal(r.categories.shortcuts,'not_applicable');assert(!r.records.some(x=>x.kind==='processes'));
+ f.write(f.pointer,{format:1,id:'rollback'});assert.equal(c.run().observationComplete,undefined);
+}));
+test('preserving build control accepts out-of-scope unknown rows and shells; original mode refuses',()=>fixture(f=>{
+ const incomplete={pid:300,parentPid:1,name:'synthetic',executable:'',commandLine:'',startUtc:null};f.native.processesBefore.push(incomplete);f.native.processesAfter.push(structuredClone(incomplete));assert(f.run().errors.includes('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE'));
+ const c=buildControlFixture(f),shell=f.process(301,1,f.worker,`${quote(f.worker)} -Command synthetic`);f.native.processesBefore.push(shell);f.native.processesAfter.push(structuredClone(shell));assert.deepEqual(c.run().errors,[]);
+}));
+for(const kind of ['caller-missing','probe-missing','collector-missing','caller-changed','probe-changed','collector-changed','child','late-child','pid-duplicate','parent-invalid','output-before','output-after','native-error','control-pin','ledger'])test('preserving build control rejects '+kind,()=>fixture(f=>{
+ const c=buildControlFixture(f),before=f.native.processesBefore,after=f.native.processesAfter,ids={caller:99,probe:200,collector:201};
+ if(kind.endsWith('-missing'))before.find(p=>p.pid===ids[kind.split('-')[0]]).commandLine='';
+ if(kind.endsWith('-changed'))after.find(p=>p.pid===ids[kind.split('-')[0]]).startUtc='2026-02-01T00:00:00Z';
+ if(kind==='child'||kind==='late-child'){const p=f.process(202,201,f.worker,quote(f.worker));after.push(p);if(kind==='child')before.push(structuredClone(p));}
+ if(kind==='pid-duplicate')before.push(structuredClone(before[0]));if(kind==='parent-invalid')before[0].parentPid='bad';
+ if(kind==='output-before'||kind==='output-after')(kind==='output-before'?before:after).push(f.process(302,1,f.worker,`${quote(f.worker)} ${quote(c.fresh)}`));
+ if(kind==='native-error')f.native.errors.push('REFERENCE_NATIVE_QUERY_FAILED');if(kind==='control-pin')fs.appendFileSync(f.pointer,'changed');if(kind==='ledger'){f.state.configSha='b'.repeat(64);f.saveState();}
+ const result=c.run();assert.notEqual(result.observationComplete,true);assert(result.errors.length);assert.equal(result.complete,false);if(kind.startsWith('output-'))assert(result.errors.includes('REFERENCE_PROCESS_APPEARED'));
+}));
+
+if (process.platform === 'win32')
+  test('preserving collector build uses synthetic processes without invoking task or shortcut queries', () =>
+    fixture((f) => {
+      const policyFile=path.join(f.base,'build-policy.json');
+      f.write(policyFile,{phase:'build-only',preservingUpdate:{format:1,operation:'build',effects:['new-output-only']}});
+      const literal=s=>"'"+s.replaceAll("'","''")+"'";
+      const harness=path.join(f.base,'collector-harness.ps1');
+      f.write(harness,`$ErrorActionPreference='Stop'
+$script:taskCalls=0
+function Get-CimInstance { [CmdletBinding()]param([string]$ClassName)
+  if($ClassName -ne 'Win32_Process'){throw 'SYNTHETIC_UNEXPECTED_CLASS'}
+  [pscustomobject]@{ProcessId=101;ParentProcessId=1;Name='synthetic.exe';ExecutablePath='C:\\synthetic.exe';CommandLine='synthetic';CreationDate=[datetime]'2026-01-01T00:00:00Z'}
+}
+function Get-ScheduledTask { [CmdletBinding()]param();$script:taskCalls++;throw 'SYNTHETIC_TASK_QUERY_FORBIDDEN' }
+$raw=(& { . ${literal(path.join(__dirname,'windows-release-reference-collector.ps1'))} -PolicyFile ${literal(policyFile)} } | Out-String)
+[pscustomobject]@{native=($raw | ConvertFrom-Json);taskCalls=$script:taskCalls} | ConvertTo-Json -Depth 10 -Compress
+`);
+      const output=execFileSync(path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoProfile','-NonInteractive','-File',harness],{windowsHide:true,encoding:'utf8',timeout:20000,maxBuffer:128*1024});
+      const r=JSON.parse(output.replace(/^\uFEFF/,''));
+      assert.equal(r.taskCalls,0);assert.equal(r.native.complete,false);
+      assert.equal(r.native.observationComplete,true);assert.deepEqual(r.native.errors,[]);
+      assert.equal(r.native.categories.tasks,'not_applicable');assert.equal(r.native.categories.shortcuts,'not_applicable');
+      assert.equal(r.native.categories.processes,true);assert.equal(r.native.processesBefore.length,1);
+    }));
+
+function consoleFixture(f){
+ const c=buildControlFixture(f),folder=path.join(f.base,'synthetic-system32');fs.mkdirSync(folder);const exe=path.join(folder,'conhost.exe');fs.writeFileSync(exe,'inert pinned system host fixture');const st=fs.lstatSync(exe,{bigint:true});
+ c.self.consoleHost={...f.pin(exe),identity:[st.dev,st.ino,st.size,st.birthtimeNs,st.mtimeNs,st.ctimeNs].map(String)};
+ const hosts=[f.process(202,200,exe,`\\??\\${exe} 0x1234`),f.process(203,201,exe,`\\??\\${exe} 0x5678`)];
+ f.native.processesBefore.push(...hosts);f.native.processesAfter.push(...structuredClone(hosts));return {...c,exe,hosts};
+}
+test('console control accepts two proven system hosts without claiming global complete',()=>fixture(f=>{
+ const c=consoleFixture(f),r=c.run();assert.deepEqual(r.errors,[]);assert.equal(r.observationComplete,true);assert.equal(r.complete,false);assert.equal(r.processObservation,'build-control-only');assert.equal(r.categories.inflight,true);assert(!r.records.some(r=>r.kind==='processes'));
+}));
+for(const mode of ['wrong-path','bad-pin','unknown-argument','extra-argument','extra-child','extra-host','changed-start','changed-parent','missing-field','output-reference','wrong-argv-path','missing-pin','changed-file','full-mode'])test('console control refuses '+mode,()=>fixture(f=>{
+ const c=consoleFixture(f),p=f.native.processesBefore.find(p=>p.pid===202),q=f.native.processesAfter.find(p=>p.pid===202);
+ if(mode==='wrong-path')p.executable=f.worker;
+ if(mode==='bad-pin')c.self.consoleHost.sha256='0'.repeat(64);
+ if(mode==='unknown-argument')p.commandLine=q.commandLine=`\\??\\${c.exe} -ForceV1`;
+ if(mode==='extra-argument')p.commandLine=q.commandLine+= ' --headless';
+ if(mode==='extra-child'){const child=f.process(204,202,f.worker,quote(f.worker));f.native.processesBefore.push(child);f.native.processesAfter.push(structuredClone(child));}
+ if(mode==='extra-host'){const child=f.process(204,200,c.exe,p.commandLine);f.native.processesBefore.push(child);f.native.processesAfter.push(structuredClone(child));}
+ if(mode==='changed-start')q.startUtc='2026-02-01T00:00:00Z';
+ if(mode==='changed-parent')q.parentPid=201;
+ if(mode==='missing-field')q.commandLine='';
+ if(mode==='output-reference')p.workingDirectory=q.workingDirectory=c.fresh;
+ if(mode==='wrong-argv-path')p.commandLine=q.commandLine=`\\??\\${f.worker} 0x1234`;
+ if(mode==='missing-pin')delete c.self.consoleHost;
+ if(mode==='changed-file')fs.appendFileSync(c.exe,'changed');
+ if(mode==='full-mode'){delete f.policy.preservingUpdate;f.native.format=1;f.native.complete=true;f.native.categories.tasks=f.native.categories.shortcuts=true;}
+ const r=c.run();assert.notEqual(r.observationComplete,true);assert(r.errors.length);assert.equal(r.complete,false);
+}));

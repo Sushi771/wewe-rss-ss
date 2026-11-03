@@ -1,6 +1,15 @@
+import { safeXhsAvatarUrl } from './xhs-profile';
+import { load as loadHtml } from 'cheerio';
+import { readHistoryHandoffs } from './xhs-history-handoff';
+import { assertManualMediaBinding, assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
+import { resumeXhsMedia } from './xhs-native-media';
+import { XhsMediaLocalResponseError } from './xhs-media-error';
+import { hasTaskDetailUnknown, hasTaskDetailLocalReview, hasTaskMediaUnknown, terminalStartedDetail } from './xhs-task-source-fence';
+import { xhsMediaTaskStore } from './xhs-media-task-store';
+import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Prisma, XhsCreator } from '@prisma/client';
 import {
   XhsAuthor,
@@ -14,13 +23,28 @@ import {
   assertIncrementalWriteAdmission,
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import { startupAudit, waitForStartupAudit, assertDatabaseWritesAllowed } from '../startup-audit';
 import {
   XhsNormalizedCandidate,
   xhsArchiveDraft,
 } from './xiaohongshu-contract';
+import type { mapRedbookBasicDetail } from './redbook-response';
+import type { XhsMediaManifest } from './xhs-native-media';
 import { verifiedDownloadBody } from '../article-verified-download';
+import { prepareXhsVideoDownload, inspectCachedMp4 } from '../xhs-video-download';
 import { xhsPublicInputUrl } from './xhs-short-link';
-import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
+import { XhsSubscriptionError, XhsPreDispatchError, XhsSourceParseError, XhsTaskSourceUnknownError, xhsPublicCode } from './xhs-subscription-errors';
+import type { RedbookTransportFailureKind } from './redbook-client';
+function safeFailureKind(error:unknown):'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other' {
+  if(error instanceof TypeError)return 'TypeError';
+  if(error instanceof RangeError)return 'RangeError';
+  if(error instanceof SyntaxError)return 'SyntaxError';
+  return error instanceof Error?'Error':'Other';
+}
+import { saveXhsMetrics } from './xhs-engagement-store';
+import { selectMissingBasic } from './xhs-missing-basic';
+import type { XhsMetricSnapshot, XhsSavedComment } from '@wewe-rss/shared';
+import type { inspectLimitedRecovery } from './xhs-limited-recovery-inspect';
 
 export const XHS_SUBSCRIPTION_SOURCE = Symbol('XHS_SUBSCRIPTION_SOURCE');
 export type XhsListedNote = {
@@ -32,16 +56,44 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  withTaskScope?<T>(scope:{taskId:string;creatorId:string},work:()=>Promise<T>):Promise<T>;
+  resetTaskDiagnostic?():void;
+  taskDiagnostic?():{dispatched:false|'transport-entered';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number;guardStage?:'budget-check'|'source-admission'|'budget-reserve'|'ready'|'source-dispatch';guardErrorKind?:'TypeError'|'RangeError'|'Error'|'Other';guardCode?:string}&Partial<import('./xhs-source-request-policy').SourceTransactionDiagnostic>|undefined;
+  withCheckpointGroup?<T>(
+    phase: 'profile' | 'list' | 'detail' | 'metrics',
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T>;
+  checkpointWholeSource?(
+    tx: Prisma.TransactionClient,
+    collectedAt?: number,
+    localFailure?: {code:'XHS_DETAIL_PARSE_FAILED';taskId:string},
+  ): Promise<void>;
+  sourceStorage?<T>(work: () => Promise<T>): Promise<T>;
+  checkpointWholeDirectory?(tx: Prisma.TransactionClient, taskId: string, creatorId: string, ids: string[]): Promise<void>;
+
+  metrics?(authorId: string, noteId?: string): Promise<XhsMetricSnapshot>;
+  comments?(
+    authorId: string,
+    noteId: string,
+    cursor: string,
+    rootId?: string,
+  ): Promise<{ comments: XhsSavedComment[]; nextCursor: string | null }>;
   capability?(): {
     sourceConfigured: boolean;
     canSubscribe: boolean;
     canRefresh: boolean;
     canDownload: boolean;
+    canCollectComments?: boolean;
     message: string;
   };
   resolve(
     url: string,
   ): Promise<{ inputKind: 'note' | 'profile'; author: XhsAuthor }>;
+  hasAuthorContext?(authorId: string): boolean;
+  hasNoteContext?(authorId: string, noteId: string): boolean;
+  restoreScheduledNoteContexts?(authorId:string,cursors:Array<string|null>):Promise<void>;
   list(
     authorId: string,
     cursor: string | null,
@@ -51,6 +103,10 @@ export interface XhsSubscriptionSource {
     notes: XhsListedNote[];
     nextCursor: string | null;
   }>;
+  basicDetail?(authorId: string, noteId: string, signal?: AbortSignal): Promise<ReturnType<typeof mapRedbookBasicDetail>>;
+  basicDetailWithMedia?(authorId: string, noteId: string, signal?: AbortSignal): Promise<{basic:ReturnType<typeof mapRedbookBasicDetail>;media:{manifest:XhsMediaManifest;getUrl:(key:string)=>string|undefined}|null}>;
+  getTransientMediaUrl?(authorId:string,noteId:string,version:string,resourceKey:string):string|undefined;
+  withScheduledMediaSession?<T>(work:(transport:import('./redbook-response').RedbookMediaTransport)=>Promise<T>,noteKey?:string):Promise<T>;
   detail(
     authorId: string,
     noteId: string,
@@ -58,6 +114,14 @@ export interface XhsSubscriptionSource {
   ): Promise<XhsNormalizedCandidate>;
 }
 type Task = XhsSubscriptionTask & {
+  schedule?: {round:string;phase:'basic'|'media';batch?:number};
+  scheduledContext?: {authorId:string;used:1;state:'started'|'confirmed'};
+  sourceActive?: {fingerprint:string;phase:string;targetHash:string;cursorHash:string;owner:string;outcome:'started'};
+  sourcePreflight?: {fingerprint:string;phase:'detail';targetHash:string;cursorHash:string;owner:string;outcome:'prepared'};
+  legacyPendingReviews?: unknown[];
+  sourceUnknowns?: Array<{marker:string;fingerprint:string;phase:string;targetHash:string;cursorHash:string;taskId:string;creatorId:string}&({outcome:'unknown';classification:'request-outcome-unknown'}|{outcome:'not-dispatched';classification:'local-pre-dispatch-review';owner:string})>;
+  historyExcludedIds?: string[];
+  scheduledMediaResults?: Record<string,'complete'|'needs-review'|'needs-detail-refresh'>;
   noteIds: string[];
   items: Record<string, 'completed' | 'skipped' | 'failed'>;
   directory?: string;
@@ -66,17 +130,47 @@ type Task = XhsSubscriptionTask & {
   listedIds?: string[];
   listFinished?: boolean;
   pageLimit?: number;
+  collectDetails?: boolean;
+  collectionScope?: 'recent' | 'all' | 'selected';
+  selectedIds?: string[];
+  selectionComplete?: boolean;
+  basicOnly?: boolean;
+  basicResults?: Record<string, 'complete' | 'missing'>;
+  basicImageChecks?: Record<string, { count: number; otherwiseComplete: boolean }>;
+  sourceFailures?: Record<string, {phase:'detail';code:'XHS_LOCAL_PRE_DISPATCH_FAILED';dispatched:false}|{phase:'detail';code:'XHS_DETAIL_OUTCOME_UNKNOWN';dispatched:false|'transport-entered'|'unknown';fenceReason?:'prior-started';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}|{phase:'detail'|'local';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number}>;
+  taskFailure?: {phase:'prepare'|'listing'|'details';code:string;errorKind:'TypeError'|'RangeError'|'SyntaxError'|'Error'|'Other';dispatched:false|'transport-entered'|'unknown';transportFailure?:RedbookTransportFailureKind;nativeCode?:string;httpStatus?:number};
+  mediaManifests?: Record<string,{state:'pending'|'none'|'needs-review';manifest?:XhsMediaManifest;code?:string;items?:Record<string,{state:string;markerVersion?:string;markerOrdinal?:number}>}>;
+  reuseCompleteCache?: boolean;
+  collectionStage?: 'listing' | 'details';
+  cacheResults?: Record<string, 'completed'>;
+  localReceipts?: Record<string, { savedAt: number; supplementStatus: string }>;
+  localArchives?: Record<string, { savedAt: number }>;
+  detailMetrics?: Record<string, number>;
+  localFilesSaved?: number;
+  localFilesReused?: number;
 };
 type Save = (
   creator: XhsCreator,
   noteId: string,
   destination: string,
-) => Promise<{ alreadySaved: boolean; mediaComplete?: boolean }>;
+) => Promise<{
+  alreadySaved: boolean;
+  mediaComplete?: boolean;
+  supplement?: { status: string };
+}>;
 type Destination = (pickToken?: string) => Promise<string>;
 const active = (t: XhsSubscriptionTask) =>
   t.state === 'queued' || t.state === 'running';
+const finishedDownload = (t: Task) =>
+  t.kind === 'download' &&
+  t.failed === 0 &&
+  t.remaining === 0 &&
+  t.completed + t.skipped === t.total &&
+  t.noteIds.length === t.total &&
+  t.noteIds.every((id) => ['completed', 'skipped'].includes(t.items[id]));
 const ahead = (saved: Task, t: Task) =>
-  saved.completed + saved.skipped > t.completed + t.skipped ||
+  (saved.collectionStage === t.collectionStage && saved.completed + saved.skipped > t.completed + t.skipped) ||
+  (saved.collectionStage === 'details' && t.collectionStage !== 'details') ||
   (saved.cursorHistory?.length ?? 0) > (t.cursorHistory?.length ?? 0) ||
   (!!saved.listFinished && !t.listFinished);
 const key = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
@@ -98,6 +192,10 @@ export function subscriptionUrl(raw: string) {
 
 @Injectable()
 export class XhsSubscriptionService implements OnModuleInit {
+  hasLocalSourceWork() { return this.pending.size>0 || this.uncertain.size>0 || this.reconciling.size>0; }
+  private startupRecovery: Promise<void> = Promise.resolve();
+  private startupRecoveryStarted = false;
+  private destroyed = false;
   private resolutions = new Map<
     string,
     {
@@ -110,6 +208,7 @@ export class XhsSubscriptionService implements OnModuleInit {
   private controllers = new Map<string, AbortController>();
   private uncertain = new Map<string, Task>();
   private reconciling = new Map<string, Promise<void>>();
+  private wholeTargets = new WeakMap<object, {creatorId:string; directory:string}>();
   private reserve?: Destination;
   private save?: Save;
   constructor(
@@ -123,6 +222,19 @@ export class XhsSubscriptionService implements OnModuleInit {
     this.reserve = reserve;
     this.save = save;
   }
+  async prepareWholeTarget(creatorId:string, pickToken?:string, currentTaskIds:string[] = []) {
+    if (!this.reserve || !this.save) return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
+    const directory = await this.reserve(pickToken);
+    for (const taskId of currentTaskIds) {
+      const task = await this.loadTask(taskId);
+      if (task.kind !== 'download' || task.creatorId !== creatorId || task.directory !== directory)
+        return reject('XHS_RESUME_DIRECTORY_CHANGED');
+    }
+    const target = Object.freeze({});
+    this.wholeTargets.set(target, {creatorId,directory});
+    return target;
+  }
+  releaseWholeTarget(target:object) { this.wholeTargets.delete(target); }
   capability() {
     if (this.source?.capability) {
       const capability = this.source.capability();
@@ -145,7 +257,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     bytes: number,
     fn: (tx: Prisma.TransactionClient) => Promise<T>,
   ) {
-    return incrementalWrite(this.db, bytes, () =>
+    const work = () => incrementalWrite(this.db, bytes, () =>
       sqliteWrites.write(async () => {
         await assertIncrementalWriteAdmission();
         return this.db.$transaction(async (tx) => {
@@ -154,12 +266,37 @@ export class XhsSubscriptionService implements OnModuleInit {
         });
       }),
     );
+    return this.source?.sourceStorage ? this.source.sourceStorage(work) : work();
   }
   async onModuleInit() {
+    if (startupAudit()?.status === 'verifying') {
+      this.startupRecovery = waitForStartupAudit().then(async (ok) => {
+        if (!ok || this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        this.startupRecoveryStarted = true;
+        await this.recoverInterrupted();
+      });
+      void this.startupRecovery.catch(() => {});
+      return;
+    }
+    await this.recoverInterrupted();
+  }
+  private async readyForMutation() {
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+    await this.startupRecovery;
+    if (this.destroyed) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+    assertDatabaseWritesAllowed();
+  }
+  async onModuleDestroy() {
+    this.destroyed = true;
+    if (this.startupRecoveryStarted) await this.startupRecovery.catch(() => {});
+  }
+  private async recoverInterrupted() {
     // A single local backend owns execution. Restart never silently replays network work.
     const rows = await this.db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_subscription_tasks WHERE state IN ('queued', 'running')`;
+    let recoveryFailed = false;
     for (const row of rows) {
       const task = JSON.parse(row.document) as Task;
       task.state = 'blocked';
@@ -169,22 +306,30 @@ export class XhsSubscriptionService implements OnModuleInit {
         await this.persist(task);
       } catch {
         /* Expose a local receipt barrier; never start work. */
+        recoveryFailed = true;
       }
     }
+    if (recoveryFailed) throw new XhsSubscriptionError('XHS_TASK_RECEIPT_UNCERTAIN');
   }
-  async resolveSubscription(input: {
-    url: string;
-  }): Promise<XhsSubscriptionResolution> {
+  async resolveSubscription(
+    input: {
+      url: string;
+    },
+    options?: { fixedErrors?: boolean },
+  ): Promise<XhsSubscriptionResolution> {
+    await this.readyForMutation();
     const url = subscriptionUrl(input.url);
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     let value: Awaited<ReturnType<XhsSubscriptionSource['resolve']>>;
     try {
       value = await this.source.resolve(url);
     } catch (error) {
+      const code = xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED');
       return reject(
-        xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED'),
-        xhsPublicCode(error, 'XHS_RESOLUTION_BLOCKED') +
-          '：无法核实作者信息或资料结构，请检查安全连接。',
+        code,
+        options?.fixedErrors
+          ? code
+          : code + '：无法核实作者信息或资料结构，请检查安全连接。',
       );
     }
     const author = value.author;
@@ -196,7 +341,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       author.profileUrl !==
         `https://www.xiaohongshu.com/user/profile/${author.id}` ||
       !['profile', 'note'].includes(value.inputKind) ||
-      (new URL(url).hostname !== 'xhslink.com' &&
+      (!['xhslink.com', 'xhslink.cn'].includes(new URL(url).hostname) &&
         value.inputKind !==
           (new URL(url).pathname.startsWith('/user/profile/')
             ? 'profile'
@@ -213,8 +358,9 @@ export class XhsSubscriptionService implements OnModuleInit {
       id: author.id,
       name: author.name.trim(),
       profileUrl: author.profileUrl,
-      ...(author.avatarUrl && /^https:\/\//.test(author.avatarUrl)
-        ? { avatarUrl: author.avatarUrl }
+      ...(author.metrics ? { metrics: author.metrics } : {}),
+      ...(safeXhsAvatarUrl(author.avatarUrl)
+        ? { avatarUrl: safeXhsAvatarUrl(author.avatarUrl) }
         : {}),
     };
     this.resolutions.set(resolutionId, {
@@ -237,12 +383,151 @@ export class XhsSubscriptionService implements OnModuleInit {
       expiresAt,
     };
   }
-  async subscribe(input: { resolutionId: string; groupId?: string }) {
+  /** Internal result only; source input and transient URLs never enter this transaction. */
+  async commitReviewedRecovery(tx: Prisma.TransactionClient, creatorId:string, input:{author:XhsAuthor;note:ReturnType<typeof inspectLimitedRecovery>}) {
+    const {author,note}=input;
+    if(author.id!==note.authorId||author.profileUrl!==`https://www.xiaohongshu.com/user/profile/${author.id}`||!note.text.trim())return reject('XHS_DETAIL_INCOMPLETE');
+    const creator=await tx.xhsCreator.findUnique({where:{id:creatorId}});
+    if(!creator?.enabled||creator.externalAuthorId!==author.id)return reject('XHS_AUTHOR_MISMATCH');
+    const noteId=key(note.noteId),old=await tx.xhsNote.findUnique({where:{id:noteId}});
+    if(old&&old.creatorId!==creatorId)return reject('XHS_AUTHOR_CONFLICT');
+    if(old?.kind && old.kind!==note.kind)return reject('XHS_DETAIL_INCOMPLETE');
+    const html=verifiedDownloadBody('<div id="js_content">'+note.text.split('\n').map(p=>'<p>'+esc(p)+'</p>').join('')+'</div>');
+    if(!old)await tx.xhsNote.create({data:{id:noteId,creatorId,title:note.title,publishTime:note.publishedAt,kind:note.kind,status:'listed',contentHtml:html}});
+    else await tx.xhsNote.update({where:{id:noteId},data:{...(old.publishTime > 0 || note.publishedAt <= 0 ? {} : {publishTime:note.publishedAt}),...(!old.contentHtml ? {title:note.title,kind:note.kind,contentHtml:html} : {})}});
+    await saveXhsMetrics(tx,'note',noteId,note.metrics);
+    return {creatorId,noteId,subscribed:true,body:old?.contentHtml?'retained':'saved',media:note.mediaFailure?'needs-review':note.media.length?'pending':'none',mediaCount:note.media.length,mediaManifest:note.media,...(note.mediaFailure?{mediaFailure:note.mediaFailure}:{})};
+  }
+  async commitLimitedRecovery(input: {
+    owner: string;
+    author: XhsAuthor;
+    note: ReturnType<typeof inspectLimitedRecovery>;
+  }) {
+    await this.readyForMutation();
+    const { owner, author, note } = input;
+    if (
+      author.id !== note.authorId ||
+      author.profileUrl !==
+        `https://www.xiaohongshu.com/user/profile/${author.id}` ||
+      !note.text.trim() || note.mediaFailure
+    )
+      return reject('XHS_DETAIL_INCOMPLETE');
+    const noteId = key(note.noteId);
+    const html = verifiedDownloadBody(
+      '<div id="js_content">' +
+        note.text
+          .split('\n')
+          .map((p) => '<p>' + esc(p) + '</p>')
+          .join('') +
+        '</div>',
+    );
+    return this.write(Buffer.byteLength(html) + 8192, async (tx) => {
+      const claim = await tx.$queryRaw<
+        Array<{ note_id: string; author_id: string; state: string }>
+      >`
+        SELECT note_id,author_id,state FROM xhs_limited_recovery
+        WHERE id='single-round' AND owner=${owner}
+        UNION ALL SELECT note_id,author_id,state FROM xhs_limited_recovery_append WHERE id='single-round' AND owner=${owner}`;
+      if (
+        claim.length !== 1 ||
+        claim[0].state !== 'started' ||
+        claim[0].note_id !== note.noteId ||
+        claim[0].author_id !== author.id
+      )
+        return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      const oldCreator = await tx.xhsCreator.findFirst({
+        where: {
+          OR: [
+            { externalAuthorId: author.id },
+            { profileUrl: author.profileUrl },
+          ],
+        },
+      });
+      if (
+        oldCreator?.externalAuthorId &&
+        oldCreator.externalAuthorId !== author.id
+      )
+        return reject('XHS_AUTHOR_CONFLICT');
+      if (oldCreator && !oldCreator.enabled)
+        return reject('XHS_SUBSCRIPTION_CHANGED');
+      const creator = oldCreator
+        ? await tx.xhsCreator.update({
+            where: { id: oldCreator.id },
+            data: { externalAuthorId: author.id, lastStatus: 'subscribed' },
+          })
+        : await tx.xhsCreator.create({
+            data: {
+              id: randomUUID(),
+              externalAuthorId: author.id,
+              profileUrl: author.profileUrl,
+              displayName: author.name,
+              lastStatus: 'subscribed',
+            },
+          });
+      const avatar = safeXhsAvatarUrl(author.avatarUrl);
+      if (avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${creator.id} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
+      const oldNote = await tx.xhsNote.findUnique({ where: { id: noteId } });
+      if (oldNote && oldNote.creatorId !== creator.id)
+        return reject('XHS_AUTHOR_CONFLICT');
+      const retained = !!oldNote?.contentHtml;
+      if (!oldNote)
+        await tx.xhsNote.create({
+          data: {
+            id: noteId,
+            creatorId: creator.id,
+            title: note.title,
+            publishTime: note.publishedAt,
+            kind: 'image-text',
+            status: 'listed',
+            contentHtml: html,
+          },
+        });
+      else if (!retained)
+        await tx.xhsNote.update({
+          where: { id: noteId },
+          data: {
+            title: note.title,
+            publishTime: note.publishedAt,
+            kind: 'image-text',
+            status: 'listed',
+            contentHtml: html,
+          },
+        });
+      await saveXhsMetrics(tx, 'note', noteId, note.metrics);
+      const manifest = JSON.stringify(note.media);
+      const changed =
+        await tx.$executeRaw`UPDATE xhs_limited_recovery SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())}
+        WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      const appended =
+        await tx.$executeRaw`UPDATE xhs_limited_recovery_append SET state='finished',media_manifest=${manifest},updated_at=${BigInt(Date.now())} WHERE id='single-round' AND owner=${owner} AND state='started'`;
+      if (changed + appended !== 1)
+        return reject('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      return {
+        creatorId: creator.id,
+        noteId,
+        subscribed: true as const,
+        body: retained ? ('retained' as const) : ('saved' as const),
+        media: note.media.length ? ('pending' as const) : ('none' as const),
+        mediaSourceEvidence: 'query-free-manifest' as const,
+        mediaCount: note.media.length,
+      };
+    });
+  }
+  async subscribe(
+    input: { resolutionId: string; groupId?: string },
+    batchReceipt?: (
+      tx: Prisma.TransactionClient,
+      creatorId: string,
+      authorId: string,
+    ) => Promise<void>,
+    startAfter?: Promise<boolean>,
+  ) {
+    await this.readyForMutation();
     const resolution = this.resolutions.get(input.resolutionId);
     if (!resolution || resolution.expiresAt <= Date.now())
       return reject('XHS_RESOLUTION_EXPIRED');
     const { author } = resolution.value;
-    return this.write(4096, async (tx) => {
+    const subscribed = await this.write(4096, async (tx) => {
       if (
         input.groupId &&
         !(await tx.managementGroup.findFirst({
@@ -281,12 +566,24 @@ export class XhsSubscriptionService implements OnModuleInit {
               groupId: input.groupId,
             },
           });
+      const avatar = safeXhsAvatarUrl(author.avatarUrl);
+      if (avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${creator.id} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
+      await saveXhsMetrics(tx, 'creator', creator.id, author.metrics);
+      if (batchReceipt) await batchReceipt(tx, creator.id, author.id);
       return {
         creatorId: creator.id,
         created: !old,
         subscribed: true as const,
       };
     });
+    // The creator is already committed; a failed enqueue is reported explicitly
+    // rather than implying that the subscription transaction was rolled back.
+    try {
+      const collection = await this.refreshFull({ id: subscribed.creatorId, scope: 'all', basicOnly: true, reuseCompleteCache: true }, startAfter);
+      return { ...subscribed, collection };
+    } catch (error) {
+      return { ...subscribed, collectionError: xhsPublicCode(error, 'XHS_TASK_BLOCKED') };
+    }
   }
   private async creator(id: string) {
     const c = await this.db.xhsCreator.findUnique({ where: { id } });
@@ -312,10 +609,107 @@ export class XhsSubscriptionService implements OnModuleInit {
       input.maxPages,
     );
   }
+  async refreshMissingBasic(input:{id:string;noteIds:string[]}) {
+    const selected=await selectMissingBasic(this.db,input.id,input.noteIds);
+    if(!selected.noteIds.length)return {state:'nothing-missing' as const};
+    return this.refreshFull({id:input.id,scope:'selected',noteIds:selected.noteIds,basicOnly:true,reuseCompleteCache:true});
+  }
+  async refreshFull(input: { id: string; scope?: 'recent' | 'all' | 'selected'; noteIds?: string[]; reuseCompleteCache?: boolean; basicOnly?: boolean; carriedBasicResults?: Record<string,'complete'|'missing'> }, startAfter?: Promise<boolean>) {
+    await this.creator(input.id);
+    const scope = input.scope ?? 'recent';
+    if (!['recent', 'all', 'selected'].includes(scope)) return reject('XHS_SELECTION_INVALID');
+    const ids = [...new Set(input.noteIds ?? [])];
+    if ((scope !== 'selected' && input.noteIds !== undefined) ||
+        (scope === 'selected' && (!ids.length || ids.length > 1000 || ids.some(id => !id || id.length > 300))))
+      return reject('XHS_SELECTION_INVALID');
+    if (scope === 'selected') {
+      for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100);
+        if (await this.db.xhsNote.count({ where: { creatorId: input.id, id: { in: batch } } }) !== batch.length)
+          return reject('XHS_SELECTION_INVALID');
+      }
+    }
+    if (input.carriedBasicResults && (scope !== 'selected' || !input.basicOnly || Object.entries(input.carriedBasicResults).some(([id,state]) => !ids.includes(id) || !['complete','missing'].includes(state)))) return reject('XHS_SELECTION_INVALID');
+    if (input.reuseCompleteCache && scope !== 'selected' && !input.basicOnly) return reject('XHS_SELECTION_INVALID');
+    return this.enqueue('list', input.id, [], undefined, undefined, undefined, true, scope, ids, startAfter, input.reuseCompleteCache, input.basicOnly, input.carriedBasicResults);
+  }
+  /** One phase per round and creator; existing task ids are never re-enqueued. */
+  async scheduleCreatorPhase(input:{round:string;creatorId:string;phase:'basic'|'media';batch?:number}) {
+    await this.creator(input.creatorId);
+    if(input.phase==='basic') return this.enqueue('list',input.creatorId,[],undefined,undefined,undefined,true,'all',undefined,undefined,false,true,undefined,{round:input.round,phase:'basic'});
+    const basic=await this.loadTask(scheduledTaskId(input.round,input.creatorId,'basic'));
+    const batch=input.batch??0;
+    if(!Number.isSafeInteger(batch)||batch<0) return reject('XHS_SELECTION_INVALID');
+    const mediaIds=basic.state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(basic.code??'') && basic.remaining===0 ? basic.noteIds.filter(id=>basic.items[id]==='completed') : basic.noteIds;
+    const ids=mediaIds.slice(batch*1000,(batch+1)*1000);
+    if(!ids.length) return {state:'nothing-to-archive' as const};
+    return this.enqueue('list',input.creatorId,ids,undefined,undefined,undefined,false,'selected',ids,undefined,false,false,undefined,{round:input.round,phase:'media',batch});
+  }
+  /** Publish current saved data through the existing identity-protected local saver. */
+  async archiveScheduled(round:string,creatorId:string):Promise<{incomplete:boolean}> {
+    return this.archiveTask(scheduledTaskId(round,creatorId,'basic'),creatorId,round);
+  }
+  private async archiveTask(taskId:string,creatorId:string,round?:string):Promise<{incomplete:boolean}> {
+    const creator=await this.creator(creatorId),basic=await this.loadTask(taskId);
+    const manual=round===undefined;
+    if(basic.creatorId!==creatorId || !['completed','partial'].includes(basic.state) || (manual ? !!basic.schedule || basic.kind!=='list' || !basic.basicOnly || !!basic.reuseCompleteCache : basic.schedule?.round!==round || basic.schedule?.phase!=='basic'))return {incomplete:true};
+    const itemPartial=basic.state==='partial'&&['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(basic.code??'')&&basic.remaining===0;
+    const historyPartial=basic.state==='partial'&&basic.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'&&!basic.failed;
+    if(!manual && basic.state==='partial'&&!itemPartial&&!historyPartial)return {incomplete:true};
+    const excluded=new Set(basic.historyExcludedIds??[]),ids=basic.noteIds.filter(id=>!excluded.has(id)&&(manual ? basic.items[id]==='completed' && basic.basicResults?.[id]==='complete' && basic.scheduledMediaResults?.[id]==='complete' : !itemPartial||basic.items[id]==='completed'));
+    const omitted=manual && ids.length!==basic.noteIds.length;
+    if(!ids.length)return {incomplete:omitted};
+    if(!this.reserve||!this.save)return {incomplete:true};
+    let directory:string;try{directory=await this.reserve();}catch{return {incomplete:true};}
+    const destinationHash=createHash('sha256').update(directory).digest('hex');
+    let incomplete=omitted;
+    for(const noteId of ids){
+      const receiptKey=createHash('sha256').update(noteId).digest('hex');
+      let before:string|undefined;
+      const record=async(state:'saved'|'failed'|'conflict',digest:string)=>this.write(8192,async tx=>{
+        if(await this.scheduledArchiveDigest(tx,creatorId,noteId)!==digest)throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId} AND creator_id=${creatorId}`;
+        if(rows.length!==1||!['completed','partial'].includes(rows[0].state))return reject('XHS_TASK_STATE_CHANGED');
+        const doc=JSON.parse(rows[0].document);if(doc.taskId!==taskId||doc.creatorId!==creatorId||(manual ? !!doc.schedule || doc.kind!=='list' || !doc.basicOnly || !!doc.reuseCompleteCache || doc.items?.[noteId]!=='completed' || doc.basicResults?.[noteId]!=='complete' || doc.scheduledMediaResults?.[noteId]!=='complete' : doc.schedule?.round!==round || doc.schedule?.phase!=='basic')||!Array.isArray(doc.noteIds)||!doc.noteIds.includes(noteId))return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+        doc.scheduledArchive={...(doc.scheduledArchive??{}),[receiptKey]:{digest,state,destinationHash}};
+        if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(doc)} WHERE id=${taskId} AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      });
+      try {
+        before=await this.scheduledArchiveDigest(this.db,creatorId,noteId);
+        const current=await this.loadTask(taskId),receipts=(current as any).scheduledArchive??{};
+        const previous=receipts[receiptKey],same=previous?.digest===before&&previous?.destinationHash===destinationHash;
+        if(same && previous.state==='saved')continue;
+        if(same && previous.state==='conflict'){incomplete=true;continue;}
+        const saved=await this.save(creator,noteId,directory);
+        if(saved.mediaComplete===false)throw new XhsSubscriptionError('XHS_LOCAL_MEDIA_INCOMPLETE');
+        // A failed acknowledgement is reconciled only after the existing
+        // non-overwriting saver has found the matching persisted article.
+        if(same && previous.state==='failed' && saved.alreadySaved!==true)throw new XhsSubscriptionError('XHS_LOCAL_SAVE_UNCONFIRMED');
+        if(saved.supplement?.status==='conflict-version'){incomplete=true;await record('conflict',before);}
+        else await record('saved',before);
+      } catch {
+        incomplete=true;
+        if(before)try{await record('failed',before);}catch{/* changed snapshot or storage remains incomplete */}
+      }
+    }
+    return {incomplete};
+  }
+  private async scheduledArchiveDigest(db:Pick<Prisma.TransactionClient,'$queryRaw'>,creatorId:string,noteId:string):Promise<string> {
+    const note=await db.$queryRaw<Array<{id:string;title:string;publish_time:number;status:string;kind:string|null;content_html:string|null;video_sha256:string|null}>>`SELECT id,title,publish_time,status,kind,content_html,video_sha256 FROM xhs_notes WHERE id=${noteId} AND creator_id=${creatorId}`;
+    if(note.length!==1)return reject('XHS_NOTE_NOT_FOUND');
+    const creator=await db.$queryRaw<Array<{display_name:string;external_author_id:string|null;enabled:number|boolean}>>`SELECT display_name,external_author_id,enabled FROM xhs_creators WHERE id=${creatorId}`;
+    if(creator.length!==1||(creator[0].enabled!==true&&creator[0].enabled!==1)||!creator[0].external_author_id)return reject('XHS_SUBSCRIPTION_CHANGED');
+    const comments=await db.$queryRaw<Array<{comment_id:string;document:string}>>`SELECT comment_id,document FROM xhs_saved_comments WHERE note_id=${noteId} ORDER BY comment_id`;
+    const windows=await db.$queryRaw<Array<{scope:string;document:string}>>`SELECT scope,document FROM xhs_comment_windows WHERE note_id=${noteId} ORDER BY scope`;
+    const metrics=await db.$queryRaw<Array<{owner_kind:string;document:string}>>`SELECT owner_kind,document FROM xhs_metric_snapshots WHERE (owner_kind='note' AND owner_id=${noteId}) OR (owner_kind='creator' AND owner_id=${creatorId}) ORDER BY owner_kind`;
+    return createHash('sha256').update(JSON.stringify({creator,note,comments,windows,metrics})).digest('hex');
+  }
   async downloadNotes(input: {
     creatorId: string;
     noteIds: string[];
     pickToken?: string;
+    sameDirectoryAsTaskId?: string;
+    wholeTarget?: object;
   }) {
     await this.creator(input.creatorId);
     const ids = [...new Set(input.noteIds)];
@@ -331,7 +725,18 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (!this.reserve || !this.save)
       return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
     // Freeze the existing native picker grant before any detail/network work.
-    const directory = await this.reserve(input.pickToken);
+    const held = input.wholeTarget && this.wholeTargets.get(input.wholeTarget);
+    if (input.wholeTarget && (!held || held.creatorId !== input.creatorId)) return reject('XHS_LOCAL_SAVE_UNAVAILABLE');
+    const directory = held ? held.directory : await this.reserve(input.pickToken);
+    if (input.sameDirectoryAsTaskId) {
+      const previous = await this.loadTask(input.sameDirectoryAsTaskId);
+      if (
+        previous.kind !== 'download' ||
+        previous.creatorId !== input.creatorId ||
+        previous.directory !== directory
+      )
+        return reject('XHS_RESUME_DIRECTORY_CHANGED');
+    }
     return this.enqueue('download', input.creatorId, ids, directory);
   }
   private async persist(t: Task) {
@@ -347,7 +752,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       // classifying it; do not repeat a network request or local archive action.
       try {
         const saved = await this.loadTask(t.taskId);
-        if (JSON.stringify(saved) === json) {
+        if (JSON.stringify(saved) === JSON.stringify(snapshot)) {
           this.uncertain.delete(t.taskId);
           return;
         }
@@ -394,6 +799,18 @@ export class XhsSubscriptionService implements OnModuleInit {
         await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(parent)}, updated_at=${BigInt(Date.now())} WHERE id=${parent.taskId}`;
       }
     }
+    // Preserve a detail receipt committed before an acknowledgement failure.
+    if (saved?.detailMetrics)
+      t.detailMetrics = { ...saved.detailMetrics, ...t.detailMetrics };
+    // A late task write must not erase already committed per-resource receipts.
+    if (saved?.mediaManifests)
+      t.mediaManifests = { ...t.mediaManifests, ...saved.mediaManifests };
+    // Source fences are written by dispatch transactions and may never be
+    // removed by a stale in-memory task snapshot.
+    if (saved?.sourceActive) t.sourceActive=saved.sourceActive; else delete t.sourceActive;
+    if (saved?.sourcePreflight) t.sourcePreflight=saved.sourcePreflight; else delete t.sourcePreflight;
+    if (saved?.legacyPendingReviews) t.legacyPendingReviews=saved.legacyPendingReviews; else delete t.legacyPendingReviews;
+    if (saved?.sourceUnknowns) t.sourceUnknowns=saved.sourceUnknowns; else delete t.sourceUnknowns;
     const json = JSON.stringify(t);
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
@@ -404,18 +821,38 @@ export class XhsSubscriptionService implements OnModuleInit {
     directory?: string,
     checkpoint?: Task,
     pageLimit?: number,
+    collectDetails = false,
+    collectionScope?: Task['collectionScope'],
+    selectedIds?: string[],
+    startAfter?: Promise<boolean>,
+    reuseCompleteCache?: boolean,
+    basicOnly?: boolean,
+    carriedBasicResults?: Record<string,'complete'|'missing'>,
+    scheduled?: { round:string; phase:'basic'|'media'; batch?:number; preBlocked?:'XHS_SCHEDULE_SELECTION_LIMIT'|'XHS_SCHEDULE_MEDIA_BINDING_REQUIRED' },
   ) {
+    await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
-    if ([...this.pending.values()].some((t) => t.creatorId === creatorId))
+    if (!scheduled && [...this.pending.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_CONFLICT');
-    if ([...this.pending.values()].filter(active).length >= 20)
+    // A batch is bounded by its existing 100-entry input contract. Its
+    // children remain behind the shared batch barrier and use the same serial lane.
+    if (!startAfter && [...this.pending.values()].filter(active).length >= 20)
       return reject('XHS_TASK_QUEUE_FULL');
     const t: Task = {
       ...checkpoint,
+      ...(scheduled ? {schedule:{round:scheduled.round,phase:scheduled.phase,...(scheduled.phase==='media'?{batch:scheduled.batch??0}:{})}} : {}),
       pageLimit: pageLimit ?? checkpoint?.pageLimit,
-      taskId: randomUUID(),
+      collectDetails: collectDetails || checkpoint?.collectDetails,
+      collectionScope: collectionScope ?? checkpoint?.collectionScope,
+      selectedIds: selectedIds ?? checkpoint?.selectedIds,
+      reuseCompleteCache: reuseCompleteCache ?? checkpoint?.reuseCompleteCache,
+      basicOnly: basicOnly ?? checkpoint?.basicOnly,
+      basicResults: carriedBasicResults ?? checkpoint?.basicResults,
+      cacheResults: carriedBasicResults ? Object.fromEntries(Object.keys(carriedBasicResults).map(id=>[id,'completed' as const])) : checkpoint?.cacheResults,
+      collectionStage: checkpoint?.collectionStage ?? (collectDetails ? 'listing' : undefined),
+      taskId: scheduled ? scheduledTaskId(scheduled.round,creatorId,scheduled.phase,scheduled.batch??0) : randomUUID(),
       creatorId,
       kind,
       state: 'queued',
@@ -440,15 +877,29 @@ export class XhsSubscriptionService implements OnModuleInit {
       resumedFromTaskId: checkpoint?.taskId,
       supersededByTaskId: undefined,
     };
+    if (scheduled) {
+      const admitted = await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, tx => admitScheduledXhs(tx, { ...scheduled, creatorId, task:t, now:Date.now() }));
+      if (admitted.kind === 'deferred') return {taskId:t.taskId,creatorId,state:'deferred' as const};
+      if (admitted.kind !== 'created') return {taskId:t.taskId,creatorId,scheduledState:admitted.kind};
+      if(scheduled.phase==='basic')t.historyExcludedIds=admitted.historyExcludedIds;
+    }
     this.pending.set(t.taskId, t);
     try {
-      await this.persist(t);
+      if (!scheduled) await this.persist(t);
     } catch (e) {
       this.pending.delete(t.taskId);
       throw e;
     }
     this.lane = this.lane
-      .then(() => this.run(t, directory))
+      .then(async () => {
+        if (startAfter && !(await startAfter)) {
+          t.state = 'cancelled';
+          t.message = 'XHS_TASK_CANCELLED';
+          try { await this.persist(t); } finally { this.pending.delete(t.taskId); }
+          return;
+        }
+        return this.run(t, directory);
+      })
       .catch(() => {
         /* persisted checkpoint remains recoverable; do not replay */
       });
@@ -467,35 +918,145 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.uncertain.get(input.taskId) ?? (await this.loadTask(input.taskId));
     return this.view(t);
   }
+  async isBasicTask(input: {taskId: string; creatorId: string}) { const t = await this.loadTask(input.taskId); return t.creatorId === input.creatorId && t.collectDetails === true && t.basicOnly === true; }
+  async matchesSelectedTask(input: {taskId: string; creatorId: string; noteIds: string[]; basicOnly?: boolean}) {
+    const task = await this.loadTask(input.taskId);
+    return task.creatorId === input.creatorId && task.collectDetails === true && task.reuseCompleteCache === true && (input.basicOnly === undefined || task.basicOnly === input.basicOnly) && task.collectionScope === 'selected' &&
+      Array.isArray(task.selectedIds) && JSON.stringify([...task.selectedIds].sort()) === JSON.stringify([...input.noteIds].sort());
+  }
+  private confirmedLocalPartial(task:Task):boolean {
+    const failed=task.noteIds.filter(id=>task.items[id]==='failed');
+    return task.state==='partial' && task.code==='XHS_LOCAL_PRE_DISPATCH_FAILED' && task.remaining===0 && failed.length===task.failed && failed.length>0 && !task.sourceActive && !task.sourceUnknowns?.length && failed.every(id=>task.sourceFailures?.[id]?.code==='XHS_LOCAL_PRE_DISPATCH_FAILED' && task.sourceFailures[id].dispatched===false) && task.noteIds.every(id=>['completed','failed'].includes(task.items[id]));
+  }
+  async confirmedSelection(input: {taskId: string; creatorId: string; noteIds: string[]; basicOnly?: boolean; allowLocalPartial?:boolean}) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId) || !(await this.matchesSelectedTask(input))) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    const partial=input.allowLocalPartial===true && this.confirmedLocalPartial(task);
+    if ((task.state !== 'completed' && !partial) || task.collectionStage !== 'details' ||
+        !input.noteIds.every(id => task.items[id] === 'completed' || (partial && task.items[id]==='failed'))) return reject('XHS_LIST_INCOMPLETE');
+    return [...input.noteIds];
+  }
+  /** Exact membership of a positively checkpointed directory, including pre-existing notes. */
+  async confirmedDirectory(input: { taskId: string; allowLocalPartial?:boolean }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId)) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    if ((task.state !== 'completed' && !(input.allowLocalPartial===true && this.confirmedLocalPartial(task))) || !task.listFinished || !Array.isArray(task.listedIds))
+      return reject('XHS_LIST_INCOMPLETE');
+    return [...task.listedIds];
+  }
+  /** Confirmed native full-archive saves, independently of an optional interaction companion. */
+  async confirmedLocalArchives(input: { taskId: string }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    return Object.entries(task.localArchives ?? {})
+      .filter(
+        ([id, receipt]) =>
+          ['completed', 'skipped'].includes(task.items[id]) &&
+          Number.isSafeInteger(receipt.savedAt) &&
+          receipt.savedAt > 0,
+      )
+      .map(([noteId, receipt]) => ({
+        noteId,
+        ...receipt,
+        ...(task.detailMetrics?.[noteId]
+          ? { metricsCollectedAt: task.detailMetrics[noteId] }
+          : {}),
+      }));
+  }
+  /** Durable positive saver receipts only; cache completeness and video skips are not evidence. */
+  async confirmedLocalSaves(input: { taskId: string }) {
+    await this.reconcile(input.taskId);
+    if (this.uncertain.has(input.taskId))
+      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const task = await this.loadTask(input.taskId);
+    return Object.entries(task.localReceipts ?? {})
+      .filter(
+        ([id, receipt]) =>
+          ['completed', 'skipped'].includes(task.items[id]) &&
+          Number.isSafeInteger(receipt.savedAt) &&
+          receipt.savedAt > 0 &&
+          ['new', 'retained', 'conflict-version'].includes(
+            receipt.supplementStatus,
+          ),
+      )
+      .map(([noteId, receipt]) => ({ noteId, ...receipt }));
+  }
   private view(t: Task): XhsSubscriptionTask {
     const uncertain = this.uncertain.has(t.taskId);
+    // Only a durable, settled receipt can close an old all-finished checkpoint.
+    // Counter equality alone is not proof: every selected item must be recorded.
+    const reconciledComplete =
+      !uncertain &&
+      !this.pending.has(t.taskId) &&
+      t.state === 'blocked' &&
+      t.code === 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+      finishedDownload(t);
+    const state = uncertain
+      ? 'blocked'
+      : reconciledComplete
+        ? 'completed'
+        : t.state;
+    const mediaEntries=Object.values(t.mediaManifests??{});
+    const mediaSummary=mediaEntries.length?{manifestNotes:mediaEntries.filter(entry=>!!entry.manifest).length,declaredImages:0,recordedSavedImages:0,pendingImages:0,needsReviewNotes:0,blockedNotes:0,needsDetailRefreshNotes:0}:undefined;
+    if(mediaSummary)for(const entry of mediaEntries){
+      if(entry.state==='needs-review')mediaSummary.needsReviewNotes++;
+      const manifest=entry.manifest;
+      if(!manifest){mediaSummary.needsDetailRefreshNotes++;continue;}
+      mediaSummary.declaredImages+=manifest.images.length;
+      let refresh=false,blocked=false,itemReview=false;
+      for(const image of manifest.images){
+        const item=entry.items?.[String(image.ordinal)];
+        if(item?.state==='saved')mediaSummary.recordedSavedImages++;
+        else {mediaSummary.pendingImages++;if(item?.state==='review')itemReview=true;else if(['started','unknown','restricted'].includes(item?.state??''))blocked=true;else if(!image.resourceKey || !this.source?.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,image.resourceKey))refresh=true;}
+      }
+      if(itemReview && entry.state!=='needs-review')mediaSummary.needsReviewNotes++;
+      if(blocked)mediaSummary.blockedNotes++;else if(refresh)mediaSummary.needsDetailRefreshNotes++;
+    }
     return {
       taskId: t.taskId,
       creatorId: t.creatorId,
       kind: t.kind,
-      state: uncertain ? 'blocked' : t.state,
+      collectionStage: t.collectionStage,
+      collectionScope: t.collectionScope,
+      collectionMode: t.collectDetails ? (t.basicOnly ? 'basic' : 'full') : undefined,
+      state,
       total: t.total,
       completed: t.completed,
       skipped: t.skipped,
       failed: t.failed,
       remaining: t.remaining,
+      snapshotsSaved: t.snapshotsSaved,
+      mediaSummary,
+      commentSummary: t.commentSummary,
+      archiveConflicts: (t as any).scheduledArchive ? Object.values((t as any).scheduledArchive).filter((entry:any)=>entry?.state==='conflict').length : undefined,
       // Keep private receipt history, but never label a reconciled public
       // checkpoint as still uncertain: the UI correctly fences that code.
       code: uncertain
         ? 'XHS_TASK_RECEIPT_UNCERTAIN'
-        : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
-          ? 'XHS_TASK_CHECKPOINT_RECONCILED'
-          : t.code,
+        : reconciledComplete
+          ? undefined
+          : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
+            ? 'XHS_TASK_CHECKPOINT_RECONCILED'
+            : t.code,
       message: uncertain
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
-        : t.message,
+        : reconciledComplete
+          ? '处理完成'
+          : t.message,
       resumedFromTaskId: t.resumedFromTaskId,
       supersededByTaskId: t.supersededByTaskId,
+      settling: this.pending.has(t.taskId),
       resumable:
         !uncertain &&
+        !t.sourceActive && !(t.sourceUnknowns?.length) && t.code!=='XHS_DETAIL_OUTCOME_UNKNOWN' &&
         !t.supersededByTaskId &&
         !this.pending.has(t.taskId) &&
-        ['cancelled', 'blocked', 'partial', 'failed'].includes(t.state),
+        (t.kind === 'list' || t.total > t.completed + t.skipped) &&
+        ['cancelled', 'blocked', 'partial', 'failed'].includes(state),
     };
   }
   private async reconcile(taskId: string) {
@@ -566,13 +1127,19 @@ export class XhsSubscriptionService implements OnModuleInit {
       items: [...tasks.values()].slice(0, limit).map((t) => this.view(t)),
     };
   }
-  async resumeTask(input: { taskId: string; pickToken?: string }) {
+  async resumeTask(input: { taskId: string; pickToken?: string }, startAfter?: Promise<boolean>) {
+    await this.readyForMutation();
     if (this.pending.has(input.taskId)) return reject('XHS_TASK_SETTLING');
     await this.reconcile(input.taskId);
     if (this.uncertain.has(input.taskId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
     if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
+    if (
+      previous.kind === 'download' &&
+      previous.total <= previous.completed + previous.skipped
+    )
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if (!['cancelled', 'blocked', 'partial', 'failed'].includes(previous.state))
       return reject('XHS_TASK_NOT_RESUMABLE');
     await this.creator(previous.creatorId);
@@ -584,15 +1151,32 @@ export class XhsSubscriptionService implements OnModuleInit {
       if (directory !== previous.directory)
         return reject('XHS_RESUME_DIRECTORY_CHANGED');
     }
+    // Access contexts live in memory. Re-enumerate the directory after an
+    // explicit resume, but preserve proven completed details and never replay
+    // them. Existing unknown-source fences still gate each request.
+    const checkpoint: Task = previous.collectDetails
+      ? { ...previous, collectionStage: 'listing', cursor: null, cursorHistory: [],
+          listedIds: [], listFinished: false, selectionComplete: false, noteIds: [], total: 0, completed: 0,
+          skipped: 0, failed: 0, remaining: 0, items: {},
+          cacheResults: { ...previous.cacheResults, ...Object.fromEntries(
+            Object.entries(previous.items).filter(([, state]) => state === 'completed'),
+          ) } as Record<string, 'completed'> }
+      : previous;
     return this.enqueue(
       previous.kind,
       previous.creatorId,
-      previous.noteIds,
+      checkpoint.noteIds,
       directory,
-      previous,
+      checkpoint,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      startAfter,
     );
   }
   async cancelTask(input: { taskId: string }) {
+    await this.readyForMutation();
     const t = this.pending.get(input.taskId);
     if (t && active(t)) {
       t.state = 'cancelled';
@@ -602,7 +1186,47 @@ export class XhsSubscriptionService implements OnModuleInit {
     }
     return this.task(input);
   }
+  /** One durable author-context attempt per scheduled round or explicit refresh task. */
+  private async prepareScheduledContext(t: Task, authorId: string) {
+    if (!this.source?.hasAuthorContext || !/^[a-zA-Z0-9_-]{1,128}$/.test(authorId)) return reject('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+    const ready=this.source.hasAuthorContext(authorId);
+    const marker=await this.write(8192,async tx=>{
+      const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND creator_id=${t.creatorId}`;
+      if(rows.length!==1||rows[0].state!=='running') return reject('XHS_TASK_STATE_CHANGED');
+      const saved=JSON.parse(rows[0].document) as Task;
+      const scheduled=t.schedule?.phase==='basic';
+      if(saved.taskId!==t.taskId||saved.creatorId!==t.creatorId||
+        (scheduled ? saved.schedule?.phase!=='basic'||saved.schedule.round!==t.schedule?.round||scheduledTaskId(saved.schedule.round,t.creatorId,'basic')!==t.taskId : !!saved.schedule||saved.kind!=='list'||!saved.collectDetails||!!saved.reuseCompleteCache))return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      const old=saved.scheduledContext;
+      if(old && (old.authorId!==authorId||old.used!==1||!['started','confirmed'].includes(old.state)))return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      if(old?.state==='started'||(old && !ready))return reject('XHS_ACCESS_CONTEXT_UNAVAILABLE');
+      if(old?.state==='confirmed') return old;
+      const next={authorId,used:1 as const,state:'started' as const};saved.scheduledContext=next;
+      if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      return next;
+    });
+    if(marker)t.scheduledContext=marker;
+    if(marker?.state==='confirmed')return;
+    const result=await this.source.resolve(`https://www.xiaohongshu.com/user/profile/${authorId}`);
+    if(result.inputKind!=='profile'||result.author?.id!==authorId||!this.source.hasAuthorContext(authorId))return reject('XHS_AUTHOR_MISMATCH');
+    await this.write(8192,async tx=>{
+      const rows=await tx.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND creator_id=${t.creatorId}`;
+      if(rows.length!==1||rows[0].state!=='running')return reject('XHS_TASK_STATE_CHANGED');
+      const saved=JSON.parse(rows[0].document) as Task;
+      if(saved.schedule?.round!==t.schedule?.round||saved.taskId!==t.taskId||saved.creatorId!==t.creatorId||saved.scheduledContext?.state!=='started'||saved.scheduledContext.authorId!==authorId||saved.scheduledContext.used!==1)return reject('XHS_SCHEDULE_BINDING_MISMATCH');
+      saved.scheduledContext={authorId,used:1,state:'confirmed'};
+      if(await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(saved)},updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running' AND document=${rows[0].document}`!==1)return reject('XHS_TASK_STATE_CHANGED');
+      const avatar=safeXhsAvatarUrl(result.author.avatarUrl);
+      if(avatar) await tx.$executeRaw`INSERT INTO xhs_metric_snapshots(owner_kind,owner_id,document) SELECT 'creator-avatar',id,${JSON.stringify({avatarUrl:avatar})} FROM xhs_creators WHERE id=${t.creatorId} AND enabled=1 AND external_author_id=${authorId} ON CONFLICT(owner_kind,owner_id) DO UPDATE SET document=excluded.document`;
+      await saveXhsMetrics(tx,'creator',t.creatorId,result.author.metrics);
+      t.scheduledContext=saved.scheduledContext;
+    });
+  }
   private async run(t: Task, directory?: string) {
+    return this.source?.withTaskScope ? this.source.withTaskScope({taskId:t.taskId,creatorId:t.creatorId},()=>this.runTask(t,directory)) : this.runTask(t,directory);
+  }
+  private async runTask(t: Task, directory?: string) {
+    this.source?.resetTaskDiagnostic?.();
     if (!active(t)) {
       this.pending.delete(t.taskId);
       return;
@@ -614,121 +1238,408 @@ export class XhsSubscriptionService implements OnModuleInit {
       t.state = 'running';
       t.message = '处理中';
       await this.persist(t);
-      if (t.kind === 'list') await this.updateList(t, creator);
-      else
+      if (t.schedule?.phase === 'media') { await this.runScheduledMedia(t,creator); return; }
+      if (!t.schedule && t.collectDetails && !t.reuseCompleteCache) {
+        const history=await readHistoryHandoffs(this.db);
+        if(history.profilePendingCreators.includes(t.creatorId))return reject('XHS_SOURCE_HISTORY_REVIEW_REQUIRED');
+        t.historyExcludedIds=history.excludedByCreator[t.creatorId] ?? [];
+        await this.prepareScheduledContext(t,creator.externalAuthorId!);
+      }
+      if (t.schedule?.phase === 'basic') await this.prepareScheduledContext(t,creator.externalAuthorId!);
+      if (t.kind === 'list' && t.collectionStage !== 'details') {
+        await this.updateList(t, creator);
+        if (active(t) && t.collectDetails && (t.listFinished || t.selectionComplete)) {
+          t.collectionStage = 'details';
+          const discovered = t.listedIds ?? [];
+          t.noteIds = t.collectionScope === 'recent' ? discovered.slice(0, 30)
+            : t.collectionScope === 'selected' ? discovered.filter(id => t.selectedIds?.includes(id))
+            : [...discovered];
+          if(t.schedule?.phase==='basic' && t.historyExcludedIds?.length)
+            t.noteIds=t.noteIds.filter(id=>!t.historyExcludedIds!.includes(id));
+          if (t.collectionScope === 'selected' && t.noteIds.length !== t.selectedIds?.length)
+            return reject('XHS_SELECTION_CHANGED');
+          t.items = Object.fromEntries(t.noteIds
+            .filter(id => t.cacheResults?.[id] === 'completed')
+            .map(id => [id, 'completed' as const]));
+          t.total = t.noteIds.length;
+          t.completed = Object.keys(t.items).length;
+          t.skipped = t.failed = 0;
+          t.remaining = t.total - t.completed;
+          await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, async tx => {
+            await this.persistIn(tx, t);
+            await this.source?.checkpointWholeDirectory?.(tx, t.taskId, t.creatorId, t.noteIds);
+          });
+        }
+      }
+      if (t.kind === 'download' || t.collectionStage === 'details')
         for (const id of t.noteIds) {
           if (!active(t)) break;
           if (t.items[id] === 'completed' || t.items[id] === 'skipped')
             continue;
+          if (!t.schedule && t.historyExcludedIds?.includes(id)) {
+            t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_SOURCE_HISTORY_REVIEW_REQUIRED';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+          }
+          this.source?.resetTaskDiagnostic?.();
+          let failurePhase:'detail'|'local'='local';
           try {
             await this.creator(t.creatorId);
             const old = await this.db.xhsNote.findFirst({
               where: { id, creatorId: creator.id },
             });
             if (!old) return reject('XHS_SELECTION_CHANGED');
+            // Preserve the original unknown dispatch; a terminal task alone is
+            // not sufficient while its worker is still present in this process.
+            if(t.collectDetails){
+              const tuple=JSON.parse(id);
+              if(!Array.isArray(tuple)||tuple[0]!=='xiaohongshu'||tuple[1]!=='note'||typeof tuple[2]!=='string')return reject('XHS_NOTE_ID_INVALID');
+              const prior=await terminalStartedDetail(this.db,creator.id,tuple[2]);
+              if(prior && !this.pending.has(prior) && !this.uncertain.has(prior)){
+                t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};
+                t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:false,fenceReason:'prior-started'}};
+                t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+              }
+            }
+            if (t.basicOnly && t.reuseCompleteCache && old.publishTime > 0 && old.contentHtml) {
+              let reusable = false;
+              try {
+                verifiedDownloadBody(old.contentHtml);
+                if (old.kind !== 'video' && old.kind !== 'image-text') throw Error('incomplete');
+                const snapshots=await this.db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='note' AND owner_id=${id}`;
+                const snapshot=snapshots.length === 1 ? JSON.parse(snapshots[0].document) : null;
+                reusable = Number.isSafeInteger(snapshot?.collectedAt) && snapshot.collectedAt > 0 && typeof snapshot.contract === 'string' && !!snapshot.contract && ['source-only','verified-response'].includes(snapshot.evidence) && ['likes','collects','shares','comments'].every(k => {const at=snapshot.valueCollectedAt && Object.prototype.hasOwnProperty.call(snapshot.valueCollectedAt,k)?snapshot.valueCollectedAt[k]:snapshot.collectedAt;return Number.isSafeInteger(snapshot.values?.[k]) && snapshot.values[k] >= 0 && Number.isSafeInteger(at) && at>0;});
+              } catch { /* incomplete evidence must be refreshed */ }
+              if (reusable) {t.basicResults={...t.basicResults,[id]:'complete'};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+            }
+            if (t.basicOnly && t.collectDetails) {
+              if (!this.source?.basicDetail && !this.source?.basicDetailWithMedia) return reject('XHS_SOURCE_UNCONFIGURED');
+              const tuple = JSON.parse(id);
+              if (!Array.isArray(tuple) || tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note' || typeof tuple[2] !== 'string') return reject('XHS_NOTE_ID_INVALID');
+              if(await hasTaskDetailLocalReview(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_LOCAL_PRE_DISPATCH_FAILED';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+              if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+              failurePhase='detail';
+              await this.withSourceCheckpoint('detail', creator.externalAuthorId!, tuple[2], async () => {
+                let projection: Awaited<ReturnType<NonNullable<XhsSubscriptionSource['basicDetailWithMedia']>>>;
+                try {
+                  projection = this.source!.basicDetailWithMedia ? await this.source!.basicDetailWithMedia(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal) : {basic:await this.source!.basicDetail!(creator.externalAuthorId!,tuple[2],this.controllers.get(t.taskId)?.signal),media:null};
+                } catch (error) {
+                  if (!(error instanceof XhsSourceParseError) || error.code !== 'XHS_DETAIL_PARSE_FAILED' || !active(t)) throw error;
+                  const failed={...t,failed:t.failed+1,items:{...t.items,[id]:'failed' as const},basicResults:{...t.basicResults,[id]:'missing' as const},code:error.code,remaining:t.total-t.completed-t.skipped-t.failed-1};
+                  // A confirmed response and its incomplete receipt settle the
+                  // existing whole-source fence in the same transaction.
+                  await this.write(Buffer.byteLength(JSON.stringify(failed))+4096,async tx=>{await this.persistIn(tx,failed);await this.source?.checkpointWholeSource?.(tx,undefined,{code:'XHS_DETAIL_PARSE_FAILED',taskId:t.taskId});});
+                  Object.assign(t,failed);return;
+                }
+                const note=projection.basic, rawManifest=projection.media?.manifest;
+                let manifest:XhsMediaManifest|undefined;
+                if(rawManifest && rawManifest.authorId===creator.externalAuthorId && rawManifest.noteId===tuple[2] && Array.isArray(rawManifest.images) && rawManifest.images.length<=60 && rawManifest.images.every((image,i)=>image?.ordinal===i+1 && (image.resourceKey===null || /^[a-f0-9]{64}$/.test(image.resourceKey)))) {
+                  const images=rawManifest.images.map(image=>({ordinal:image.ordinal,resourceKey:image.resourceKey}));
+                  const version=createHash('sha256').update(JSON.stringify([rawManifest.authorId,rawManifest.noteId,images])).digest('hex');
+                  if(version===rawManifest.version)manifest={authorId:rawManifest.authorId,noteId:rawManifest.noteId,version,images};
+                }
+                const mediaReceipt: NonNullable<Task['mediaManifests']>[string] = manifest ? {state:note.kind==='video'||manifest.images.some(image=>!image.resourceKey)?'needs-review':manifest.images.length?'pending':'none',manifest} : {state:'needs-review',code:'XHS_MEDIA_MANIFEST_UNAVAILABLE'};
+                if (!active(t)) return;
+                if (note.noteId !== tuple[2] || note.authorId !== creator.externalAuthorId || (old.kind && old.kind !== note.kind)) return reject('XHS_DETAIL_INCOMPLETE');
+                let basicResult: 'complete' | 'missing' = note.publishedAt !== null && ['likes','collects','shares','comments'].every(k => Number.isSafeInteger(note.metrics.values[k]) && (note.metrics.values[k] as number) >= 0) ? 'complete' : 'missing';
+                const html = note.text?.trim() ? verifiedDownloadBody('<div id="js_content">' + note.text.split('\n').map(p => '<p>' + esc(p) + '</p>').join('') + '</div>') : undefined;
+                if (!html) basicResult='missing';
+                let imageCheck: {count:number;otherwiseComplete:boolean}|undefined;
+                await this.write(Buffer.byteLength(html ?? '') + 8192, async tx => {
+                  const currentCreator = await tx.xhsCreator.findUnique({where:{id:creator.id}});
+                  if (!currentCreator?.enabled || currentCreator.externalAuthorId !== creator.externalAuthorId) return reject('XHS_SUBSCRIPTION_CHANGED');
+                  const current = await tx.xhsNote.findFirst({where:{id,creatorId:creator.id}});
+                  if (!current || !active(t)) return reject('XHS_TASK_CANCELLED');
+                  let refreshedHtml:string|undefined;
+                  if(html && !current.contentHtml)refreshedHtml=html;
+                  else if(html && current.contentHtml){
+                    try {verifiedDownloadBody(current.contentHtml);const oldBody=loadHtml(current.contentHtml);
+                      if(!oldBody('img').length)refreshedHtml=html;
+                      else {
+                        // Keep previously verified inline media and its markers while
+                        // refreshing the text. Until the current manifest is fully
+                        // reconciled these older images remain explicitly incomplete.
+                        const priorImages=oldBody('img').toArray().map(node=>{const src=oldBody(node).attr('src')??'';const marker=oldBody(node).attr('data-xhs-media')??'';return `<img${/^[a-f0-9]{64}:[1-9][0-9]?$/.test(marker)?` data-xhs-media="${marker}"`:''} src="${esc(src)}">`;}).join('');
+                        const merged=html.replace(/<\/div>\s*$/i,priorImages+'</div>');
+                        verifiedDownloadBody(merged);refreshedHtml=merged;
+                        imageCheck={count:oldBody('img').length,otherwiseComplete:basicResult==='complete'};
+                        basicResult='missing';
+                      }
+                    } catch {basicResult='missing';}
+                  }
+                  await tx.xhsNote.update({where:{id},data:{...(note.title !== null ? {title:note.title} : {}),...(note.publishedAt !== null ? {publishTime:note.publishedAt} : {}),...(refreshedHtml ? {contentHtml:refreshedHtml} : {})}});
+                  await saveXhsMetrics(tx,'note',id,note.metrics);
+                  await this.persistIn(tx,{...t,mediaManifests:{...t.mediaManifests,[id]:mediaReceipt},...(imageCheck?{basicImageChecks:{...t.basicImageChecks,[id]:imageCheck}}:{}),basicResults:{...t.basicResults,[id]:basicResult},items:{...t.items,[id]:'completed'},completed:t.completed+1,remaining:t.total-t.completed-1-t.skipped-t.failed});
+                  await this.source?.checkpointWholeSource?.(tx);
+                });
+                t.mediaManifests={...t.mediaManifests,[id]:mediaReceipt};if(imageCheck)t.basicImageChecks={...t.basicImageChecks,[id]:imageCheck};t.basicResults={...t.basicResults,[id]:basicResult};t.items[id]='completed';t.completed++;t.remaining=t.total-t.completed-t.skipped-t.failed;
+              });
+              await this.persist(t);
+              continue;
+            }
+            if (t.reuseCompleteCache && t.collectionScope === 'selected' && old.status === 'complete' && old.publishTime > 0 && old.contentHtml) {
+              let cacheValid = false;
+              try {
+                if (old.contentHtml.includes('data-wewe-image-pending')) throw Error('incomplete');
+                verifiedDownloadBody(old.contentHtml);
+                if (old.kind === 'video') {
+                  if (!old.videoBytes || old.videoMimeType !== 'video/mp4' || !old.videoSha256 || !old.videoExpectedBytes) throw Error('incomplete');
+                  const video = inspectCachedMp4(Buffer.from(old.videoBytes));
+                  if (video.sha256 !== old.videoSha256 || video.bytes !== old.videoExpectedBytes) throw Error('incomplete');
+                } else if (old.kind !== 'image-text') throw Error('incomplete');
+                cacheValid = true;
+              } catch { /* incomplete cache is fetched within the approved selection */ }
+              if (cacheValid) {
+                t.items[id] = 'completed'; t.completed++; t.remaining = t.total - t.completed - t.skipped - t.failed;
+                await this.persist(t);
+                continue;
+              }
+            }
             if (
               old.kind === 'video' &&
-              (old.status !== 'complete' || !old.contentHtml)
+              !t.collectDetails && (old.status !== 'complete' || !old.contentHtml)
             ) {
               t.skipped++;
               t.items[id] = 'skipped';
             } else {
-              if (old.status !== 'complete' || !old.contentHtml) {
+              if (t.collectDetails || old.status !== 'complete' || !old.contentHtml) {
                 const tuple = JSON.parse(id);
                 if (tuple[0] !== 'xiaohongshu' || tuple[1] !== 'note')
                   return reject('XHS_NOTE_ID_INVALID');
-                const note = await this.source!.detail(
+                if(await hasTaskDetailLocalReview(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_LOCAL_PRE_DISPATCH_FAILED';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+                if(await hasTaskDetailUnknown(this.db,creator.id,tuple[2])){t.failed++;t.items[id]='failed';t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;}
+                failurePhase='detail';
+                await this.withSourceCheckpoint(
+                  'detail',
                   creator.externalAuthorId!,
                   tuple[2],
-                  this.controllers.get(t.taskId)?.signal,
-                );
-                if (!active(t)) break;
-                const draft = xhsArchiveDraft(creator.externalAuthorId!, note);
-                if (
-                  draft.noteKey !== id ||
-                  draft.status !== 'candidate' ||
-                  !draft.readyForEvidenceCheck
-                )
-                  return reject('XHS_DETAIL_INCOMPLETE');
-                const html = verifiedDownloadBody(
-                  '<div id="js_content">' +
-                    draft.text
-                      .split('\n')
-                      .map((p) => '<p>' + esc(p) + '</p>')
-                      .join('') +
-                    draft.images
-                      .map(
-                        (i) =>
-                          '<img src="data:' +
-                          i.type +
-                          ';base64,' +
-                          i.bytes.toString('base64') +
-                          '">',
-                      )
-                      .join('') +
-                    '</div>',
-                );
-                await this.write(Buffer.byteLength(html) + 4096, async (tx) => {
-                  const currentCreator = await tx.xhsCreator.findUnique({
-                    where: { id: creator.id },
-                  });
-                  if (
-                    !currentCreator?.enabled ||
-                    currentCreator.externalAuthorId !== creator.externalAuthorId
-                  )
-                    return reject('XHS_SUBSCRIPTION_CHANGED');
-                  const current = await tx.xhsNote.findFirst({
-                    where: { id, creatorId: creator.id },
-                  });
-                  if (!current) return reject('XHS_SELECTION_CHANGED');
-                  if (current.status !== 'complete' || !current.contentHtml)
-                    await tx.xhsNote.update({
-                      where: { id },
-                      data: {
-                        title: draft.title,
-                        publishTime: note.publishedAt,
-                        contentHtml: html,
-                        status: 'complete',
-                        kind: 'image-text',
+                  async () => {
+                    const note = await this.source!.detail(
+                      creator.externalAuthorId!,
+                      tuple[2],
+                      this.controllers.get(t.taskId)?.signal,
+                    );
+                    if (!active(t)) return;
+                    if (old.kind && old.kind !== note.kind) return reject('XHS_DETAIL_INCOMPLETE');
+                    const video = note.kind === 'video' ? note.video : undefined;
+                    if (note.kind === 'video' && !video) return reject('XHS_VIDEO_CACHE_UNAVAILABLE');
+                    if (video) prepareXhsVideoDownload({evidenceVerified:true,note,video});
+                    const draft = xhsArchiveDraft(
+                      creator.externalAuthorId!,
+                      video ? {...note,kind:'image-text'} : note,
+                    );
+                    if (
+                      draft.noteKey !== id ||
+                      draft.status !== 'candidate' ||
+                      (!video && !draft.readyForEvidenceCheck)
+                    )
+                      return reject('XHS_DETAIL_INCOMPLETE');
+                    const html = verifiedDownloadBody(
+                      '<div id="js_content">' +
+                        draft.text
+                          .split('\n')
+                          .map((p) => '<p>' + esc(p) + '</p>')
+                          .join('') +
+                        draft.images
+                          .map(
+                            (i) =>
+                              '<img src="data:' +
+                              i.type +
+                              ';base64,' +
+                              i.bytes.toString('base64') +
+                              '">',
+                          )
+                          .join('') +
+                        (video && !draft.text.trim() && !draft.images.length ? '<p title="wewe-empty-video-caption">Video</p>' : '') +
+                        '</div>',
+                    );
+                    await this.write(
+                      Buffer.byteLength(html) + (video?.bytes.length ?? 0) + 4096,
+                      async (tx) => {
+                        const currentCreator = await tx.xhsCreator.findUnique({
+                          where: { id: creator.id },
+                        });
+                        if (
+                          !currentCreator?.enabled ||
+                          currentCreator.externalAuthorId !==
+                            creator.externalAuthorId
+                        )
+                          return reject('XHS_SUBSCRIPTION_CHANGED');
+                        const current = await tx.xhsNote.findFirst({
+                          where: { id, creatorId: creator.id },
+                        });
+                        if (!current) return reject('XHS_SELECTION_CHANGED');
+                        await saveXhsMetrics(tx, 'note', id, note.metrics);
+                        if (
+                          note.metrics &&
+                          Number.isSafeInteger(note.metrics.collectedAt) &&
+                          note.metrics.collectedAt > 0
+                        ) {
+                          const rows = await tx.$queryRaw<
+                            Array<{ document: string }>
+                          >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.taskId} AND state='running'`;
+                          if (rows.length !== 1)
+                            return reject('XHS_TASK_CANCELLED');
+                          const persisted = JSON.parse(
+                            rows[0].document,
+                          ) as Task;
+                          if (persisted.supersededByTaskId)
+                            return reject('XHS_TASK_SUPERSEDED');
+                          const detailMetrics = {
+                            ...persisted.detailMetrics,
+                            [id]: note.metrics.collectedAt,
+                          };
+                          const changed =
+                            await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=json_set(document,'$.detailMetrics',json(${JSON.stringify(detailMetrics)})),updated_at=${BigInt(Date.now())} WHERE id=${t.taskId} AND state='running'`;
+                          if (changed !== 1)
+                            return reject('XHS_TASK_CANCELLED');
+                        }
+                        if (
+                          t.collectDetails || current.status !== 'complete' ||
+                          !current.contentHtml
+                        )
+                          await tx.xhsNote.update({
+                            where: { id },
+                            data: {
+                              title: draft.title,
+                              publishTime: note.publishedAt,
+                              contentHtml: html,
+                              status: 'complete',
+                              kind: video ? 'video' : 'image-text',
+                              ...(video ? { videoBytes: video.bytes, videoMimeType: video.mimeType, videoExpectedBytes: video.expectedBytes, videoSha256: video.sha256 } : {}),
+                            },
+                          });
+                        if (t.collectDetails) {
+                          await this.persistIn(tx, { ...t, items: { ...t.items, [id]: 'completed' },
+                            completed: t.completed + 1,
+                            remaining: t.total - t.completed - 1 - t.skipped - t.failed });
+                        }
+                        await this.source?.checkpointWholeSource?.(tx);
                       },
-                    });
-                });
+                    );
+                    if (t.collectDetails) {
+                      t.items[id] = 'completed';
+                      t.completed++;
+                      t.remaining = t.total - t.completed - t.skipped - t.failed;
+                    }
+                    if (
+                      note.metrics &&
+                      Number.isSafeInteger(note.metrics.collectedAt) &&
+                      note.metrics.collectedAt > 0
+                    )
+                      t.detailMetrics = {
+                        ...t.detailMetrics,
+                        [id]: note.metrics.collectedAt,
+                      };
+                  },
+                );
               }
               if (!active(t)) break;
+              if (t.collectDetails) {
+                await this.persist(t);
+                continue;
+              }
+              failurePhase='local';
               const saved = await this.save!(creator, id, directory!);
+              if (saved.supplement && saved.supplement.status !== 'retained')
+                t.snapshotsSaved = (t.snapshotsSaved ?? 0) + 1;
               if (saved.mediaComplete === false)
                 return reject('XHS_LOCAL_MEDIA_INCOMPLETE');
+              // Successful native body/media publication does not require a companion.
+              t.localArchives ??= {};
+              t.localArchives[id] = { savedAt: Date.now() };
+              if (
+                saved.supplement &&
+                ['new', 'retained', 'conflict-version'].includes(
+                  saved.supplement.status,
+                )
+              ) {
+                t.localReceipts ??= {};
+                t.localReceipts[id] = {
+                  savedAt: Date.now(),
+                  supplementStatus: saved.supplement.status,
+                };
+              }
               if (saved.alreadySaved) {
+                t.localFilesReused = (t.localFilesReused ?? 0) + 1;
                 t.skipped++;
                 t.items[id] = 'skipped';
               } else {
+                t.localFilesSaved = (t.localFilesSaved ?? 0) + 1;
                 t.completed++;
                 t.items[id] = 'completed';
               }
             }
           } catch (error) {
-            if (!active(t)) break;
+            if (!active(t)) {
+              t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()}};
+              break;
+            }
+            if(error instanceof XhsPreDispatchError && error.code==='XHS_LOCAL_PRE_DISPATCH_FAILED'){
+              const diagnostic=this.source?.taskDiagnostic?.();t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.sourceFailures={...t.sourceFailures,[id]:{...(diagnostic?.guardCode==='P2028'?diagnostic:{}),phase:'detail',code:'XHS_LOCAL_PRE_DISPATCH_FAILED',dispatched:false}};t.code=error.code;t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+            }
+            if(error instanceof XhsTaskSourceUnknownError && error.phase==='detail'){
+              t.failed++;t.items[id]='failed';if(t.basicOnly)t.basicResults={...t.basicResults,[id]:'missing'};t.code='XHS_DETAIL_OUTCOME_UNKNOWN';t.sourceFailures={...t.sourceFailures,[id]:{phase:'detail',code:'XHS_DETAIL_OUTCOME_UNKNOWN',dispatched:'unknown',...this.source?.taskDiagnostic?.()}};t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);continue;
+            }
+            t.sourceFailures={...t.sourceFailures,[id]:{phase:failurePhase,code:xhsPublicCode(error,failurePhase==='detail'?'XHS_SOURCE_FAILURE_UNCLASSIFIED':'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()}};
             t.failed++;
             t.items[id] = 'failed';
             // Unknown provider failures may be authentication/verification stops.
             // Do not continue dispatching the rest of a batch after such a stop.
             t.state = t.completed || t.skipped ? 'partial' : 'blocked';
             t.code = xhsPublicCode(error, 'XHS_DOWNLOAD_BLOCKED');
+            if (t.code === 'XHS_VIDEO_CACHE_UNAVAILABLE') t.code = 'XHS_VIDEO_SOURCE_UNVERIFIED';
             t.message = '下载已停止，请检查连接或本地保存状态。';
           }
           t.remaining = t.total - t.completed - t.skipped - t.failed;
           await this.persist(t);
         }
+      if (active(t) && !t.schedule && t.kind==='list' && t.collectDetails && t.basicOnly && !t.reuseCompleteCache) await this.runScheduledMedia(t,creator);
       if (active(t)) {
-        t.state = t.failed || t.remaining ? 'partial' : 'completed';
+        const mediaIncomplete=!!t.scheduledMediaResults && Object.values(t.scheduledMediaResults).some(result=>result!=='complete');
+        const basicIncomplete=!t.schedule && t.basicOnly && !t.reuseCompleteCache && Object.values(t.basicResults??{}).some(result=>result==='missing');
+        t.state = t.failed || t.remaining || mediaIncomplete || basicIncomplete ? 'partial' : 'completed';
+        if(mediaIncomplete && !t.code)t.code='XHS_MEDIA_NEEDS_DETAIL_REFRESH';
+        if(basicIncomplete && !t.code)t.code='XHS_DETAIL_INCOMPLETE';
+        if(t.state==='completed' && t.schedule?.phase==='basic' && t.historyExcludedIds?.length) {
+          t.state='partial';t.code='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED';
+        }
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
+        if(t.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED')t.message="历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。";
+        if (t.basicOnly && t.state === 'completed') t.message = '基础信息处理完成；缺失字段仍为未知，媒体待补。';
+        if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))
+          t.message += ` 已写入 ${t.localFilesSaved ?? 0} 篇本地文件，复用 ${t.localFilesReused ?? 0} 篇已有本地文件；已有正文和手工修改保留。`;
+        if (t.snapshotsSaved)
+          t.message += ` 已新增 ${t.snapshotsSaved} 份“互动与评论”快照附页；正文保留策略不变。`;
+        if (!t.schedule && t.kind==='list' && t.collectDetails && t.basicOnly && !t.reuseCompleteCache) {
+          // Persist an incomplete state before any filesystem save: a process
+          // exit must never turn an unfinished archive into a completed task.
+          const finalState=t.state,finalCode=t.code;
+          t.state='partial';t.code=finalCode??'XHS_LOCAL_ARCHIVE_PENDING';
+          await this.persist(t);
+          const archive=await this.archiveTask(t.taskId,creator.id);
+          Object.assign(t,await this.loadTask(t.taskId));
+          t.state=archive.incomplete?'partial':finalState;
+          t.code=archive.incomplete?(finalCode??'XHS_LOCAL_ARCHIVE_INCOMPLETE'):finalCode;
+        }
+
       }
     } catch (error) {
+      t.taskFailure={phase:t.collectionStage ?? 'prepare',code:xhsPublicCode(error,'XHS_LOCAL_OPERATION_FAILED'),errorKind:safeFailureKind(error),dispatched:'unknown',...this.source?.taskDiagnostic?.()};
       if (active(t)) {
-        t.state = 'blocked';
-        t.code = xhsPublicCode(error, 'XHS_TASK_BLOCKED');
-        t.message = '任务已停止，请检查安全连接和来源数据。';
+        // A failed last item checkpoint must not permanently turn confirmed
+        // local results into a blocked task. The final persist below still has
+        // to acknowledge these exact results; uncertainty continues to fence
+        // the public view if that write cannot be confirmed. Never replay saves.
+        const confirmedResults =
+          xhsPublicCode(error, '') === 'XHS_TASK_RECEIPT_UNCERTAIN' &&
+          finishedDownload(t);
+        t.state = confirmedResults ? 'completed' : 'blocked';
+        t.code = confirmedResults
+          ? undefined
+          : xhsPublicCode(error, 'XHS_TASK_BLOCKED');
+        t.message = confirmedResults
+          ? '处理完成'
+          : '任务已停止，请检查安全连接和来源数据。';
       }
     } finally {
       try {
@@ -739,119 +1650,181 @@ export class XhsSubscriptionService implements OnModuleInit {
       }
     }
   }
+  private async runScheduledMedia(t:Task,creator:XhsCreator) {
+    const round=t.schedule?.round;
+    const manual=!t.schedule && t.kind==='list' && t.collectDetails && t.basicOnly && !t.reuseCompleteCache;
+    if((!round&&!manual) || !creator.externalAuthorId || !this.source?.withScheduledMediaSession) return reject('XHS_SOURCE_UNCONFIGURED');
+    const basicId=manual?t.taskId:scheduledTaskId(round!,creator.id,'basic');
+    for(const id of t.noteIds) {
+      if(!active(t)) return;
+      if(manual && t.items[id]!=='completed')continue;
+      const rows=await this.db.$queryRaw<Array<{document:string;state:string}>>`SELECT document,state FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${creator.id}`;
+      if(rows.length!==1) return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
+      const basic=JSON.parse(rows[0].document) as Task, slot=basic.mediaManifests?.[id];
+      const historyPartial=rows[0].state==='partial' && basic.code==='XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED';
+      const itemPartial=rows[0].state==='partial' && ['XHS_DETAIL_PARSE_FAILED','XHS_DETAIL_OUTCOME_UNKNOWN','XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(basic.code??'') && basic.remaining===0 && basic.items?.[id]==='completed';
+      if(!(manual && rows[0].state==='running') && rows[0].state!=='completed' && !historyPartial && !itemPartial)return reject('XHS_SCHEDULE_BASIC_INCOMPLETE');
+      if(!basic.noteIds.includes(id)) return reject('XHS_SELECTION_CHANGED');
+      if(!slot?.manifest || slot.state==='needs-review') {t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};if(!manual){t.skipped++;t.items[id]='skipped';t.remaining--;}await this.persist(t);continue;}
+      const manifest=slot.manifest;
+      if(!manifest.images.length){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'complete'};if(!manual){t.completed++;t.items[id]='completed';t.remaining--;}await this.persist(t);continue;}
+      if(await hasTaskMediaUnknown(this.db,creator.id,id,manifest.images.map(image=>image.resourceKey))){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};if(!manual){t.skipped++;t.items[id]='skipped';t.remaining--;}await this.persist(t);continue;}
+      const gate=async(tx:Pick<Prisma.TransactionClient,'$queryRaw'|'$executeRaw'>)=>{
+        if(manual)await assertManualMediaBinding(tx,{creatorId:creator.id,taskId:t.taskId,authorId:manifest.authorId,noteId:id});
+        else await assertScheduledMediaBinding(tx,{round:round!,creatorId:creator.id,taskId:t.taskId,basicId,authorId:manifest.authorId,noteId:id,batch:t.schedule?.batch??0});
+      };
+      const store=xhsMediaTaskStore(this.db,fn=>this.write(20_000_000,tx=>fn(tx)),{taskId:basicId,creatorId:creator.id,noteId:id},gate,undefined,false,{allowCompleteAppend:true,allowLocalReview:true});
+      const result=await this.source.withScheduledMediaSession(async transport=>{const adopted=await store.adoptVerified(manifest);if(adopted<0)return {pending:0,needsReview:true};try{return {...await resumeXhsMedia(manifest,key=>this.source!.getTransientMediaUrl?.(manifest.authorId,manifest.noteId,manifest.version,key),store,transport),needsReview:false};}catch(error){if(error instanceof XhsMediaLocalResponseError)return {pending:0,needsReview:true};throw error;}},id).catch(error=>{if(error instanceof XhsTaskSourceUnknownError && error.phase==='media')return {pending:0,needsReview:true};throw error;});
+      const check=t.basicImageChecks?.[id];
+      if(manual && check?.otherwiseComplete && !result.needsReview && !result.pending && check.count===manifest.images.length && manifest.images.length>0){
+        const saved=await this.loadTask(t.taskId),slot=saved.mediaManifests?.[id];
+        const markers=manifest.images.map(image=>{const receipt=slot?.items?.[String(image.ordinal)];return receipt?.state==='saved'?`${receipt.markerVersion??manifest.version}:${receipt.markerOrdinal??image.ordinal}`:null;});
+        const row=await this.db.xhsNote.findFirst({where:{id,creatorId:creator.id},select:{contentHtml:true}});
+        let count=-1;try{if(row?.contentHtml){verifiedDownloadBody(row.contentHtml);count=loadHtml(row.contentHtml)('img').length;}}catch{/* preserve missing status */}
+        const verified=await Promise.all(manifest.images.map(image=>store.readVerifiedOrdinal!(manifest,image.ordinal)));
+        if(count===check.count && markers.every(Boolean) && new Set(markers).size===markers.length && verified.every(Boolean)) t.basicResults={...t.basicResults,[id]:'complete'};
+      }
+      if(result.needsReview){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-review'};if(!manual){t.skipped++;t.items[id]='skipped';}} else if(result.pending){t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'needs-detail-refresh'};if(!manual){t.skipped++;t.items[id]='skipped';}} else {t.scheduledMediaResults={...t.scheduledMediaResults,[id]:'complete'};if(!manual){t.completed++;t.items[id]='completed';}}
+      t.remaining=t.total-t.completed-t.skipped-t.failed;await this.persist(t);
+    }
+    if(manual)return;
+    t.state=t.skipped?'partial':'completed';
+    t.code=t.skipped?(Object.values(t.scheduledMediaResults??{}).includes('needs-review')?'XHS_MEDIA_REVIEW_REQUIRED':'XHS_MEDIA_NEEDS_DETAIL_REFRESH'):undefined;
+  }
+  private withSourceCheckpoint<T>(
+    phase: 'profile' | 'list' | 'detail' | 'metrics',
+    authorId: string,
+    noteId: string | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    return this.source?.withCheckpointGroup
+      ? this.source.withCheckpointGroup(phase, authorId, noteId, work)
+      : work();
+  }
   private async updateList(t: Task, creator: XhsCreator) {
     const seen = new Set(t.cursorHistory ?? []);
     const notes = new Set(t.listedIds ?? []);
     let pagesThisRun = 0;
-    while (!t.listFinished && active(t)) {
+    while (!t.listFinished && !t.selectionComplete && active(t)) {
       if (t.pageLimit !== undefined && pagesThisRun >= t.pageLimit)
         throw new XhsSubscriptionError('XHS_LIST_PAGE_LIMIT_REACHED');
       pagesThisRun++;
       const cursor = t.cursor ?? null;
       if (seen.has(cursor)) throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
-      const page = await this.source!.list(
+      await this.withSourceCheckpoint(
+        'list',
         creator.externalAuthorId!,
-        cursor,
-        this.controllers.get(t.taskId)?.signal,
-      );
-      if (!active(t)) return;
-      if (
-        page.authorId !== creator.externalAuthorId ||
-        !Array.isArray(page.notes) ||
-        page.notes.length > 60 ||
-        (page.nextCursor !== null &&
-          (typeof page.nextCursor !== 'string' ||
-            !page.nextCursor ||
-            page.nextCursor.length > 2048))
-      )
-        return reject('XHS_LIST_INVALID');
-      if (
-        page.nextCursor !== null &&
-        (page.nextCursor === cursor || seen.has(page.nextCursor))
-      )
-        throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
-      if (!page.notes.length && page.nextCursor !== null)
-        throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
-      const pageIds = new Set<string>();
-      let added = 0,
-        skipped = 0;
-      const next = await this.write(
-        32768 + Buffer.byteLength(JSON.stringify(t)),
-        async (tx) => {
-          const current = await tx.xhsCreator.findUnique({
-            where: { id: creator.id },
-          });
+        undefined,
+        async () => {
+          const page = await this.source!.list(
+            creator.externalAuthorId!,
+            cursor,
+            this.controllers.get(t.taskId)?.signal,
+          );
+          if (!active(t)) return;
           if (
-            !current?.enabled ||
-            current.externalAuthorId !== creator.externalAuthorId
+            page.authorId !== creator.externalAuthorId ||
+            !Array.isArray(page.notes) ||
+            page.notes.length > 60 ||
+            (page.nextCursor !== null &&
+              (typeof page.nextCursor !== 'string' ||
+                !page.nextCursor ||
+                page.nextCursor.length > 2048))
           )
-            return reject('XHS_SUBSCRIPTION_CHANGED');
-          for (const n of page.notes) {
-            if (
-              n.authorId !== creator.externalAuthorId ||
-              !/^[a-zA-Z0-9_-]{1,128}$/.test(n.noteId) ||
-              typeof n.title !== 'string' ||
-              n.title.length > 500 ||
-              !Number.isSafeInteger(n.publishedAt) ||
-              n.publishedAt < 0 ||
-              n.publishedAt > 2147483647 ||
-              !['image-text', 'video'].includes(n.kind)
-            )
-              return reject('XHS_LIST_INVALID');
-            const id = key(n.noteId);
-            if (notes.has(id) || pageIds.has(id)) continue;
-            pageIds.add(id);
-            const old = await tx.xhsNote.findUnique({ where: { id } });
-            if (old && old.creatorId !== creator.id)
-              return reject('XHS_NOTE_OWNER_CONFLICT');
-            if (old) {
-              skipped++;
-              continue;
-            }
-            await tx.xhsNote.create({
-              data: {
-                id,
-                creatorId: creator.id,
-                title: n.title,
-                publishTime: n.publishedAt,
-                kind: n.kind,
-                status: n.kind === 'video' ? 'video-skipped' : 'listed',
-              },
-            });
-            added++;
-          }
-          if (page.nextCursor !== null && !pageIds.size)
+            return reject('XHS_LIST_INVALID');
+          if (
+            page.nextCursor !== null &&
+            (page.nextCursor === cursor || seen.has(page.nextCursor))
+          )
+            throw new XhsSubscriptionError('XHS_CURSOR_CYCLE');
+          if (!page.notes.length && page.nextCursor !== null)
             throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
-          await tx.xhsCreator.update({
-            where: { id: creator.id },
-            data: {
-              lastCheckedAt: Math.floor(Date.now() / 1000),
-              lastStatus: page.nextCursor ? 'partial' : 'listed',
+          const pageIds = new Set<string>();
+          let added = 0,
+            skipped = 0;
+          const next = await this.write(
+            32768 + Buffer.byteLength(JSON.stringify(t)),
+            async (tx) => {
+              const current = await tx.xhsCreator.findUnique({
+                where: { id: creator.id },
+              });
+              if (
+                !current?.enabled ||
+                current.externalAuthorId !== creator.externalAuthorId
+              )
+                return reject('XHS_SUBSCRIPTION_CHANGED');
+              for (const n of page.notes) {
+                if (
+                  n.authorId !== creator.externalAuthorId ||
+                  !/^[a-zA-Z0-9_-]{1,128}$/.test(n.noteId) ||
+                  typeof n.title !== 'string' ||
+                  n.title.length > 500 ||
+                  !Number.isSafeInteger(n.publishedAt) ||
+                  n.publishedAt < 0 ||
+                  n.publishedAt > 2147483647 ||
+                  !['image-text', 'video'].includes(n.kind)
+                )
+                  return reject('XHS_LIST_INVALID');
+                const id = key(n.noteId);
+                if (notes.has(id) || pageIds.has(id)) continue;
+                pageIds.add(id);
+                const old = await tx.xhsNote.findUnique({ where: { id } });
+                if (old && old.creatorId !== creator.id)
+                  return reject('XHS_NOTE_OWNER_CONFLICT');
+                if (old) {
+                  skipped++;
+                  continue;
+                }
+                await tx.xhsNote.create({
+                  data: {
+                    id,
+                    creatorId: creator.id,
+                    title: n.title,
+                    publishTime: n.publishedAt,
+                    kind: n.kind,
+                    status: n.kind === 'video' ? 'video-skipped' : 'listed',
+                  },
+                });
+                added++;
+              }
+              if (page.nextCursor !== null && !pageIds.size)
+                throw new XhsSubscriptionError('XHS_LIST_NO_PROGRESS');
+              await tx.xhsCreator.update({
+                where: { id: creator.id },
+                data: {
+                  lastCheckedAt: Math.floor(Date.now() / 1000),
+                  lastStatus: page.nextCursor ? 'partial' : 'listed',
+                },
+              });
+              const checkpoint: Task = {
+                ...t,
+                total: t.total + pageIds.size,
+                completed: t.completed + added,
+                skipped: t.skipped + skipped,
+                remaining: 0,
+                cursor: page.nextCursor,
+                cursorHistory: [...seen, cursor],
+                listedIds: [...notes, ...pageIds],
+                listFinished: page.nextCursor === null,
+                selectionComplete: t.collectDetails && (t.collectionScope === 'recent'
+                  ? notes.size + pageIds.size >= 30
+                  : t.collectionScope === 'selected' && (t.selectedIds ?? []).every(id => notes.has(id) || pageIds.has(id))),
+              };
+              // Page membership and continuation cursor commit together. Crashes cannot
+              // advance past uncommitted metadata or erase earlier complete bodies.
+              await this.persistIn(tx, checkpoint);
+              await this.source?.checkpointWholeSource?.(tx);
+              return checkpoint;
             },
-          });
-          const checkpoint: Task = {
-            ...t,
-            total: t.total + pageIds.size,
-            completed: t.completed + added,
-            skipped: t.skipped + skipped,
-            remaining: 0,
-            cursor: page.nextCursor,
-            cursorHistory: [...seen, cursor],
-            listedIds: [...notes, ...pageIds],
-            listFinished: page.nextCursor === null,
-          };
-          // Page membership and continuation cursor commit together. Crashes cannot
-          // advance past uncommitted metadata or erase earlier complete bodies.
-          await this.persistIn(tx, checkpoint);
-          return checkpoint;
+          );
+          const cancelled = !active(t);
+          Object.assign(t, next);
+          if (cancelled) t.state = 'cancelled';
+          seen.add(cursor);
+          pageIds.forEach((id) => notes.add(id));
+          if (!active(t)) return;
         },
       );
-      const cancelled = !active(t);
-      Object.assign(t, next);
-      if (cancelled) t.state = 'cancelled';
-      seen.add(cursor);
-      pageIds.forEach((id) => notes.add(id));
-      if (!active(t)) return;
       // Yield between pages, including synthetic immediate sources, so operators
       // can cancel a large job without waiting for enumeration to finish.
       await new Promise<void>((resolve) => setImmediate(resolve));

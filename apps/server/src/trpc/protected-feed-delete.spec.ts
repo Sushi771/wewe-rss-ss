@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -53,6 +54,7 @@ describe('protected existing deletion routes through actual router and SQLite mi
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-protected-delete-'));
     database = path.join(root, 'source.db');
+    await fs.writeFile(database,'',{flag:'wx'});
     Object.assign(process.env, {
       DATABASE_URL: 'file:' + database,
       SQLITE_BACKUP_KIND: 'test',
@@ -258,10 +260,12 @@ describe('protected existing deletion routes through actual router and SQLite mi
         return result;
       });
     await expect(api.feed.batchDelete(ids.slice(0, 2))).rejects.toThrow(
-      'FEED_DELETE_DATABASE_CHANGED',
+      'PROJECT_WRITER_BOUNDARY_UNPROVEN',
     );
-    expect(await prisma.feed.count()).toBe(3);
-    expect(await prisma.article.count()).toBe(3);
+    // The existing writer lease now refuses the replaced file before the delete
+    // guard opens its transaction. Independently read the copied fixture rows.
+    expect(await other.feed.count()).toBe(3);
+    expect(await other.article.count()).toBe(3);
   });
   it('rolls back preceding cascades when a later target triggers an actual SQL failure', async () => {
     await prisma.$executeRawUnsafe(

@@ -1,3 +1,4 @@
+import { Tooltip } from '@web/components/AppOverlays';
 import {
   Button,
   Image,
@@ -6,7 +7,6 @@ import {
   NavbarBrand,
   NavbarContent,
   NavbarItem,
-  Tooltip,
 } from '@nextui-org/react';
 import { ThemeSwitcher } from './ThemeSwitcher';
 import { UserIcon } from './UserIcon';
@@ -33,7 +33,11 @@ const Nav = () => {
 
   return (
     <div>
-      <Navbar isBordered={false} className="mac-toolbar">
+      <Navbar
+        isBordered={false}
+        className="mac-toolbar app-navigation"
+        classNames={{ wrapper: 'app-navigation-inner' }}
+      >
         <Tooltip
           content={<div className="p-1">当前版本: v{appVersion}</div>}
           placement="left"
@@ -42,8 +46,8 @@ const Nav = () => {
             as={RouterLink}
             to="/feeds"
             aria-label="返回公众号文章列表"
-            className="focus-visible:outline-primary cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4"
-            style={{ flexGrow: 0, marginRight: '16px' }}
+            className="app-navigation-brand focus-visible:outline-primary cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4"
+            style={{ flexGrow: 0 }}
           >
             <Image
               width={22}
@@ -71,7 +75,10 @@ const Nav = () => {
               <RouterLink
                 key={item.href}
                 to={item.href}
-                className={`mac-nav-pill whitespace-nowrap ${item.href === '/feeds' ? 'hidden sm:inline-flex' : ''} ${pathname.startsWith(item.href) ? 'active text-primary font-medium' : ''}`}
+                className={`mac-nav-pill whitespace-nowrap ${pathname.startsWith(item.href) ? 'active text-primary font-medium' : ''}`}
+                aria-current={
+                  pathname.startsWith(item.href) ? 'page' : undefined
+                }
               >
                 {item.name}
               </RouterLink>
@@ -88,6 +95,7 @@ const Nav = () => {
                   to="/accounts"
                   color="foreground"
                   style={{ opacity: 0.7 }}
+                  aria-label="账号管理"
                   className={
                     pathname.startsWith('/accounts')
                       ? 'text-primary opacity-100'

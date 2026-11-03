@@ -1,5 +1,7 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { PrismaService } from '../prisma/prisma.service';
@@ -37,7 +39,61 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     canonicalArticleUrl(
       `https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=${n}&idx=1`,
     );
-  beforeEach(async () => {
+  let setupPromise: Promise<void> | undefined;
+  let schemaRoot: string;
+  let schemaPromise: Promise<void> | undefined;
+  let fixtureNumber = 0;
+  const timing = (stage: string, start: number) =>
+    console.info('SYNTHETIC_FIXTURE_TIMING', JSON.stringify({ case: fixtureNumber, stage, elapsedMs: Math.round(performance.now() - start) }));
+  beforeAll(() => {
+    schemaPromise = (async () => {
+      const started = performance.now();
+      schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'automatic-media-schema-'));
+      // Match the migrated application's physical database boundary.
+      await fs.writeFile(path.join(schemaRoot, 'schema.db'), '', { flag: 'wx' });
+      const savedUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
+      let schemaPrisma: PrismaService | undefined;
+      try {
+        schemaPrisma = new PrismaService();
+        await schemaPrisma.$connect();
+    const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    for (const name of (await fs.readdir(migrations)).sort()) {
+      const sql = await fs
+        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+        .catch(() => '');
+      for (const statement of splitSqliteStatements(sql)
+        .map((value) => value.trim())
+        .filter(Boolean))
+        await schemaPrisma.$executeRawUnsafe(statement);
+    }
+        await schemaPrisma.$queryRawUnsafe('PRAGMA journal_mode=DELETE');
+      } finally {
+        try { await schemaPrisma?.$disconnect(); } finally {
+          if (savedUrl === undefined) delete process.env.DATABASE_URL;
+          else process.env.DATABASE_URL = savedUrl;
+        }
+      }
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        if (await fs.stat(path.join(schemaRoot, 'schema.db') + suffix).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; }))
+          throw Error('SCHEMA_FIXTURE_HAS_SIDECAR');
+      }
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o444);
+      timing('schema-ready', started);
+    })();
+    return schemaPromise;
+  }, 40000);
+  afterAll(async () => {
+    await schemaPromise?.catch(() => undefined);
+    if (schemaRoot && path.dirname(schemaRoot) === os.tmpdir() && path.basename(schemaRoot).startsWith('automatic-media-schema-')) {
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o600).catch(() => undefined);
+      await fs.rm(schemaRoot, { recursive: true, force: true });
+    }
+  }, 40000);
+  const setupFixture = async () => {
+    fixtureNumber++;
+    const overall = performance.now();
+    let stage = overall;
     jest.clearAllMocks();
     while (takeMediaHints().length) {
       /* isolate process-local hints */
@@ -56,18 +112,14 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     jest.spyOn(startup, 'databaseWritesAllowed').mockReturnValue(true);
+    await fs.copyFile(path.join(schemaRoot, 'schema.db'), path.join(root, 'data.db'));
+    await fs.chmod(path.join(root, 'data.db'), 0o600);
+    timing('schema-copy', stage); stage = performance.now();
     prisma = new PrismaService();
     await prisma.$connect();
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((value) => value.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    timing('connect', stage); stage = performance.now();
+    if (await prisma.feed.count() !== 0 || await prisma.article.count() !== 0)
+      throw Error('SCHEMA_FIXTURE_NOT_EMPTY');
     await prisma.feed.create({
       data: {
         id: mpId,
@@ -100,6 +152,8 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
         },
       });
     }
+    timing('seed', stage);
+    timing('setup', overall);
     trpc = new TrpcService(
       prisma,
       { get: () => ({ url: '', updateDelayTime: 0 }) } as any,
@@ -109,18 +163,26 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(Error('REAL_NETWORK_FORBIDDEN'));
-  });
+  };
+  beforeEach(() => {
+    setupPromise = setupFixture();
+    return setupPromise;
+  }, 40000);
   afterEach(async () => {
+    // A Jest deadline does not cancel SQLite setup. Join the same work before
+    // closing handles/removing files; its original hook failure stays failed.
+    await setupPromise?.catch(() => undefined);
     trpc?.onModuleDestroy();
     await prisma?.$disconnect();
     jest.restoreAllMocks();
     process.env = { ...env };
     if (
+      root &&
       path.dirname(root) === os.tmpdir() &&
       path.basename(root).startsWith('automatic-media-sqlite-')
     )
       await fs.rm(root, { recursive: true, force: true });
-  });
+  }, 40000);
   it('discovers saved IDs beyond the current upstream page with bounded cursor pages and durable replay', async () => {
     const scan = new AutomaticMediaScan(prisma);
     const one = await scan.page('', before, true);
@@ -195,6 +257,107 @@ describe('automatic media discovery through original Prisma/CAS gates (synthetic
     ).toEqual(png);
     expect(imageFetcher).not.toHaveBeenCalled();
   });
+  it('inspects oversized ready bytes rather than trusting status and clears only the completed limit error', async () => {
+    await prisma.article.deleteMany();
+    const inline = 'data:image/png;base64,' + png.toString('base64');
+    const prefix =
+      '<div id="js_content"><p>synthetic large saved body</p>' +
+      'x'.repeat(8_100_000);
+    const bodies = [
+      `${prefix}<img src="${inline}"></div>`,
+      `${prefix}<img src="data:image/png;base64,invalid"></div>`,
+      `${prefix}<img src="${inline}"><span style="background:url(unknown)"></span></div>`,
+    ];
+    for (let n = 0; n < bodies.length; n++) {
+      const item = identity(n + 1);
+      await prisma.article.create({
+        data: {
+          id: item.id,
+          mpId,
+          title: 'synthetic size boundary',
+          picUrl: '',
+          publishTime: 1760000000,
+          sourceUrl: item.url,
+          verifiedSourceUrl: item.url,
+          contentHtml: bodies[n],
+          lastBodyStatus: 'available',
+        },
+      });
+    }
+    const scan = new AutomaticMediaScan(prisma);
+    const first = await scan.page('', before, true);
+    expect(first.rows).toEqual([
+      expect.objectContaining({
+        id: identity(1).id,
+        oversized: true,
+        mediaReady: true,
+        contentHtml: null,
+      }),
+    ]);
+    const second = await scan.page(first.cursor, before, true);
+    expect(second.rows).toEqual([
+      expect.objectContaining({
+        id: identity(2).id,
+        mediaReady: false,
+        contentHtml: null,
+      }),
+    ]);
+    const third = await scan.page(second.cursor, before, true);
+    expect(third.rows).toEqual([
+      expect.objectContaining({
+        id: identity(3).id,
+        mediaReady: false,
+        contentHtml: null,
+      }),
+    ]);
+    expect(await scan.load(identity(1).id)).toBeUndefined(); // 8MB automatic writer gate stays intact
+    let now = Date.now(),
+      ready = false;
+    const fetch = jest.fn(),
+      commit = jest.fn(),
+      publish = jest.fn();
+    const worker = new AutomaticMediaQueue(path.join(root, 'data.db'), {
+      now: () => now,
+      scan: async () => ({
+        rows: [{ ...first.rows[0], mediaReady: ready }],
+        cursor: '',
+        end: true,
+      }),
+      load: (id) => scan.load(id),
+      fetch,
+      commit,
+      canFetch: () => false,
+      stop: async () => undefined,
+      publish,
+    });
+    await worker.tick();
+    expect(publish.mock.lastCall[0][0]).toMatchObject({
+      failed: 1,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+    ready = true;
+    now += 60_001;
+    await worker.tick();
+    worker.close();
+    expect(publish.mock.lastCall[0]).toEqual([]);
+    const state = JSON.parse(
+      await fs.readFile(
+        path.join(root, '.wechat2rss-automatic-media', 'queue.json'),
+        'utf8',
+      ),
+    );
+    expect(state.articles).toEqual([]);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(
+      (
+        await prisma.article.findUniqueOrThrow({
+          where: { id: identity(1).id },
+        })
+      ).contentHtml,
+    ).toBe(bodies[0]);
+    expect(global.fetch).not.toHaveBeenCalled();
+  }, 40000);
   it('defaults to future changes; preserves the persisted activation boundary and can explicitly opt into bounded history', async () => {
     const scan = new AutomaticMediaScan(prisma);
     expect((await scan.page('', Date.now() + 10000)).rows).toHaveLength(0);

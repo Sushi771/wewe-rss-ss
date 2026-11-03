@@ -1,3 +1,4 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { Test, TestingModule } from '@nestjs/testing';
 import { FeedsService } from './feeds.service';
@@ -60,6 +61,7 @@ describe('startup and RSS summary with the shared SQLite connection', () => {
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-rss-readiness-'));
+    await fs.writeFile(path.join(root,'synthetic.db'),'',{flag:'wx'});
     Object.assign(process.env, {
       DATABASE_URL:
         'file:' + path.join(root, 'synthetic.db') + '?connection_limit=1',

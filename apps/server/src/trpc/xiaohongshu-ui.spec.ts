@@ -33,6 +33,30 @@ vm.runInNewContext(
   { exports: batchExports, Error },
   { timeout: 1000 },
 );
+const presentationExports: Record<string, any> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(
+      path.resolve(
+        __dirname,
+        '../../../web/src/utils/xhs-note-presentation.ts',
+      ),
+      'utf8',
+    ),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } },
+  ).outputText,
+  { exports: presentationExports, URL },
+  { timeout: 1000 },
+);
+const filterExports: Record<string, any> = {};
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync(path.resolve(__dirname, '../../../web/src/utils/xhs-combined-filter.ts'), 'utf8'),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } },
+  ).outputText,
+  { exports: filterExports },
+  { timeout: 1000 },
+);
 const expressions: Record<string, string> = {};
 const messageExports: Record<string, unknown> = {};
 vm.runInNewContext(
@@ -123,7 +147,6 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       message: '',
       error: '',
       creator: '',
-      note: 'old',
       url: 'https://www.xiaohongshu.com/user/profile/synthetic',
       resolution: null,
       task: null,
@@ -159,6 +182,11 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       taskFinished: taskExports.taskFinished,
       taskSettling: taskExports.taskSettling,
       taskText: taskExports.taskText,
+      withCachedExportSummary: taskExports.withCachedExportSummary,
+      canContinueCreatorQueue: taskExports.canContinueCreatorQueue,
+      batchVideoWarning: taskExports.batchVideoWarning,
+      cacheExportSummary: { current: '' },
+      batchPartialCreators: { current: [] },
       selectedImageNotes: taskExports.selectedImageNotes,
       exportArchiveGroups: taskExports.exportArchiveGroups,
       current: { id: 'a', displayName: '合成作者' },
@@ -166,8 +194,13 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         { id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' },
       ],
       selectedArchives: [],
+      visibleNotes: [{ id: 'note-a', creatorId: 'a', status: 'listed', kind: 'image-text' }],
+      selectedIds: new Set(['note-a']),
       exportScope: 'selected',
+      compiledConditions: filterExports.compileFilter(filterExports.emptyCombinedFilter()),
+      filterNotes: filterExports.filterNotes,
       notesInput: { creatorId: 'a' },
+      notes: { data: { queryVersion: undefined } },
       saveSettings: { directory: 'synthetic-only', askEveryTime: false },
       creators: {
         data: {
@@ -205,6 +238,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         task: { query: jest.fn() },
       },
       localApi: jest.fn(),
+      chooseConfirmedDirectory: jest.fn().mockResolvedValue({}),
       exportNotes: { mutateAsync: jest.fn() },
       watchSubscriptionTask: jest.fn().mockResolvedValue(undefined),
     };
@@ -213,7 +247,6 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       setMessage: 'message',
       setOperationError: 'error',
       setCreatorId: 'creator',
-      setNoteId: 'note',
       setProfileUrl: 'url',
       setResolution: 'resolution',
       setTask: 'task',
@@ -239,13 +272,14 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       'setTaskCreatorId',
     ])
       scope[name] = jest.fn();
+    scope.fullCollectionApi = { refreshFull: { mutate: jest.fn().mockResolvedValue({ taskId: 'task-one', creatorId: 'a' }) } };
     scope.startTask = evaluate('startTask', scope);
     scope.run = evaluate('run', scope);
     scope.updateCreator = evaluate('updateCreator', scope);
     scope.startDownloadJob = evaluate('startDownloadJob', scope);
     scope.nextDownloadRef.current = scope.startDownloadJob;
     scope.taskApiRef = {
-      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils },
+      current: { subscriptionApi: scope.subscriptionApi, utils: scope.utils, fullCollectionApi: scope.fullCollectionApi, taskCreatorId: 'a' },
     };
     return { scope, state, invalidated };
   }
@@ -269,7 +303,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     ).toHaveBeenCalledWith({ url: state.url });
     expect(state.resolution).toEqual(resolution);
     expect(scope.subscriptionApi.subscribe.mutate).not.toHaveBeenCalled();
-    expect(scope.subscriptionApi.refresh.mutate).not.toHaveBeenCalled();
+    expect(scope.fullCollectionApi.refreshFull.mutate).not.toHaveBeenCalled();
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
   });
   it('retains input when resolution fails and does not invent success', async () => {
@@ -302,7 +336,8 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     });
     expect(state.creator).toBe('subscribed');
     expect(state.url).toBe('');
-    expect(state.note).toBe('');
+    expect(text).not.toContain('setNoteId');
+    expect(text).not.toContain('XhsEngagementPanel');
     expect(invalidated).toHaveBeenCalled();
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
   });
@@ -320,12 +355,12 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(state.creator).toBe('');
     expect(state.url).toContain('synthetic');
   });
-  it('starts a metadata-only list task and holds the busy guard until its terminal receipt', async () => {
+  it('starts a recent full-cache task and holds the busy guard until its terminal receipt', async () => {
     const { scope, state } = harness();
     await scope.run(() => scope.updateCreator('a'));
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledWith({
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledWith({
       id: 'a',
-      maxPages: 2,
+      scope: 'recent',
     });
     expect(state.task).toMatchObject({ kind: 'list', state: 'queued' });
     expect(state.busy).toBe(true);
@@ -338,13 +373,13 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
   it('skips paused creators, queues sequential list work and stops at a partial result', async () => {
     const { scope, state } = harness();
     await evaluate('handleRefreshAll', scope)();
-    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a', maxPages: 2 }],
+    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
+      [{ id: 'a', scope: 'recent' }],
     ]);
     expect(scope.queuedCreators.current).toEqual(['b']);
     watch(scope).onTask({ ...terminal('partial'), kind: 'list' });
     expect(scope.queuedCreators.current).toEqual([]);
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(1);
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(1);
     expect(state.task.state).toBe('partial');
   });
   it('advances a completed creator once and retains busy state for the next queued task', async () => {
@@ -353,23 +388,23 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     watch(scope).onTask({ ...terminal(), kind: 'list' });
     await Promise.resolve();
     await Promise.resolve();
-    expect(scope.subscriptionApi.refresh.mutate.mock.calls).toEqual([
-      [{ id: 'a', maxPages: 2 }],
-      [{ id: 'b', maxPages: 2 }],
+    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
+      [{ id: 'a', scope: 'recent' }],
+      [{ id: 'b', scope: 'recent' }],
     ]);
     expect(state.busy).toBe(true);
   });
   it('retains the completed receipt when the next creator fails without replaying', async () => {
     const { scope, state } = harness();
     await evaluate('handleRefreshAll', scope)();
-    scope.subscriptionApi.refresh.mutate.mockRejectedValue(
+    scope.fullCollectionApi.refreshFull.mutate.mockRejectedValue(
       new Error('synthetic queue failure'),
     );
     watch(scope).onTask({ ...terminal(), kind: 'list' });
     await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
-    expect(scope.subscriptionApi.refresh.mutate).toHaveBeenCalledTimes(2);
+    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(2);
     expect(state.error).toContain('未开始');
     expect(state.busy).toBe(false);
   });
@@ -404,16 +439,16 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
   it('stops at native picker cancellation and never dispatches the download', async () => {
     const { scope, state } = harness();
     scope.saveSettings.askEveryTime = true;
-    scope.localApi.mockResolvedValue({ cancelled: true });
+    scope.chooseConfirmedDirectory.mockResolvedValue({ cancelled: true });
     await evaluate('handleLocalSave', scope)();
-    expect(scope.localApi.mock.calls).toEqual([['/directory', {}]]);
+    expect(scope.chooseConfirmedDirectory).toHaveBeenCalledTimes(1);
     expect(scope.subscriptionApi.downloadNotes.mutate).not.toHaveBeenCalled();
     expect(state.busy).toBe(false);
   });
   it('passes the native picker token for a bounded batch and does not accept a path parameter', async () => {
     const { scope } = harness();
     scope.saveSettings.askEveryTime = true;
-    scope.localApi.mockResolvedValue({
+    scope.chooseConfirmedDirectory.mockResolvedValue({
       pickToken: 'native-grant',
       directory: 'synthetic-picked',
       askEveryTime: true,
@@ -424,7 +459,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       noteIds: ['note-a'],
       pickToken: 'native-grant',
     });
-    expect(scope.setDirectory).toHaveBeenCalledWith('synthetic-picked');
+    expect(scope.chooseConfirmedDirectory).toHaveBeenCalledTimes(1);
   });
   it('does not retry a failed task submission or display an archive success', async () => {
     const { scope, state } = harness();
@@ -566,19 +601,24 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
         )
         .map((n: any) => n.id),
     ).toEqual(['image']);
-    const status = evaluate('noteStatus', {});
+    const status = presentationExports.noteArchiveStatus;
     expect(status({ status: 'complete', kind: 'video' })).toContain('未验证');
     expect(status({ status: 'video-skipped', kind: 'video' })).toContain(
       '未归档',
     );
-    const html = taskExports.noteReaderHtml({
-      text: 'Saved body <script> & symbols',
-      images: ['data:image/png;base64,c3ludGhldGlj'],
-    });
-    expect(html).toContain('Saved body &lt;script&gt; &amp; symbols');
-    expect(html).toContain('src="data:image/png;base64,c3ludGhldGlj"');
-    expect(text).toContain('noteReaderHtml(body.data)');
-    expect(text).toContain('<ArticleReader');
+    expect(
+      presentationExports.verifiedOriginalUrl(
+        '["xiaohongshu","note","000000000000000000000001"]',
+        'https://www.xiaohongshu.com/explore/000000000000000000000001?xsec_token=000000000000000000000001-only&xsec_source=pc_user',
+      ),
+    ).toBe(
+      'https://www.xiaohongshu.com/explore/000000000000000000000001?xsec_token=000000000000000000000001-only&xsec_source=pc_user',
+    );
+    expect(taskExports.noteReaderHtml).toBeUndefined();
+    expect(text).not.toContain('noteReaderHtml');
+    expect(text).not.toContain('<ArticleReader');
+    expect(text).not.toContain('trpc.xiaohongshu.body');
+    expect(text).toContain('<XhsOriginalLink');
     expect(text).not.toMatch(
       /<video\b|video\/mp4;base64|dangerouslySetInnerHTML/,
     );
@@ -615,6 +655,31 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(link.remove).toHaveBeenCalled();
     expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
   });
+  it('exports the filtered snapshot using real combined conditions', async () => {
+    const { scope } = harness();
+    scope.exportScope = 'filtered';
+    scope.compiledConditions = filterExports.compileFilter({ mode: 'and', conditions: [
+      { id: 1, metric: 'likes', operator: '>=', value: '2', upper: '' },
+    ] });
+    scope.utils.client = { xiaohongshu: { notes: { query: jest.fn().mockResolvedValue({
+      queryVersion: 'v1', items: [
+        { id: 'matched', creatorId: 'a', status: 'complete', metrics: { values: { likes: 2 } } },
+        { id: 'excluded', creatorId: 'a', status: 'complete', metrics: { values: { likes: 1 } } },
+        { id: 'unknown', creatorId: 'a', status: 'complete', metrics: null },
+      ],
+    }) } } };
+    const link = { click: jest.fn(), remove: jest.fn() };
+    scope.document = { createElement: jest.fn(() => link), body: { appendChild: jest.fn() } };
+    scope.URL = { createObjectURL: jest.fn(() => 'blob:synthetic'), revokeObjectURL: jest.fn() };
+    scope.Blob = Blob; scope.atob = atob; scope.Uint8Array = Uint8Array;
+    scope.exportNotes.mutateAsync.mockResolvedValue({ base64: 'U1lOVEhFVElD', filename: 'synthetic.zip', mimeType: 'application/zip', notes: 1 });
+    await evaluate('handleDownload', scope)();
+    expect(scope.utils.client.xiaohongshu.notes.query).toHaveBeenCalledWith({ creatorId: 'a' });
+    expect(scope.exportNotes.mutateAsync).toHaveBeenCalledWith({ creatorId: 'a', queryVersion: 'v1', noteIds: ['matched'] });
+    expect(link.click).toHaveBeenCalledTimes(1);
+    expect(link.remove).toHaveBeenCalled();
+    expect(scope.URL.revokeObjectURL).toHaveBeenCalledWith('blob:synthetic');
+  });
   it('preserves native directory selection, cancellation and preference-only updates', async () => {
     const { scope } = harness();
     scope.localApi.mockResolvedValueOnce({ cancelled: true });
@@ -635,7 +700,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       askEveryTime: false,
     });
   });
-  it('retains real navigation, groups, date filtering, cached preview and primary local-save actions', () => {
+  it('retains real navigation, groups, date filtering, original links and primary local-save actions', () => {
     expect(
       fs.readFileSync(
         path.resolve(__dirname, '../../../web/src/App.tsx'),
@@ -652,18 +717,18 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       '<ManagementFolders',
       '<ArticleDateFilter',
       'dateSelectionFilter(dateSelection)',
-      'trpc.xiaohongshu.body.useQuery',
+      '<XhsOriginalLink',
       'trpc.xiaohongshu.export.useMutation',
       'compact-list',
       '<SubscriptionToolbar',
       'feed-workspace',
     ])
       expect(text).toContain(marker);
-    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeGreaterThan(
+    expect(text.indexOf('onPress={() => handleLocalSave(true)}')).toBeGreaterThan(
       -1,
     );
-    expect(text.indexOf('onPress={() => handleLocalSave()}')).toBeLessThan(
-      text.indexOf('onPress={handleDownload}'),
+    expect(text.indexOf('onPress={() => handleLocalSave(true)}')).toBeLessThan(
+      text.indexOf("if (xhsExportFormat === 'zip') handleDownload()"),
     );
     expect(text).not.toMatch(/prototypes\/|toast\.success/);
   });
@@ -700,9 +765,11 @@ describe('shared single-level management folder actual handlers (offline)', () =
       selectedIds: ['a', 'b'],
       dragType: 'application/x-wewe-xiaohongshu',
       onMove: jest.fn().mockResolvedValue(undefined),
+      move: undefined as unknown,
       run: undefined as unknown,
     };
     scope.run = evaluate('run', scope, table);
+    scope.move = evaluate('move', scope, table);
     return scope;
   }
   it('moves a selected batch atomically and ignores foreign-platform or external drops', async () => {
@@ -787,7 +854,7 @@ describe('shared single-level management folder actual handlers (offline)', () =
       );
       expect(css).toMatch(/\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*none/);
       expect(css).toMatch(
-        /@media \(min-width: 768px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
+        /@container workspace \(min-width: 1100px\)[\s\S]*\.feed-sidebar\.mac-sidebar\s*\{\s*display:\s*flex/,
       );
       expect(contents).toContain('!min-w-0');
       expect(contents).toContain('aria-expanded={mobileSidebarOpen}');

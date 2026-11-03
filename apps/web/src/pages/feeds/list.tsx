@@ -3,7 +3,6 @@ import {
   ContentSortControls,
   ContentSelectionHeader,
 } from '@web/components/SubscriptionPrimitives';
-import { FailureNotice } from '@web/components/OperationNotice';
 import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
 import {
   FC,
@@ -14,21 +13,13 @@ import {
   useRef,
   useState,
 } from 'react';
-import {
-  Button,
-  Spinner,
-  Checkbox,
-  Modal,
-  ModalContent,
-  ModalHeader,
-  ModalBody,
-} from '@nextui-org/react';
+import { Button, Spinner, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import { ArticleSort } from '@web/utils/feed-browse-state';
 import { useArticleListPosition } from '@web/utils/use-article-list-position';
 import { getLoadedSelection } from '@web/utils/feed-selection';
 import { articleBodyState } from '@web/utils/article-body-state';
-import ArticleReader from '@web/components/ArticleReader';
+import { wechatOriginalUrl } from '@web/utils/wechat-original-url';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArticleFilter, formatShanghaiPublicationTime } from '@wewe-rss/shared';
@@ -72,13 +63,6 @@ const ArticleList: FC<ArticleListProps> = ({
   const { id } = useParams();
 
   const mpId = id || '';
-  const [readingId, setReadingId] = useState<string | null>(null);
-  const [readerFindOpen, setReaderFindOpen] = useState(false);
-  useEffect(() => setReaderFindOpen(false), [readingId]);
-  const reading = trpc.article.byId.useQuery(readingId || '', {
-    enabled: Boolean(readingId),
-    cacheTime: READING_CACHE_TIME,
-  });
   const queryUtils = trpc.useUtils();
   const searchStatus = trpc.article.searchStatus.useQuery(undefined, {
     enabled: Boolean(search.trim()),
@@ -150,7 +134,6 @@ const ArticleList: FC<ArticleListProps> = ({
       await Promise.all([
         queryUtils.article.list.invalidate(),
         queryUtils.article.summary.invalidate(),
-        queryUtils.article.byId.invalidate(articleId),
       ]);
     }
   };
@@ -250,6 +233,7 @@ const ArticleList: FC<ArticleListProps> = ({
   ]);
 
   const position = useArticleListPosition({
+    paused: false,
     viewKey: listViewKey,
     pageCount: data?.pages.length || 0,
     itemCount: items.length,
@@ -258,7 +242,6 @@ const ArticleList: FC<ArticleListProps> = ({
     hasNext: Boolean(hasNextPage),
     failed: isError || filterInvalid,
     loadNext,
-    paused: Boolean(readingId),
   });
 
   const handleSelectAll = (isSelected: boolean) => {
@@ -397,7 +380,7 @@ const ArticleList: FC<ArticleListProps> = ({
               data-article-id={item.id}
               className={`compact-row article-row ${
                 item.bodyCached ? 'article-row-ready' : ''
-              } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
+              } content-article-row`}
             >
               <div className="compact-col-check">
                 <Checkbox
@@ -415,25 +398,30 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
                 title={
-                  item.bodyCached
-                    ? '点击标题阅读已保存正文'
-                    : '正文尚未保存，点击打开原文'
+                  wechatOriginalUrl(item.sourceUrl)
+                    ? '在新标签页打开公众号原文'
+                    : '未保存有效的公众号原文链接'
                 }
-                aria-label={`${item.bodyCached ? '阅读已保存正文' : '打开原文'}：${item.title}`}
-                onClick={(event) => {
-                  position.rememberForReader();
-                  if (item.bodyCached) {
-                    event.preventDefault();
-                    setReadingId(item.id);
-                  }
-                }}
-                href={item.sourceUrl || `https://mp.weixin.qq.com/s/${item.id}`}
+                aria-label={
+                  (wechatOriginalUrl(item.sourceUrl)
+                    ? '打开原文：'
+                    : '原文链接不可用：') + item.title
+                }
+                aria-disabled={!wechatOriginalUrl(item.sourceUrl)}
+                onClick={position.capturePosition}
+                href={wechatOriginalUrl(item.sourceUrl)}
+                tabIndex={wechatOriginalUrl(item.sourceUrl) ? undefined : 0}
               >
                 {item.title}
+                {!wechatOriginalUrl(item.sourceUrl) && (
+                  <span className="ml-2 text-xs font-normal text-neutral-500">
+                    原文链接未保存或不可用
+                  </span>
+                )}
                 {item.searchSnippet && (
                   <span
                     className="mt-1 block whitespace-normal break-words text-xs font-normal text-neutral-500"
@@ -445,12 +433,14 @@ const ArticleList: FC<ArticleListProps> = ({
                   </span>
                 )}
               </a>
-              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
+              <div className="content-article-metadata text-neutral-500">
                 <div
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  <span>{articleBodyState(item.bodyCached).current}</span>
+                  <span className={item.bodyCached ? 'sr-only' : undefined}>
+                    {articleBodyState(item.bodyCached).current}
+                  </span>
                   {!item.bodyCached && (
                     <Button
                       size="sm"
@@ -478,17 +468,18 @@ const ArticleList: FC<ArticleListProps> = ({
                     正文暂不可重试
                   </span>
                 )}
-                {(collectionChannels[item.mpId] ||
-                  item.feed?.collectionChannel) !== 'wechat2rss' && (
-                  <span
-                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
-                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                  >
-                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                    {metricDisplay(item.metrics, 'favorite')}
-                  </span>
-                )}
+                {item.metrics &&
+                  (collectionChannels[item.mpId] ||
+                    item.feed?.collectionChannel) !== 'wechat2rss' && (
+                    <span
+                      className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                      title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                    >
+                      阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                      {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                      {metricDisplay(item.metrics, 'favorite')}
+                    </span>
+                  )}
                 <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
@@ -551,44 +542,6 @@ const ArticleList: FC<ArticleListProps> = ({
           )}
         </div>
       </div>
-      <Modal
-        isOpen={Boolean(readingId)}
-        onClose={() => {
-          position.restoreAfterReader();
-          setReaderFindOpen(false);
-          setReadingId(null);
-        }}
-        isKeyboardDismissDisabled={readerFindOpen}
-        size="4xl"
-        scrollBehavior="inside"
-        classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
-      >
-        <ModalContent>
-          <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
-          <ModalBody>
-            <p className="text-sm text-neutral-500">阅读已保存的正文和图片。</p>
-            {reading.isLoading ? (
-              <Spinner />
-            ) : reading.error ? (
-              <div role="alert">
-                <FailureNotice
-                  error={reading.error}
-                  fallback="正文读取失败，请稍后重试或打开原文。"
-                />
-              </div>
-            ) : reading.data?.contentHtml ? (
-              <ArticleReader
-                key={readingId}
-                contentHtml={reading.data.contentHtml}
-                findOpen={readerFindOpen}
-                onFindOpenChange={setReaderFindOpen}
-              />
-            ) : (
-              <p role="alert">正文尚未保存，可打开原文阅读。</p>
-            )}
-          </ModalBody>
-        </ModalContent>
-      </Modal>
     </div>
   );
 };

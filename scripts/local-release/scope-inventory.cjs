@@ -5,6 +5,15 @@ const fs = require('node:fs'),
   crypto = require('node:crypto');
 const GiB = 1024 ** 3;
 const FORMAT = 'stream-dfs-sha256-v2';
+// Opt-in versioned prototype; the release controller must bind the same rules.
+const PRIVATE_FORMAT = 'stream-dfs-private-v3';
+const PRIVATE_RULES = 'private-names-v1';
+function isPrivatePath(relative) {
+  const parts = relative.replace(/\\/g, '/').split('/').map((p) => p.toLowerCase());
+  const name = parts[parts.length - 1];
+  return parts.includes('.git') || name === '.env' || name.startsWith('.env.') ||
+    /\.(db|sqlite|sqlite3)(-(wal|shm|journal))?$/.test(name);
+}
 const EMPTY = crypto.createHash('sha256').digest('hex');
 const PROFILES = Object.freeze({
   small: Object.freeze({
@@ -64,6 +73,9 @@ function createVerifier(configuration, options = {}) {
     now = options.now || (() => performance.now()),
     started = now(),
     buffer = Buffer.alloc(MEMORY.bufferBytes);
+  if (options.privateAccounting !== undefined && options.privateAccounting !== PRIVATE_RULES)
+    throw new Error('RELEASE_SCOPE_PRIVATE_RULES_INVALID');
+  const privateMode = options.privateAccounting === PRIVATE_RULES;
   const metrics = {
     passes: 0,
     visitedEntries: 0,
@@ -84,9 +96,15 @@ function createVerifier(configuration, options = {}) {
       pendingNameBytes = 0,
       segmentRows = 0,
       segments = 0;
+    let privateEntries = 0, privateBytes = 0;
     const digest = crypto.createHash('sha256'),
       metadata = crypto.createHash('sha256'),
       segmentRoot = crypto.createHash('sha256');
+    if (privateMode) {
+      const header = JSON.stringify({ format: PRIVATE_FORMAT, classification: PRIVATE_RULES }) + '\n';
+      digest.update(header);
+      metadata.update(header);
+    }
     let segment = crypto.createHash('sha256');
     metrics.passes++;
     const excludedAt = (p) => excluded.some((r) => within(r, p));
@@ -127,17 +145,23 @@ function createVerifier(configuration, options = {}) {
       segment.update(line);
       if (++segmentRows === MEMORY.segmentEntries) finishSegment();
     }
-    function fileDigest(file, size) {
+    function fileDigest(file, size, expected) {
       if (
         readBytes + Number(size) > limits.scanReadBytes ||
         metrics.readBytes + Number(size) > limits.operationReadBytes
       )
         throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
-      if (size === 0n) return EMPTY;
+      if (size === 0n && !privateMode) return EMPTY;
       const h = crypto.createHash('sha256');
       const fd = io.openSync(file, 'r');
       let count = 0;
       try {
+        if (privateMode) {
+          const opened = io.fstatSync(fd, { bigint: true });
+          if (!opened.isFile() || opened.nlink !== 1n ||
+              ['dev', 'ino', 'birthtimeNs', 'size', 'mtimeNs', 'ctimeNs'].some((k) => opened[k] !== expected[k]))
+            throw new Error('RELEASE_SCOPE_OPENED_FILE_CHANGED');
+        }
         while (count < Number(size)) {
           budget();
           const length = Math.min(
@@ -253,7 +277,12 @@ function createVerifier(configuration, options = {}) {
       if (control && s.size > 65536n)
         throw new Error('RELEASE_SCOPE_CONTROL_FILE_LIMIT');
       if (!control && !excludedAt(at)) {
-        const content = metadataOnly ? undefined : fileDigest(at, s.size),
+        const name = path.basename(relative).toLowerCase();
+        const isPrivate = privateMode && isPrivatePath(relative);
+        if (isPrivate && (name === 'node.exe' || name === 'release.json' || name === 'active.json'))
+          throw new Error('RELEASE_SCOPE_PRIVATE_RUNTIME_CONFLICT');
+        if (isPrivate) { privateEntries++; privateBytes += Number(s.size); }
+        const content = metadataOnly || isPrivate ? undefined : fileDigest(at, s.size, s),
           after = io.lstatSync(at, { bigint: true });
         for (const k of [
           'dev',
@@ -268,7 +297,7 @@ function createVerifier(configuration, options = {}) {
         record(
           [
             ...key,
-            'file',
+            isPrivate ? 'private-metadata-unverified' : 'file',
             ...[s.dev, s.ino, s.birthtimeNs, s.size, s.mtimeNs, s.ctimeNs].map(
               String,
             ),
@@ -295,7 +324,8 @@ function createVerifier(configuration, options = {}) {
     finishSegment();
     budget();
     return {
-      format: FORMAT,
+      format: privateMode ? PRIVATE_FORMAT : FORMAT,
+      ...(privateMode ? { classification: PRIVATE_RULES, privateEntries, privateBytes, privateContentVerified: false } : {}),
       bytes,
       entries,
       runtimeCopies,
@@ -317,6 +347,13 @@ function createVerifier(configuration, options = {}) {
       if (metrics.readBytes > limits.operationReadBytes)
         throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
     },
+    chargeExternal(n) {
+      if (!Number.isSafeInteger(n) || n < 0 || n > limits.scanReadBytes ||
+          metrics.readBytes + n > limits.operationReadBytes)
+        throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
+      metrics.readBytes += n;
+      if (now() - started > limits.durationMs) throw new Error('RELEASE_SCOPE_SCAN_TIME_BUDGET');
+    },
     metrics: () => ({
       ...metrics,
       elapsedMs: Math.floor(now() - started),
@@ -324,7 +361,7 @@ function createVerifier(configuration, options = {}) {
     }),
   };
 }
-module.exports = { createVerifier, settings, PROFILES, MEMORY, FORMAT };
+module.exports = { createVerifier, settings, PROFILES, MEMORY, FORMAT, PRIVATE_FORMAT, PRIVATE_RULES, isPrivatePath };
 if (require.main === module) {
   try {
     if (process.argv.length !== 4 || process.argv[2] !== '--inspect')

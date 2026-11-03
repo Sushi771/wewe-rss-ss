@@ -1,3 +1,4 @@
+import { mediaTransaction } from './media-transaction';
 import { createHash } from 'node:crypto';
 import {
   incrementalWrite,
@@ -840,7 +841,7 @@ export class CollectionService {
       Logger.log(
         `Cache prepare: ${transactionStarted - phaseStarted}ms; articles=${page.articles.length}`,
       );
-      await incrementalWrite(this.prisma, payloadBytes, () =>
+      const writeCache = () =>
         this.prisma.$transaction(
           async (tx) => {
             await assertIncrementalTransaction(tx);
@@ -1227,7 +1228,11 @@ export class CollectionService {
             VALUES(${receiptId},${input.mpId},${JSON.stringify(committed)},${Date.now()}) ON CONFLICT(id) DO NOTHING`;
           },
           { timeout: 60000 },
-        ),
+        );
+      await incrementalWrite(this.prisma, payloadBytes, () =>
+        input.savedMedia
+          ? mediaTransaction(this.prisma, writeCache)
+          : writeCache(),
       );
       Logger.log(
         `Cache transaction: ${Date.now() - transactionStarted}ms; created=${created}; updated=${updated}`,

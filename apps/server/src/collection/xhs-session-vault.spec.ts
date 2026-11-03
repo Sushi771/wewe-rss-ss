@@ -1,3 +1,5 @@
+import childProcess = require('node:child_process');
+import { EventEmitter } from 'node:events';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -59,19 +61,85 @@ describe('explicit CurrentUser DPAPI envelope (synthetic only)', () => {
       path.join(tmpdir(), 'wewe-xhs-dpapi-synthetic-'),
     );
     const vault = new XhsDpapiSessionVault(root);
-    expect(await vault.status()).toEqual({ stored: false });
-    await vault.store(cookies);
+    const stage = async <T>(name: string, run: () => Promise<T>) => {
+      console.info('XHS_SYNTHETIC_DPAPI_STAGE_' + name);
+      return run();
+    };
+    expect(await stage('INITIAL_STATUS', () => vault.status())).toEqual({
+      stored: false,
+    });
+    await stage('STORE', () => vault.store(cookies));
+    console.info('XHS_SYNTHETIC_DPAPI_STAGE_READ_CIPHERTEXT');
     const ciphertext = await fs.readFile(
       path.join(root, '.wewe-xhs-session', 'session.dpapi'),
     );
     expect(ciphertext.includes(Buffer.from(cookies.a1))).toBe(false);
     expect(ciphertext.includes(Buffer.from(cookies.web_session))).toBe(false);
-    expect(await vault.load()).toEqual(cookies);
-    await expect(vault.store(cookies)).rejects.toThrow(
-      'XHS_VAULT_OPERATION_FAILED',
+    expect(await stage('LOAD_INITIAL', () => vault.load())).toEqual(cookies);
+    await expect(
+      stage('DUPLICATE_STORE', () => vault.store(cookies)),
+    ).rejects.toThrow('XHS_VAULT_OPERATION_FAILED');
+    expect(await stage('LOAD_AFTER_DUPLICATE', () => vault.load())).toEqual(
+      cookies,
     );
-    expect(await vault.load()).toEqual(cookies);
-    await vault.disconnect();
-    expect(await vault.status()).toEqual({ stored: false });
+    await stage('DISCONNECT', () => vault.disconnect());
+    expect(await stage('FINAL_STATUS', () => vault.status())).toEqual({
+      stored: false,
+    });
   }, 60000);
+});
+
+describe('DPAPI child deadline (synthetic process only)', () => {
+  it('kills at the original deadline, reports timeout, never retries and clears buffers', async () => {
+    if (process.platform !== 'win32') return;
+    jest.useFakeTimers();
+    const child = new EventEmitter() as any;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    let input: Buffer | undefined;
+    child.stdin.end = jest.fn((bytes: Buffer) => {
+      input = bytes;
+    });
+    child.kill = jest.fn(() => true);
+    const spawn = jest.spyOn(childProcess, 'spawn').mockReturnValue(child);
+    const output = Buffer.from('synthetic-output-never-real');
+    try {
+      const pending = callWindowsDpapi(
+        'store',
+        path.join(
+          tmpdir(),
+          'synthetic-deadline',
+          '.wewe-xhs-session',
+          'session.dpapi',
+        ),
+        cookies,
+      );
+      const rejected = expect(pending).rejects.toThrow(
+        'XHS_VAULT_OPERATION_FAILED_TIMEOUT',
+      );
+      child.stdout.emit('data', output);
+      jest.advanceTimersByTime(14999);
+      expect(child.kill).not.toHaveBeenCalled();
+      jest.advanceTimersByTime(1);
+      const lateDiagnostic = Buffer.from(
+        'XHS_VAULT_OPERATION_FAILED_LINE_1_Error',
+      );
+      child.stderr.emit('data', lateDiagnostic);
+      child.emit('close', null);
+      await rejected;
+      expect(lateDiagnostic.every((byte) => byte === 0)).toBe(true);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(input).toBeDefined();
+      expect(input!.every((byte) => byte === 0)).toBe(true);
+      expect(output.every((byte) => byte === 0)).toBe(true);
+      expect(jest.getTimerCount()).toBe(0);
+      expect(spawn.mock.calls[0][1]).not.toContain(cookies.a1);
+      expect(spawn.mock.calls[0][1]).not.toContain(cookies.web_session);
+    } finally {
+      spawn.mockRestore();
+      jest.useRealTimers();
+    }
+  });
 });

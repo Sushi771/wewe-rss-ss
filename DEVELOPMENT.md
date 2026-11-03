@@ -1,5 +1,7 @@
 # Development Guide
 
+2026-10-25 XHS engagement development: additive raw-SQL projections and synthetic-only comment pagination are documented in [XIAOHONGSHU_INTEGRATION](docs/XIAOHONGSHU_INTEGRATION.md). UI/filter/export and explicit bounded comment operations are integrated behind a separate default-off comment gate. Development-only authorization was clarified; no live requests, credential reads, gate activation or deployment occurred. Repeated local exports publish immutable companion snapshots while retaining handwritten files. Do not enable collection or deploy without the parent task's separate confirmation. Keep the independent original-link/repeat-save fix when merging.
+
 ## 小红书订阅开发（2026-10-24）
 
 当前小红书公开基线为 `9e1b81a8d095390bce968a137fd88d23ba5252df`，对应 r2 已本机上线。本轮在新隔离分支改进任务刷新找回、终态持久失败处理、显式继续、独立内容证据及单源组包恢复；不部署、不发真实请求、不读真实凭据、不删除历史数据。维护入口见[开发交接](docs/xiaohongshu/DEVELOPMENT.md)、[技术标准](docs/xiaohongshu/TECHNICAL.md)、[反例验收](docs/xiaohongshu/ACCEPTANCE.md)及[本机维护](docs/LOCAL_RELEASE_REHEARSAL.md)。新实现commit和验证结果由主负责人集成后校准，源码与本地交付统一通过draft PR协调。
@@ -56,7 +58,9 @@ after migration21; the actual synthetic upgrade/application rollback remains a
 separate acceptance requirement.
 
 - **Pre-commit**: `lint-staged` and `husky` will automatically format your code.
-- **CI**: Every PR to `main` is checked for linting and build success.
+- **Local installation acceptance**: GitHub remains the source-version and collaboration record; existing workflows stay in place, but cloud CI is not a prerequisite for local installation. Record cloud results when available without describing a failed or skipped run as passed.
+- Bind the exact source commit, source/input hashes, build outputs and complete installation package. Exercise the candidate in a separate local directory, synthetic database and unoccupied port, with real-source access and scheduled execution disabled during synthetic tests. Run the relevant build, backend, UI and failure/recovery checks for the change; distinguish synthetic results from live-source evidence. An unverified or failed core local acceptance blocks a completion claim.
+- Preserve existing database and user files, unknown dispatch receipts and other recovery fences. Before installation, create and verify a recoverable backup and record its identity and hash. Verify the permitted rollback path when the schema or recovery contract changes. After installation, verify the actual running package and process identity, database integrity, affected UI and configured scheduling; perform real-source acceptance only within the user's authorization and report missing or failed fields honestly. Do not delete old backups without authorization for the specific list.
 
 ## 自动刷新入口维护（2026-10-12）
 
@@ -65,3 +69,6 @@ separate acceptance requirement.
 ## 导出增量与范围合同（2026-10-13）
 
 同目录完整文章在媒体准备前跳过，缺图按回执补齐并保留原正文；界面区分新增、跳过、补齐、失败。全周期操作使用“导出当前筛选全部”，ZIP独立区分整号与当前筛选快照。产品行为、回执保护、取消边界与离线验收见[导出说明](docs/INCREMENTAL_ARTICLE_EXPORT.md)。
+
+
+2026-10-25 小红书统一候选未部署，生产保持 f8fbb3c。目录 Markdown+image/video 直接保存为主；ZIP为兼容入口。实现、schema、回滚及批准后小批量验收见 docs/xiaohongshu/TECHNICAL.md；已发生的真实归档及未知历史持久异常不得用新合成测试重写。

@@ -47,7 +47,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
               return failureCount < 3;
             },
             onError(error) {
-              console.error('queries onError: ', error);
+              console.error('queries onError');
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('登录已失效或无权操作，请检查账号。', {
@@ -74,7 +74,7 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
           },
           mutations: {
             onError(error) {
-              console.error('mutations onError: ', error);
+              console.error('mutations onError');
               if (isTRPCClientError(error)) {
                 if (error.data?.httpStatus === 401) {
                   toast.error('登录已失效或无权操作，请检查账号。', {
@@ -120,12 +120,27 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
     return trpc.createClient({
       links: [
         loggerLink({
+          logger: (event) =>
+            console.info('trpc', {
+              direction: event.direction,
+              type: event.type,
+              outcome:
+                event.direction === 'down' && event.result instanceof Error
+                  ? 'failed'
+                  : 'complete',
+            }),
           // Signed share links and session fields must never enter console logs.
           enabled: (operation) =>
             'path' in operation &&
             typeof operation.path === 'string' &&
             ![
               'xiaohongshu.resolveSubscription',
+              'xiaohongshu.recoverSingleNote',
+              'xiaohongshu.startSubscriptionBatch',
+              'xiaohongshu.resumeSubscriptionBatch',
+              'xiaohongshu.subscriptionBatch',
+              'xiaohongshu.cancelSubscriptionBatch',
+              'xiaohongshu.prepareOriginalLink',
               'xiaohongshu.connectSession',
             ].includes(operation.path),
         }),
@@ -133,9 +148,19 @@ export const TrpcProvider: React.FC<{ children: React.ReactNode }> = ({
           // Each reading response must be independent of slower background
           // tasks in the same batch. Auth, cache and cancellation stay shared.
           condition: (operation) =>
-            ['article.list', 'article.summary', 'article.byId'].includes(
-              operation.path,
-            ),
+            [
+              'article.list',
+              'article.summary',
+              'article.byId',
+              'xiaohongshu.prepareOriginalLink',
+              'xiaohongshu.resolveSubscription',
+              'xiaohongshu.recoverSingleNote',
+              'xiaohongshu.startSubscriptionBatch',
+              'xiaohongshu.resumeSubscriptionBatch',
+              'xiaohongshu.subscriptionBatch',
+              'xiaohongshu.cancelSubscriptionBatch',
+              'xiaohongshu.connectSession',
+            ].includes(operation.path),
           true: httpLink(transport),
           false: httpBatchLink(transport),
         }),

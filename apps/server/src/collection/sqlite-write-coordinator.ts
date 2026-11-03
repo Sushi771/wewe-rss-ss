@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { assertIncrementalWriteAdmission } from './incremental-write';
+import { assertIncrementalWriteAdmission, canReuseIncrementalTransactionChecks } from './incremental-write';
 
 type Kind = 'write' | 'backup';
 type Entry = {
@@ -80,7 +80,7 @@ export class SqliteWriteCoordinator {
     }
   }
 
-  async write<T>(operation: () => Promise<T>): Promise<T> {
+  async write<T>(operation: () => Promise<T>, reuseTransactionChecks = false): Promise<T> {
     // Transaction middleware runs inside the admission acquired by $transaction.
     // Expired detached async contexts must not bypass a later backup.
     let release: () => void;
@@ -98,7 +98,7 @@ export class SqliteWriteCoordinator {
     }
     const permit = { active: true };
     try {
-      const incremental = assertIncrementalWriteAdmission();
+      const incremental = nested && reuseTransactionChecks && canReuseIncrementalTransactionChecks() ? undefined : assertIncrementalWriteAdmission();
       if (incremental) await incremental;
       if (!nested && this.fences.size)
         throw new Error('SQLite write fenced before engine execution');

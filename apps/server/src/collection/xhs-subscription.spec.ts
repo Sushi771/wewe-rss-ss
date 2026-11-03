@@ -1,3 +1,4 @@
+import { scheduledTaskId } from './xhs-scheduled-admission';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -18,7 +19,8 @@ import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { createHash } from 'node:crypto';
+import { RedbookPauseError } from './redbook-client';
+import { createHash, randomUUID } from 'node:crypto';
 import { createHTTPServer } from '@trpc/server/adapters/standalone';
 import { createRequire } from 'node:module';
 const { createTRPCProxyClient, httpLink } = createRequire(
@@ -49,6 +51,9 @@ const detail = (noteId = 'note-a'): XhsNormalizedCandidate => ({
   expectedImageCount: 1,
   images: [{ ordinal: 1, inlineData: png }],
 });
+// This file exercises real SQLite, async task lanes and local filesystem writes.
+// Keep per-test waits bounded while allowing CI time for the integrated I/O.
+jest.setTimeout(15000);
 describe('isolated subscription workflow with synthetic SQLite and actual local saver', () => {
   let root: string,
     db: PrismaClient,
@@ -57,6 +62,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     source: XhsSubscriptionSource,
     store: LocalArticleStore;
   let creatorId: string;
+  let trackedDownloadResume: Promise<void> | undefined;
   beforeAll(async () => {
     root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-subscription-test-'));
     db = new PrismaClient({
@@ -84,10 +90,15 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);
   }, 30000);
   beforeEach(async () => {
+    // A timed-out resume test may still be using this fixture.
+    if (trackedDownloadResume) { await trackedDownloadResume.catch(() => {}); trackedDownloadResume=undefined; }
+    // Previous terminal visibility does not imply its worker/finally has released the fixture lock.
+    if (service) await (service as any).lane;
     await db.$executeRawUnsafe('DELETE FROM xhs_subscription_tasks');
     await db.xhsNote.deleteMany();
     await db.xhsCreator.deleteMany();
     source = {
+      hasAuthorContext: jest.fn(() => true),
       resolve: jest.fn(async (url) => ({
         inputKind: url.includes('/user/profile/')
           ? ('profile' as const)
@@ -124,16 +135,14 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         );
       },
     );
-    const resolution = await service.resolveSubscription({
-      url: author.profileUrl,
-    });
-    creatorId = (
-      await service.subscribe({ resolutionId: resolution.resolutionId })
-    ).creatorId;
-  });
+    creatorId = randomUUID();
+    await db.xhsCreator.create({ data: { id: creatorId, externalAuthorId: author.id, profileUrl: author.profileUrl, displayName: author.name, enabled: true } });
+  }, 40000);
   afterAll(async () => {
+    if (trackedDownloadResume) await trackedDownloadResume.catch(() => {});
+    if (service) await (service as any).lane;
     await db?.$disconnect(); /* synthetic files retained in temp for diagnosis */
-  });
+  }, 40000);
   const finish = async (taskId: string) => {
     for (let i = 0; i < 2000; i++) {
       const t = await service.task({ taskId });
@@ -150,9 +159,22 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     }
     throw Error('SYNTHETIC_SETTLEMENT_TIMEOUT');
   };
+  it.each([
+    [new XhsSubscriptionError('XHS_LIST_PARSE_FAILED'),'XHS_LIST_PARSE_FAILED'],
+    [new RedbookPauseError('transport'),'XHS_SOURCE_TRANSPORT_BLOCKED'],
+    [new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED'),'XHS_REQUEST_BUDGET_EXHAUSTED'],
+    [new Error('synthetic-private-error'),'XHS_TASK_BLOCKED'],
+  ])('persists fixed listing failure classification without raw payload',async (error,code)=>{
+    (source.list as jest.Mock).mockRejectedValueOnce(error);const task=await service.refreshFull({id:creatorId,scope:'all',basicOnly:true});
+    const done=await finish(task.taskId);expect(done).toMatchObject({state:'blocked',collectionStage:'listing',code});
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${task.taskId}`;
+    expect(JSON.parse(rows[0].document)).toMatchObject({state:'blocked',collectionStage:'listing',code});expect(rows[0].document).not.toContain('synthetic-private-error');expect(source.list).toHaveBeenCalledTimes(1);
+  },20000);
   it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
     let page = 0;
     const list = jest.fn(async (_author: string, _cursor: string | null) => {
+      void _author;
+      void _cursor;
       page++;
       return {
         authorId: author.id,
@@ -170,7 +192,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     });
     source.list = list;
     const first = await service.refresh({ id: creatorId, maxPages: 2 });
-    expect(await finish(first.taskId)).toMatchObject({
+    expect(await settled(first.taskId)).toMatchObject({
       state: 'blocked',
       code: 'XHS_LIST_PAGE_LIMIT_REACHED',
       completed: 2,
@@ -318,7 +340,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         groupId: 'wrong-platform',
       }),
     ).rejects.toThrow('XHS_GROUP_INVALID');
-    expect(await service.subscribe({ resolutionId: r.resolutionId })).toEqual({
+    expect(await service.subscribe({ resolutionId: r.resolutionId })).toMatchObject({
       creatorId,
       created: false,
       subscribed: true,
@@ -326,6 +348,78 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     await expect(
       service.subscribe({ resolutionId: 'expired' }),
     ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
+  });
+  it('archives an eligible manual refresh using the real local saver',async()=>{
+    const taskId='manual-archive-test',noteId=noteKey('manual-archive-test');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual synthetic',publishTime:1760000000,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const result=await (service as any).archiveTask(taskId,creatorId);expect(result).toEqual({incomplete:false});
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:false});
+  },40000);
+  it('retains a manual archive conflict as incomplete',async()=>{
+    const taskId='manual-archive-conflict',noteId=noteKey('manual-archive-conflict'),target=path.join(root,'synthetic-conflict-original.txt');
+    await fs.writeFile(target,'synthetic original');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual synthetic',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    service.bindLocalSaver(async()=>root,async()=>({mediaComplete:true,supplement:{status:'conflict-version'}} as any));
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:true});expect(await fs.readFile(target,'utf8')).toBe('synthetic original');
+    const rows=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'conflict'});
+  },40000);
+  it('reconciles a manual archive after the saved file acknowledgement is lost',async()=>{
+    const taskId='manual-archive-interrupt',noteId=noteKey('manual-archive-interrupt');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Manual interrupted synthetic',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<div id="js_content"><p>synthetic body</p></div>'}});
+    const task={taskId,creatorId,kind:'list',state:'partial',basicOnly:true,reuseCompleteCache:false,noteIds:[noteId],items:{[noteId]:'completed'},basicResults:{[noteId]:'complete'},scheduledMediaResults:{[noteId]:'complete'}};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const realSave=(service as any).save;let first=true,receiptPath='';
+    const save=jest.fn(async(...args:any[])=>{const result=await realSave(...args);if(first){first=false;receiptPath=result.markdownPath;throw Error('synthetic lost acknowledgement');}expect(result.alreadySaved).toBe(true);return result;});
+    service.bindLocalSaver(async()=>root,save);
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:true});
+    expect((await fs.stat(receiptPath)).isFile()).toBe(true);
+    let rows=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(rows[0].state).toBe('partial');expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'failed'});
+    expect(await (service as any).archiveTask(taskId,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(2);
+    rows=await db.$queryRaw<Array<{state:string;document:string}>>`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(Object.values(JSON.parse(rows[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+  },40000);
+  it('does not acknowledge a scheduled archive if note data changes during saving',async()=>{
+    const round='2026-11-01/09:15',taskId=scheduledTaskId(round,creatorId,'basic'),noteId=noteKey('archive-race');
+    await db.xhsNote.create({data:{id:noteId,creatorId,title:'Before',publishTime:1,kind:'image-text',status:'complete',contentHtml:'<p>body</p>'}});
+    const task={taskId,creatorId,state:'completed',schedule:{round,phase:'basic'},noteIds:[noteId],failed:0};
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'completed',${JSON.stringify(task)},1)`;
+    try {
+      let change=true;const save=jest.fn(async()=>{if(change){change=false;await db.xhsNote.update({where:{id:noteId},data:{title:'After'}});}return {alreadySaved:false,mediaComplete:true};});
+      let destination=root;service.bindLocalSaver(async()=>destination,save);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});
+      let row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(JSON.parse(row[0].document).scheduledArchive).toBeUndefined();
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(2);
+      row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'saved'});
+      destination=path.join(root,'other-synthetic');expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:false});expect(save).toHaveBeenCalledTimes(3);
+      await db.xhsNote.update({where:{id:noteId},data:{title:'More'}});save.mockResolvedValueOnce({alreadySaved:false,mediaComplete:false});
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(5);
+      await db.xhsNote.update({where:{id:noteId},data:{title:'Conflict'}});
+      (save as any).mockResolvedValueOnce({alreadySaved:true,mediaComplete:true,supplement:{status:'conflict-version'}});
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});
+      row=await db.$queryRaw<Array<{document:string}>>`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(Object.values(JSON.parse(row[0].document).scheduledArchive)[0]).toMatchObject({state:'conflict'});
+      expect((await service.task({taskId})).archiveConflicts).toBe(1);
+      expect(await service.archiveScheduled(round,creatorId)).toEqual({incomplete:true});expect(save).toHaveBeenCalledTimes(6);
+    } finally {await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;}
+  },40000);
+  it('persists a checked avatar through subscription and preserves it when a later source has none', async () => {
+    (source.resolve as jest.Mock).mockResolvedValueOnce({inputKind:'profile',author:{...author,avatarUrl:'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg?token=synthetic-secret'}});
+    const first=await service.resolveSubscription({url:author.profileUrl});
+    await service.subscribe({resolutionId:first.resolutionId});
+    const rows=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
+    expect(rows[0].avatar_url).toBe('https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg');
+    const found=(await cache.list()).items.find(item=>item.id===creatorId);
+    expect(found?.avatarUrl).toBe(rows[0].avatar_url);
+    const second=await service.resolveSubscription({url:author.profileUrl});await service.subscribe({resolutionId:second.resolutionId});
+    const after=await db.$queryRaw<Array<{avatar_url:string|null}>>`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
+    expect(after[0].avatar_url).toBe(rows[0].avatar_url);
   });
   it('exposes the agreed task API through protected routes and gates local writes', async () => {
     const config = new ConfigService({
@@ -539,6 +633,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       total: 1,
       remaining: 0,
     });
+    // COMMIT visibility precedes Promise/finally worker cleanup. Join the actual lane.
+    await (service as any).lane;
     expect(lost).toBe(true);
     expect(saves).toBe(1);
     expect((service as any).pending.size).toBe(0);
@@ -798,12 +894,228 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(files.some((f) => String(f).endsWith('.md'))).toBe(true);
     expect(files.some((f) => /\.png$/.test(String(f)))).toBe(true);
   }, 30000);
+  it.each([false, true])(
+    'completes two repeat saves with unchanged files when last checkpoint acknowledgement fails: %s',
+    async (loseCheckpoint) => {
+      (source.list as jest.Mock).mockResolvedValue({
+        authorId: author.id,
+        nextCursor: null,
+        notes: ['repeat-one', 'repeat-two'].map((noteId) => ({
+          authorId: author.id,
+          noteId,
+          title: 'Synthetic repeat',
+          publishedAt: 0,
+          kind: 'image-text',
+        })),
+      });
+      (source.detail as jest.Mock).mockImplementation(async (_author, id) =>
+        detail(id),
+      );
+      const listed = await service.refresh({ id: creatorId });
+      await finish(listed.taskId);
+      await (service as any).lane;
+      expect((service as any).pending.has(listed.taskId)).toBe(false);
+      expect((service as any).controllers.has(listed.taskId)).toBe(false);
+      const request = {
+        creatorId,
+        noteIds: ['repeat-one', 'repeat-two'].map(noteKey),
+      };
+      const first = await service.downloadNotes(request);
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 2,
+        skipped: 0,
+        remaining: 0,
+      });
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const files = (await fs.readdir(root, { recursive: true }))
+        .map(String)
+        .filter((file) => /\.(md|png)$/.test(file));
+      const digest = async () =>
+        Promise.all(
+          files.map(async (file) => {
+            const full = path.join(root, file);
+            return {
+              file,
+              bytes: createHash('sha256')
+                .update(await fs.readFile(full))
+                .digest('hex'),
+              mtime: (await fs.stat(full)).mtimeMs,
+            };
+          }),
+        );
+      const before = await digest();
+      const original = (service as any).persistIn.bind(service);
+      let lost = false;
+      const fault = jest
+        .spyOn(service as any, 'persistIn')
+        .mockImplementation(async (tx, task: any) => {
+          if (
+            loseCheckpoint &&
+            !lost &&
+            task.kind === 'download' &&
+            task.state === 'running' &&
+            task.skipped === 2
+          ) {
+            lost = true;
+            throw Error(
+              'synthetic final skipped checkpoint acknowledgement unavailable',
+            );
+          }
+          return original(tx, task);
+        });
+      const repeat = await service.downloadNotes(request);
+      for (let i = 0; i < 1000 && (service as any).pending.size; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((service as any).pending.size).toBe(0);
+      expect(await finish(repeat.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 0,
+        skipped: 2,
+        failed: 0,
+        remaining: 0,
+        resumable: false,
+      });
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(source.list).toHaveBeenCalledTimes(1);
+      expect(await digest()).toEqual(before);
+      const fresh = new XhsSubscriptionService(db as any, source);
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+      });
+      // Reproduce the historical durable receipt after process loss. A settled
+      // all-skipped checkpoint closes without a new task or any file action.
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${repeat.taskId}`;
+      const checkpoint = {
+        ...JSON.parse(rows[0].document),
+        state: 'blocked',
+        code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      };
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked', document=${JSON.stringify(checkpoint)} WHERE id=${repeat.taskId}`;
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+        resumable: false,
+      });
+      await expect(fresh.resumeTask(repeat)).rejects.toThrow(
+        'XHS_TASK_NOT_RESUMABLE',
+      );
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(await digest()).toEqual(before);
+      expect(lost).toBe(loseCheckpoint);
+      fault.mockRestore();
+    },
+    30000,
+  );
+  it('keeps enqueue fenced after durable completion until the original lane releases', async () => {
+    const listed = await service.refresh({ id: creatorId });
+    await finish(listed.taskId);
+    await (service as any).lane;
+    const request = { creatorId, noteIds: [noteKey('note-a')] };
+    let reached!: () => void, release!: () => void;
+    const committed = new Promise<void>((resolve) => { reached = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const original = (service as any).persist.bind(service);
+    let held = false;
+    const fault = jest.spyOn(service as any, 'persist').mockImplementation(async (task: any) => {
+      await original(task);
+      if (!held && task.kind === 'download' && task.state === 'completed') {
+        held = true;
+        reached();
+        await gate;
+      }
+    });
+    try {
+      const first = await service.downloadNotes(request);
+      await committed;
+      expect(await finish(first.taskId)).toMatchObject({ state: 'completed', completed: 1 });
+      expect((service as any).pending.has(first.taskId)).toBe(true);
+      expect((service as any).controllers.has(first.taskId)).toBe(true);
+      await expect(service.downloadNotes(request)).rejects.toThrow('XHS_TASK_CONFLICT');
+      expect(source.detail).toHaveBeenCalledTimes(1);
+      release();
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const repeat = await service.downloadNotes(request);
+      await (service as any).lane;
+      expect(await finish(repeat.taskId)).toMatchObject({ state: 'completed', skipped: 1 });
+      expect(source.detail).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await (service as any).lane;
+      fault.mockRestore();
+    }
+  }, 30000);
   it('rejects another creator selection before details or saving', async () => {
     await finish((await service.refresh({ id: creatorId })).taskId);
     await expect(
       service.downloadNotes({ creatorId, noteIds: ['foreign'] }),
     ).rejects.toThrow('XHS_SELECTION_INVALID');
     expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('keeps uncertain, failed, cancelled and bounded-list receipts distinct from reconciled completion', () => {
+    const id = noteKey('synthetic-receipt');
+    const receipt = {
+      taskId: 'synthetic-receipt',
+      creatorId,
+      kind: 'download',
+      state: 'blocked',
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      total: 1,
+      completed: 0,
+      skipped: 1,
+      failed: 0,
+      remaining: 0,
+      noteIds: [id],
+      items: { [id]: 'skipped' },
+      message: '',
+    };
+    const view = (task: any) => (service as any).view(task);
+    expect(view(receipt)).toMatchObject({
+      state: 'completed',
+      resumable: false,
+      code: undefined,
+    });
+    (service as any).uncertain.set(receipt.taskId, receipt);
+    expect(view(receipt)).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+    });
+    (service as any).uncertain.clear();
+    expect(
+      view({ ...receipt, failed: 1, skipped: 0, items: { [id]: 'failed' } }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, items: {} })).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        kind: 'list',
+        code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+        cursor: 'next',
+      }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, state: 'cancelled' })).toMatchObject({
+      state: 'cancelled',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        skipped: 0,
+        remaining: 1,
+        supersededByTaskId: 'successor',
+      }),
+    ).toMatchObject({ resumable: false });
   });
   it('commits and searches all 32 notes when a bounded page exceeds the requested 30', async () => {
     const notes = Array.from({ length: 32 }, (_, i) => ({
@@ -873,6 +1185,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       })),
     });
     await finish((await service.refresh({ id: creatorId })).taskId);
+    // Terminal persistence precedes finally cleanup; wait before the next enqueue.
+    await (service as any).lane;
     (source.detail as jest.Mock).mockRejectedValue(
       new Error('synthetic authentication stop'),
     );
@@ -1110,7 +1424,8 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(source.list).toHaveBeenCalledTimes(2);
     expect(await db.xhsNote.count()).toBe(1);
   });
-  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', async () => {
+  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', () => {
+    trackedDownloadResume=(async () => {
     (source.list as jest.Mock).mockResolvedValue({
       authorId: author.id,
       nextCursor: null,
@@ -1164,7 +1479,9 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     expect(
       await db.xhsNote.findUnique({ where: { id: noteKey('one') } }),
     ).toEqual(old);
-  });
+    })();
+    return trackedDownloadResume;
+  }, 30000);
   it('cancels during an in-flight list without committing the returned page', async () => {
     let release!: (v: any) => void;
     (source.list as jest.Mock).mockImplementation(

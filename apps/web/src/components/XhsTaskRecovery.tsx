@@ -43,17 +43,10 @@ export default function XhsTaskRecovery({
       open={open}
       onOpenChange={onOpenChange}
       summary={open ? '收起最近任务' : '查看最近任务'}
-      actions={
-        <Button
-          size="sm"
-          variant="light"
-          isDisabled={loading}
-          onPress={onRetry}
-        >
-          重新读取任务
-        </Button>
-      }
     >
+      <Button size="sm" variant="light" isDisabled={loading} onPress={onRetry}>
+        重新读取任务
+      </Button>
       {loading && <p role="status">正在读取本地任务记录…</p>}
       {error && (
         <p role="alert">

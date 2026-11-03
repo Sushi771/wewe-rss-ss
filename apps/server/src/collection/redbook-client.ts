@@ -1,9 +1,11 @@
 import { buildGetUri, signMainApi, USER_AGENT } from './redbook-vendor/signing';
+import { redbookErrorSummary } from './redbook-error-summary';
 
 export type RedbookPauseReason =
   | 'configuration'
   | 'authentication'
   | 'verification'
+  | 'unknown_rejection'
   | 'permission'
   | 'signature'
   | 'rate_limit'
@@ -13,10 +15,27 @@ export type RedbookPauseReason =
 /** Deliberately excludes server text, URL, cookies, tokens and raw response. */
 export class RedbookPauseError extends Error {
   readonly paused = true;
-  constructor(readonly reason: RedbookPauseReason) {
+  constructor(
+    readonly reason: RedbookPauseReason,
+    readonly httpStatus?: number,
+    readonly endpoint?: 'profile' | 'list' | 'detail' | 'comments' | 'replies',
+  ) {
     super(`Redbook scan paused: ${reason}`);
     this.name = 'RedbookPauseError';
   }
+}
+export type RedbookTransportFailureKind = 'guard-url'|'guard-route'|'guard-limits'|'guard-headers'|'guard-body'|'guard-aborted'|'request-create'|'request-start'|'request-error'|'response-error'|'response-aborted'|'timeout'|'abort'|'response-length'|'response-content-type'|'response-size'|'response-json'|'response-url'|'transport-other';
+export class RedbookTransportDiagnosticError extends RedbookPauseError {
+  readonly nativeCode?: string;
+  constructor(readonly transportFailure:RedbookTransportFailureKind, readonly notSent:boolean, nativeCode?:unknown, reason:'transport'|'response'='transport', httpStatus?:unknown) {
+    super(reason,typeof httpStatus==='number' && Number.isInteger(httpStatus) && httpStatus>=100 && httpStatus<=599 ? httpStatus : undefined);
+    if(typeof nativeCode==='string' && ['ENOTFOUND','EAI_AGAIN','ECONNREFUSED','ECONNRESET','ETIMEDOUT','EHOSTUNREACH','ENETUNREACH','EPIPE','ERR_TLS_CERT_ALTNAME_INVALID','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','UNABLE_TO_VERIFY_LEAF_SIGNATURE'].includes(nativeCode))this.nativeCode=nativeCode;
+  }
+}
+
+/** A local error observed before invoking the source transport. */
+export class RedbookPreDispatchError extends Error {
+  constructor() { super('XHS_LOCAL_PRE_DISPATCH_FAILED'); }
 }
 
 export interface RedbookRequest {
@@ -60,6 +79,8 @@ const HOST = 'https://edith.xiaohongshu.com';
 const LIST_PATH = '/api/sns/web/v1/user_posted';
 const DETAIL_PATH = '/api/sns/web/v1/feed';
 const PROFILE_PATH = '/api/sns/web/v1/user/otherinfo';
+const COMMENTS_PATH = '/api/sns/web/v2/comment/page';
+const REPLIES_PATH = '/api/sns/web/v2/comment/sub/page';
 
 function checkedText(value: string, maxLength: number): string {
   if (
@@ -78,21 +99,44 @@ function checkedId(value: string): string {
   return value;
 }
 
-function reasonFor(
+export function redbookResponseReason(
   status: number,
-  code?: unknown,
+  body?: unknown,
 ): RedbookPauseReason | undefined {
-  if (status === 461 || status === 471) return 'verification';
+  const { code, msg } = redbookErrorSummary(body);
   if (status === 406 || code === 300015) return 'signature';
   if (status === 429 || code === 300012) return 'rate_limit';
   if (status === 401 || code === -100 || code === -101) return 'authentication';
   if (status === 403 || code === -104) return 'permission';
+  if (msg === 'captcha required') return 'verification';
+  if (status === 461 || status === 471) return 'unknown_rejection';
   return undefined;
 }
 
 /** Audited read endpoints only. No network transport is enabled by default. */
 export class RedbookClient {
   constructor(private readonly options: RedbookClientOptions = {}) {}
+
+  getComments(noteId: string, cursor = '', token = ''): Promise<unknown> {
+    return this.request('GET', COMMENTS_PATH, {
+      note_id: checkedId(noteId),
+      cursor: checkedText(cursor, 2048),
+      image_formats: 'jpg,webp,avif',
+      xsec_token: checkedText(token, 4096),
+    });
+  }
+  getSubComments(
+    noteId: string,
+    rootId: string,
+    cursor = '',
+  ): Promise<unknown> {
+    return this.request('GET', REPLIES_PATH, {
+      note_id: checkedId(noteId),
+      root_comment_id: checkedId(rootId),
+      num: 30,
+      cursor: checkedText(cursor, 2048),
+    });
+  }
 
   getUserInfo(
     userId: string,
@@ -155,7 +199,12 @@ export class RedbookClient {
 
   private async request(
     method: 'GET' | 'POST',
-    path: typeof LIST_PATH | typeof DETAIL_PATH | typeof PROFILE_PATH,
+    path:
+      | typeof LIST_PATH
+      | typeof DETAIL_PATH
+      | typeof PROFILE_PATH
+      | typeof COMMENTS_PATH
+      | typeof REPLIES_PATH,
     params?: Record<string, string | number | string[]>,
     payload?: Record<string, unknown>,
     signal?: AbortSignal,
@@ -163,7 +212,10 @@ export class RedbookClient {
     if (!this.options.transport || !this.options.cookies)
       throw new RedbookPauseError('configuration');
     let response: RedbookResponse;
-    const uri = method === 'GET' ? buildGetUri(path, params) : path;
+    let uri: string;
+    try { uri = method === 'GET' ? buildGetUri(path, params) : path; }
+    catch { throw new RedbookPreDispatchError(); }
+    let invoked = false;
     try {
       signal?.throwIfAborted();
       const cookies = { ...this.options.cookies() };
@@ -184,7 +236,7 @@ export class RedbookClient {
           throw new RedbookPauseError('authentication');
         }
       }
-      response = await this.options.transport({
+      const request: RedbookRequest = {
         url: HOST + uri,
         method,
         headers: {
@@ -202,27 +254,46 @@ export class RedbookClient {
         timeoutMs: 15_000,
         maxResponseBytes: 8 * 1024 * 1024,
         ...(signal ? { signal } : {}),
-      });
+      };
+      invoked = true;
+      response = await this.options.transport(request);
       signal?.throwIfAborted();
     } catch (error) {
-      if (error instanceof RedbookPauseError) throw error;
-      throw new RedbookPauseError('transport');
+      if (error instanceof RedbookPauseError) {
+        if (invoked && error.reason === 'configuration') throw new RedbookTransportDiagnosticError('transport-other',false);
+        throw error;
+      }
+      if (!invoked) throw new RedbookPreDispatchError();
+      throw new RedbookTransportDiagnosticError('transport-other',false);
     }
-    if (response.url !== HOST + uri) throw new RedbookPauseError('transport');
-    const statusReason = reasonFor(response.status);
-    if (statusReason) throw new RedbookPauseError(statusReason);
+    if (response.url !== HOST + uri) throw new RedbookTransportDiagnosticError('response-url',false);
+    const statusReason = redbookResponseReason(response.status, response.body);
+    if (statusReason)
+      throw new RedbookPauseError(
+        statusReason,
+        [401, 403, 406, 429, 461, 471].includes(response.status)
+          ? response.status
+          : undefined,
+        path === PROFILE_PATH
+          ? 'profile'
+          : path === LIST_PATH
+            ? 'list'
+            : path === DETAIL_PATH
+              ? 'detail'
+              : path === COMMENTS_PATH
+                ? 'comments'
+                : 'replies',
+      );
     if (
       !Number.isInteger(response.status) ||
       response.status < 200 ||
       response.status >= 300
     )
-      throw new RedbookPauseError('response');
+      throw new RedbookPauseError('response',Number.isInteger(response.status) && response.status>=100 && response.status<=599 ? response.status : undefined);
     const envelope = response.body;
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope))
       throw new RedbookPauseError('response');
     const data = envelope as Record<string, unknown>;
-    const codeReason = reasonFor(response.status, data.code);
-    if (codeReason) throw new RedbookPauseError(codeReason);
     if (
       data.success !== true ||
       (data.code !== undefined && data.code !== 0) ||

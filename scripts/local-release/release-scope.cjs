@@ -15,6 +15,8 @@ const hash = (v) =>
 const {
   createVerifier,
   FORMAT: INVENTORY_FORMAT,
+  PRIVATE_FORMAT,
+  PRIVATE_RULES,
 } = require('./scope-inventory.cjs');
 function read(file, max = 1024 * 1024) {
   const s = fs.lstatSync(file);
@@ -92,12 +94,74 @@ function inspect(paths, options = {}) {
         throw new Error('RELEASE_SCOPE_OVERLAPPING_ROOTS');
   const verifier = createVerifier(options.scanBudget, {
     onSegment: options.onSegment,
+    privateAccounting: options.privateAccounting,
   });
-  const baseline = verifier.scan(roots);
+  const projectedPolicy = { format: 2, roots, preservingUpdate: options.preservingUpdate };
+  const effects = options.preservingUpdate && require('./preserving-contract.cjs').preservingEffectScope(projectedPolicy);
+  const baseline = effects ? projectionScan(projectedPolicy, verifier) : verifier.scan(roots);
   options.onMetrics?.(verifier.metrics());
   return { roots, baseline };
 }
+// Explicit effect projection: all immediate historical names/identities remain
+// bound, while only approved allocations and mutable controls consume new space.
+// This is not a full-content inventory of the containing historical directory.
+function projectionScan(policy, verifier, outputs = [], transients = [], approvedPointerHashes = []) {
+  const spec = policy.preservingUpdate, effects = require('./preserving-contract.cjs').preservingEffectScope(policy);
+  if (!effects) throw new Error('RELEASE_PRESERVING_EFFECT_SCOPE_INVALID');
+  const controls = [spec.active.pointer, path.join(effects.container, '.build-budget.lock'), path.join(effects.container, '.release-lifecycle.json'), path.join(path.dirname(effects.container), '.active-release.lock')];
+  if (![spec.active.pointerSha256, ...approvedPointerHashes].includes(fileHash(spec.active.pointer)))
+    throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+  const ignored = new Set([...controls.filter((p) => p !== path.join(effects.container, '.release-lifecycle.json')),
+    ...effects.allocations.map((a) => a.path), ...outputs.map((r) => r.path), ...transients]);
+  const namespaces = policy.roots.map((root) => {
+    const before = identity(root.path), names = fs.readdirSync(root.path).sort();
+    if (names.length > 4096) throw new Error('RELEASE_PRESERVING_NAMESPACE_LIMIT');
+    const rows = names.filter((name) => !ignored.has(path.join(root.path, name))).map((name) => {
+      const s = fs.lstatSync(path.join(root.path, name), { bigint: true });
+      return [name, s.isSymbolicLink() ? 'link-metadata-unverified' : s.isDirectory() ? 'directory' : s.isFile() ? 'file-metadata-unverified' : 'unsupported',
+        ...[s.dev, s.ino, s.birthtimeNs].map(String)];
+    });
+    if (hash(before) !== hash(identity(root.path)) || hash(names) !== hash(fs.readdirSync(root.path).sort()))
+      throw new Error('RELEASE_PRESERVING_NAMESPACE_CHANGED');
+    return { path: root.path, identity: before, entries: rows };
+  });
+  const lifecycle = path.join(effects.container, '.release-lifecycle.json');
+  if (effects.lifecycleSha256 === null ? present(lifecycle) : !present(lifecycle) || fileHash(lifecycle) !== effects.lifecycleSha256)
+    throw new Error('RELEASE_PRESERVING_LIFECYCLE_CHANGED');
+  const empty = crypto.createHash('sha256').update(JSON.stringify({ format: PRIVATE_FORMAT, classification: PRIVATE_RULES }) + '\n').digest('hex');
+  let bytes = 0, runtimeCopies = 0, entries = namespaces.reduce((n, r) => n + r.entries.length + 1, 0);
+  const allocationStates = [], receipts = [];
+  for (const allocation of effects.allocations) {
+    const exists = present(allocation.path);
+    allocationStates.push({ path: allocation.path, observed: exists ? 'present' : 'absent' });
+    let scan;
+    if (exists) {
+      if (!exists.isDirectory() || exists.isSymbolicLink() || canonical(allocation.path) !== allocation.path)
+        throw new Error('RELEASE_PRESERVING_ALLOCATION_INVALID');
+      scan = verifier.scan([{ path: allocation.path, identity: identity(allocation.path) }], outputs.map((r) => r.path));
+      if (scan.privateEntries) throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
+    }
+    bytes += scan?.bytes || 0; runtimeCopies += scan?.runtimeCopies || 0; entries += scan?.entries || 0;
+    receipts.push([allocation.path, allocation.mode, scan?.digest || empty, scan?.metadataDigest || empty]);
+  }
+  for (const control of controls) {
+    const s = present(control);
+    if (s) {
+      if (!s.isFile() || s.isSymbolicLink() || s.size > 65536) throw new Error('RELEASE_PRESERVING_CONTROL_INVALID');
+      bytes += s.size;
+    }
+  }
+  const metadataDigest = hash(['preserving-effects-v1', namespaces, receipts.map(([p,m,d,md]) => [p,m,md])]);
+  return { format: 'preserving-effects-v1', classification: PRIVATE_RULES, privateContentVerified: false,
+    historyContentVerified: false, historyEntries: namespaces.reduce((n, r) => n + r.entries.length, 0),
+    namespaceDigest: hash(namespaces), allocationStates, bytes, runtimeCopies, entries,
+    metadataDigest, digest: hash(['preserving-effects-v1', namespaces, receipts.map(([p,m,d]) => [p,m,d])]) };
+}
 function validateReferences(value, policy) {
+  const applicability = require('./preserving-contract.cjs').referenceApplicability(policy);
+  const { preserving } = applicability;
+  const roles=require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const referenceRoots=roles ? [...policy.roots,...roles.readOnlyRoots] : policy.roots;
   const kinds = [
     'processes',
     'tasks',
@@ -106,18 +170,22 @@ function validateReferences(value, policy) {
     'rollback',
     'inflight',
   ];
+  const controlOnly=applicability.buildOnly && !!roles;
+  const projectOnly=applicability.projectOnly;
   if (
     !value ||
-    value.complete !== true ||
-    kinds.some((k) => value.categories?.[k] !== true) ||
+    (controlOnly ? value.processObservation!=='build-control-only' || value.records?.some(r=>r.kind==='processes') : projectOnly ? value.processObservation!=='preserving-project-only' : value.processObservation!==undefined) ||
+    (preserving ? value.complete !== false || value.observationComplete !== true : value.complete !== true) ||
+    kinds.some((k) => value.categories?.[k] !== applicability.categories[k]) ||
     !Array.isArray(value.records) ||
     value.records.length > 4096 ||
+    value.records?.some((r) => applicability.categories[r.kind] === 'not_applicable') ||
     !Array.isArray(value.errors) ||
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
     value.uncertainChildren.length
   )
-    throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE');
+    throw new Error('RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE [' + require('./reference-diagnostics.cjs').referenceFailure(value,applicability.categories) + ']');
   if (policy.phase === 'build-only') {
     if (
       value.compatibility?.stage !== 'build-only' ||
@@ -136,7 +204,7 @@ function validateReferences(value, policy) {
       typeof r.packageId !== 'string' ||
       !policy.protectedIds.includes(r.packageId) ||
       typeof r.packagePath !== 'string' ||
-      !policy.roots.some((root) =>
+      !referenceRoots.some((root) =>
         contains(root.path, canonical(r.packagePath)),
       ) ||
       typeof r.identity !== 'string' ||
@@ -149,7 +217,7 @@ function validateReferences(value, policy) {
         typeof r.viaPointer.path !== 'string' ||
         !path.isAbsolute(r.viaPointer.path) ||
         canonical(r.viaPointer.path) !== r.viaPointer.path ||
-        !policy.roots.some((root) => contains(root.path, r.viaPointer.path)) ||
+        !referenceRoots.some((root) => contains(root.path, r.viaPointer.path)) ||
         path.basename(r.viaPointer.path) !== 'active.json' ||
         !/^[a-f0-9]{64}$/.test(r.viaPointer.launcherSha256 || '') ||
         !value.records.some(
@@ -187,9 +255,12 @@ function open(request, options = {}, boundOperation) {
   const file = canonical(configPath),
     policy = read(file),
     configSha = fileHash(file);
+  const preserving = policy.preservingUpdate === undefined ? null : require('./preserving-contract.cjs').validatePreservingContract(policy, request);
+  const rootRoles=require('./preserving-contract.cjs').preservingRootRoles(policy);
+  const effectScope=require('./preserving-contract.cjs').preservingEffectScope(policy);
   if (
     configSha !== expected ||
-    policy.format !== 1 ||
+    ![1, 2].includes(policy.format) ||
     !/^[a-f0-9-]{36}$/.test(policy.scopeId) ||
     !Array.isArray(policy.roots) ||
     !policy.roots.length ||
@@ -279,7 +350,21 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_OVERLAPPING_ROOTS');
     }
   };
-  checkRoots(policy.roots);
+  const readOnlyRoots=rootRoles?.readOnlyRoots || [];
+  const referenceRoots=[...policy.roots,...readOnlyRoots];
+  checkRoots(referenceRoots);
+  if(rootRoles && (policy.roots.length!==1 || policy.roots[0].path!==policy.buildOnly.outputRoot))
+    throw new Error('RELEASE_PRESERVING_ACCOUNTING_ROOT_INVALID');
+  const checkControls=(charge=()=>{})=>{
+    for(const c of rootRoles?.controls || []){
+      if(canonical(c.path)!==c.path || !readOnlyRoots.some(r=>contains(r.path,c.path)) ||
+        hash(fileIdentity(c.path))!==hash(c.identity))
+        throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED');
+      try { require('./private-artifact-proof.cjs').verifyControl(c,charge); }
+      catch { throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED'); }
+    }
+  };
+  checkControls();
   const target = request.root ? canonical(request.root) : undefined;
   if (target && !policy.roots.some((root) => contains(root.path, target)))
     throw new Error('RELEASE_SCOPE_UNREGISTERED_ROOT');
@@ -290,21 +375,40 @@ function open(request, options = {}, boundOperation) {
     canonical(policy.registryDirectory) !== policy.registryDirectory ||
     hash(identity(policy.registryDirectory)) !==
       hash(policy.registryIdentity) ||
-    policy.roots.some((root) => contains(root.path, policy.registryDirectory))
+    referenceRoots.some((root) => contains(root.path, policy.registryDirectory))
   )
     throw new Error('RELEASE_SCOPE_REGISTRY_IDENTITY_INVALID');
+  const privateMode = policy.format === 2;
   if (
-    policy.baseline.format !== INVENTORY_FORMAT ||
+    (effectScope ? policy.inventoryClassification !== PRIVATE_RULES || policy.baseline.format !== 'preserving-effects-v1' ||
+      policy.baseline.classification !== PRIVATE_RULES || policy.baseline.historyContentVerified !== false || policy.baseline.privateContentVerified !== false ||
+      !/^[a-f0-9]{64}$/.test(policy.baseline.namespaceDigest || '') : privateMode ?
+      policy.inventoryClassification !== PRIVATE_RULES ||
+      policy.baseline.format !== PRIVATE_FORMAT ||
+      policy.baseline.classification !== PRIVATE_RULES ||
+      policy.baseline.privateContentVerified !== false ||
+      !Number.isSafeInteger(policy.baseline.privateBytes) ||
+      !Number.isSafeInteger(policy.baseline.privateEntries) :
+      policy.inventoryClassification !== undefined || policy.baseline.format !== INVENTORY_FORMAT) ||
     !/^[a-f0-9]{64}$/.test(policy.baseline.metadataDigest || '')
   )
     throw new Error('RELEASE_SCOPE_INVENTORY_VERSION_REVIEW_REQUIRED');
   const verifier = createVerifier(policy.scanBudget, {
     onSegment: options.onScanSegment,
+    privateAccounting: privateMode ? PRIVATE_RULES : undefined,
   });
   const useMetadata = verifier.limits.checkpointMode === 'identity-times-v1';
   let fullValidated = false;
+  let protectedSnapshot, protectedPackages;
   const verifiedOutputs = new Set();
+  let pointerCommit;
+  let legacyStopped;
+  const legacyClaimAcquiredAt = Date.now();
   const descriptors = new Set();
+  const transientControls = new Set();
+  const approvedPointerHashes = new Set();
+  const measureScope = (outputs = []) => effectScope ? projectionScan(policy, verifier, outputs, [...transientControls], [...approvedPointerHashes]) :
+    verifier.scan(policy.roots, outputs.map((row) => row.path), { metadataOnly: useMetadata && fullValidated });
   const directory = policy.registryDirectory,
     lock = path.join(directory, policy.scopeId + '.lock'),
     ledger = path.join(directory, policy.scopeId + '.state.json');
@@ -320,7 +424,177 @@ function open(request, options = {}, boundOperation) {
     initialFacts,
     claim,
     ledgerIdentity;
+  let expectedProcesses;
   const configIdentity = fileIdentity(file);
+  // Narrow reviewed binding repair; uses this existing scope lock and never adopts.
+  const repairPath=options.bindingRepairFile || process.env.WEWE_RELEASE_BINDING_REPAIR_FILE;
+  const repairSha=options.bindingRepairSha256 || process.env.WEWE_RELEASE_BINDING_REPAIR_SHA256;
+  const repairBinding=()=>{
+    try {
+    if(!repairPath&&!repairSha)return;
+    const reject=()=>{throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');};
+    const hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x);
+    const digest=b=>crypto.createHash('sha256').update(b).digest('hex');
+    const bytes=(at,wanted,max=1024*1024)=>{
+      if(typeof at!=='string'||!path.isAbsolute(at)||require('./scope-inventory.cjs').isPrivatePath(at)||canonical(at)!==at)reject();
+      const before=fs.lstatSync(at,{bigint:true});
+      if(!before.isFile()||before.isSymbolicLink()||before.nlink!==1n||before.size>BigInt(max))reject();
+      const key=s=>[s.dev,s.ino,s.birthtimeNs,s.size,s.mtimeNs,s.ctimeNs,s.nlink].map(String);
+      const fd=fs.openSync(at,'r');let b;
+      try{
+        if(hash(key(before))!==hash(key(fs.fstatSync(fd,{bigint:true}))))reject();
+        b=Buffer.alloc(Number(before.size));let pos=0;
+        while(pos<b.length){const n=fs.readSync(fd,b,pos,b.length-pos,null);if(!n)reject();pos+=n;}
+        if(hash(key(before))!==hash(key(fs.fstatSync(fd,{bigint:true})))||hash(key(before))!==hash(key(fs.lstatSync(at,{bigint:true}))))reject();
+      }finally{fs.closeSync(fd);}
+      if(wanted&&digest(b)!==wanted)reject();return b;
+    };
+    if(!hex(repairSha))reject();
+    const preliminary=JSON.parse(bytes(repairPath,repairSha,65536));
+    if(preliminary.kind==='adopted-empty-install-caller-binding-repair'){
+      const a=preliminary;
+      if(a.format!==1||!preserving||preserving.operation!=='install'||!effectScope||policy.format!==2||
+        a.scopeId!==policy.scopeId||a.registryDirectory!==directory||hash(a.registryIdentity)!==hash(policy.registryIdentity)||
+        a.newPolicySha256!==configSha||!hex(a.oldPolicySha256)||!hex(a.priorLedgerSha256)||!hex(a.priorPayloadDigest)||
+        !hex(a.adoptionSha256)||!hex(a.auditedSourceIdentity)||typeof a.reviewEvidence!=='string'||!a.reviewEvidence||
+        !Array.isArray(a.priorLedgerIdentity)||a.priorLedgerIdentity.length!==3||!a.launcher||typeof a.launcher!=='object'||Array.isArray(a.launcher))reject();
+      const oldBytes=bytes(a.oldPolicyPath,a.oldPolicySha256),nextBytes=bytes(file,configSha),old=JSON.parse(oldBytes);
+      const differences=(x,y,p='')=>{
+        if(JSON.stringify(x)===JSON.stringify(y))return [];
+        if(!x||!y||typeof x!=='object'||typeof y!=='object'||Array.isArray(x)||Array.isArray(y))return [p];
+        return [...new Set([...Object.keys(x),...Object.keys(y)])].sort().flatMap(k=>differences(x[k],y[k],p?p+'.'+k:k));
+      };
+      const changes=differences(old,policy).sort(),oldLaunchers=old.windowsReferences?.launchers,newLaunchers=policy.windowsReferences?.launchers;
+      if(!Array.isArray(oldLaunchers)||!Array.isArray(newLaunchers)||newLaunchers.length!==oldLaunchers.length+1||
+        hash(newLaunchers.slice(0,-1))!==hash(oldLaunchers)||hash(newLaunchers.at(-1))!==hash(a.launcher)||
+        !Array.isArray(a.allowedDifferences)||hash(changes)!==hash([...a.allowedDifferences].sort())||
+        new Set(a.allowedDifferences).size!==changes.length||!changes.includes('windowsReferences.launchers')||
+        changes.some(k=>!['windowsReferences.launchers','probe.sha256'].includes(k))||
+        old.scopeId!==policy.scopeId||old.format!==2||old.preservingUpdate?.operation!=='install'||!old.preservingUpdate?.effectScope)reject();
+      const origin=bytes(ledger+'.adopted',a.adoptionSha256,64);
+      if(origin.toString('utf8')!==a.oldPolicySha256||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
+      const current=bytes(ledger,null,65536),snapshotPath=ledger+'.binding-repair-'+repairSha+'.json';
+      let original=current;
+      if(prior.configSha===configSha){
+        if(!prior.bindingRepair||prior.bindingRepair.approvalSha256!==repairSha||!present(snapshotPath))reject();
+        original=Buffer.from(JSON.parse(bytes(snapshotPath,prior.bindingRepair.snapshotSha256,4*1024*1024)).ledgerBase64||'','base64');
+      }else if(prior.configSha!==a.oldPolicySha256||digest(current)!==a.priorLedgerSha256||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+      if(digest(original)!==a.priorLedgerSha256)reject();
+      const before=JSON.parse(original);
+      if(!before.payload||before.digest!==hash(before.payload)||before.digest!==a.priorPayloadDigest||before.payload.format!==2||
+        before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length||before.payload.bindingRepair)reject();
+      const approvalBytes=bytes(repairPath,repairSha,65536);
+      const snapshot=Buffer.from(JSON.stringify({format:1,ledgerBase64:original.toString('base64'),oldPolicyBase64:oldBytes.toString('base64'),newPolicyBase64:nextBytes.toString('base64'),approvalBase64:approvalBytes.toString('base64')}));
+      if(snapshot.length>4*1024*1024)reject();
+      const after={...before.payload,configSha,bindingRepair:{kind:a.kind,approvalSha256:repairSha,snapshotSha256:digest(snapshot),oldPolicySha256:a.oldPolicySha256,newPolicySha256:configSha}};
+      const replay=prior.configSha===configSha;
+      if(replay&&(hash(prior)!==hash(after)||!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot)))reject();
+      const validate=()=>{
+        owner();checkRoots(referenceRoots);checkControls(n=>verifier.chargeExternal(n));
+        const measured=measureScope([]);
+        if(measured.digest!==policy.baseline.digest||measured.metadataDigest!==policy.baseline.metadataDigest||
+          measured.namespaceDigest!==policy.baseline.namespaceDigest||hash(measured.allocationStates)!==hash(policy.baseline.allocationStates)||
+          effectScope.allocations.some(x=>x.mode!=='exclusive-package'||present(x.path))||
+          measured.bytes>policy.maxBytes||measured.bytes-policy.baseline.bytes>policy.maxGrowthBytes||
+          measured.runtimeCopies-policy.baseline.runtimeCopies>policy.maxNewRuntimeCopies||
+          verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)reject();
+        bytes(repairPath,repairSha,65536);bytes(a.oldPolicyPath,a.oldPolicySha256);bytes(file,configSha);bytes(ledger+'.adopted',a.adoptionSha256,64);
+      };
+      validate();if(replay)return;
+      options.onBindingRepairStep?.('before-snapshot');validate();
+      if(present(snapshotPath)){if(!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot))reject();}
+      else{const fd=fs.openSync(snapshotPath,'wx',0o600);try{fs.writeFileSync(fd,snapshot);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+      options.onBindingRepairStep?.('before-commit');validate();
+      if(!bytes(ledger,a.priorLedgerSha256,65536).equals(original)||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+      atomic(ledger,after);ledgerIdentity=fileIdentity(ledger);prior=after;
+      options.onBindingRepairStep?.('after-commit');return;
+    }
+    if(!hex(repairSha)||!preserving||preserving.operation!=='build'||!rootRoles||policy.phase!=='build-only'||policy.format!==2)reject();
+    const approvalBytes=bytes(repairPath,repairSha,65536),a=JSON.parse(approvalBytes);
+    if(![1,2].includes(a.format)||a.kind!=='adopted-empty-build-binding-repair'||a.scopeId!==policy.scopeId||
+      a.registryDirectory!==directory||hash(a.registryIdentity)!==hash(policy.registryIdentity)||
+      a.newPolicySha256!==configSha||!hex(a.oldPolicySha256)||!hex(a.priorLedgerSha256)||!hex(a.priorPayloadDigest)||
+      !hex(a.adoptionSha256)||!hex(a.auditedSourceIdentity)||!a.reviewEvidence||typeof a.reviewEvidence!=='string'||
+      !Array.isArray(a.priorLedgerIdentity)||a.priorLedgerIdentity.length!==3||!Array.isArray(a.allowedDifferences))reject();
+    const oldBytes=bytes(a.oldPolicyPath,a.oldPolicySha256),nextBytes=bytes(file,configSha),old=JSON.parse(oldBytes);
+    const differences=(x,y,p='')=>{
+      if(JSON.stringify(x)===JSON.stringify(y))return [];
+      if(!x||!y||typeof x!=='object'||typeof y!=='object'||Array.isArray(x)||Array.isArray(y))return [p];
+      return [...new Set([...Object.keys(x),...Object.keys(y)])].sort().flatMap(k=>differences(x[k],y[k],p?p+'.'+k:k));
+    };
+    const changes=differences(old,policy).sort();
+    if(!changes.length||hash(changes)!==hash([...a.allowedDifferences].sort())||new Set(a.allowedDifferences).size!==changes.length||
+      changes.some(x=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(x))||
+      old.scopeId!==policy.scopeId||old.format!==2||old.phase!=='build-only'||!old.preservingUpdate?.rootRoles)reject();
+    const origin=bytes(ledger+'.adopted',a.adoptionSha256,64);
+    if(origin.toString('utf8')!==(a.format===2?a.initialPolicySha256:a.oldPolicySha256)||prior.claim!==null||!Array.isArray(prior.outputs)||prior.outputs.length||prior.format!==2)reject();
+    const current=bytes(ledger,null,65536),snapshotPath=ledger+'.binding-repair-'+repairSha+'.json';
+    let original=current;
+    if(prior.configSha===configSha){
+      if(!prior.bindingRepair||prior.bindingRepair.approvalSha256!==repairSha||!present(snapshotPath))reject();
+      const saved=bytes(snapshotPath,prior.bindingRepair.snapshotSha256,4*1024*1024);
+      original=Buffer.from(JSON.parse(saved).ledgerBase64||'','base64');
+    }else if(prior.configSha!==a.oldPolicySha256||digest(current)!==a.priorLedgerSha256||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+    if(digest(original)!==a.priorLedgerSha256)reject();
+    const before=JSON.parse(original);
+    if(!before.payload||before.digest!==hash(before.payload)||before.digest!==a.priorPayloadDigest||
+      before.payload.configSha!==a.oldPolicySha256||before.payload.claim!==null||!Array.isArray(before.payload.outputs)||before.payload.outputs.length)reject();
+    const head=(approval,approvalSha,snapshotSha)=>({format:approval.format,approvalSha256:approvalSha,oldPolicySha256:approval.oldPolicySha256,
+      newPolicySha256:approval.newPolicySha256,priorLedgerSha256:approval.priorLedgerSha256,priorPayloadDigest:approval.priorPayloadDigest,
+      adoptionSha256:approval.adoptionSha256,snapshotSha256:snapshotSha,auditedSourceIdentity:approval.auditedSourceIdentity,allowedDifferences:approval.allowedDifferences,
+      ...(approval.format===2?{initialPolicySha256:approval.initialPolicySha256,predecessorApprovalSha256:approval.predecessorApprovalSha256,predecessorSnapshotSha256:approval.predecessorSnapshotSha256}:{})});
+    const verifyChain=(payload,expectedPolicy,depth=0)=>{
+      if(depth>=16||payload.claim!==null||!Array.isArray(payload.outputs)||payload.outputs.length||payload.format!==2)reject();
+      const h=payload.bindingRepair;if(!h||![1,2].includes(h.format)||!hex(h.approvalSha256)||!hex(h.snapshotSha256)||payload.configSha!==expectedPolicy)reject();
+      const raw=bytes(ledger+'.binding-repair-'+h.approvalSha256+'.json',h.snapshotSha256,4*1024*1024),snap=JSON.parse(raw);
+      if(snap.format!==1)reject();
+      const doc=key=>Buffer.from(snap[key]||'','base64');
+      const approvedRaw=doc('approvalBase64'),approved=JSON.parse(approvedRaw),priorRaw=doc('ledgerBase64'),previous=JSON.parse(priorRaw),oldRaw=doc('oldPolicyBase64'),newRaw=doc('newPolicyBase64');
+      if(digest(approvedRaw)!==h.approvalSha256||approved.format!==h.format||approved.kind!==a.kind||approved.scopeId!==policy.scopeId||approved.registryDirectory!==directory||hash(approved.registryIdentity)!==hash(policy.registryIdentity)||approved.adoptionSha256!==a.adoptionSha256||!hex(approved.auditedSourceIdentity)||typeof approved.reviewEvidence!=='string'||!approved.reviewEvidence||digest(priorRaw)!==approved.priorLedgerSha256||!previous.payload||previous.digest!==hash(previous.payload)||previous.digest!==approved.priorPayloadDigest||previous.payload.configSha!==approved.oldPolicySha256||digest(oldRaw)!==approved.oldPolicySha256||digest(newRaw)!==expectedPolicy||approved.newPolicySha256!==expectedPolicy)reject();
+      const oldDoc=JSON.parse(oldRaw),newDoc=JSON.parse(newRaw),delta=differences(oldDoc,newDoc).sort();
+      if(!delta.length||!Array.isArray(approved.allowedDifferences)||hash(delta)!==hash([...approved.allowedDifferences].sort())||new Set(approved.allowedDifferences).size!==delta.length||delta.some(k=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(k))||differences(newDoc,policy).some(k=>!['buildOnly.sourceCommit','buildOnly.sourceHash','probe.sha256'].includes(k)))reject();
+      if(hash(payload)!==hash({...previous.payload,configSha:expectedPolicy,bindingRepair:head(approved,h.approvalSha256,h.snapshotSha256)}))reject();
+      if(approved.format===1){
+        if(previous.payload.bindingRepair||previous.payload.claim!==null||!Array.isArray(previous.payload.outputs)||previous.payload.outputs.length||previous.payload.format!==2||approved.oldPolicySha256!==origin.toString('utf8'))reject();
+      }else{
+        if(approved.initialPolicySha256!==origin.toString('utf8')||!previous.payload.bindingRepair||approved.predecessorApprovalSha256!==previous.payload.bindingRepair.approvalSha256||approved.predecessorSnapshotSha256!==previous.payload.bindingRepair.snapshotSha256)reject();
+        verifyChain(previous.payload,approved.oldPolicySha256,depth+1);
+      }
+    };
+    const verifyPredecessor=()=>{
+      if(a.format===1){if(before.payload.bindingRepair)reject();}
+      else{
+        const h=before.payload.bindingRepair;
+        if(!hex(a.initialPolicySha256)||!hex(a.predecessorApprovalSha256)||!hex(a.predecessorSnapshotSha256)||!h||a.predecessorApprovalSha256!==h.approvalSha256||a.predecessorSnapshotSha256!==h.snapshotSha256)reject();
+        verifyChain(before.payload,a.oldPolicySha256);
+      }
+    };
+    verifyPredecessor();
+    const snapshot=Buffer.from(JSON.stringify({format:1,ledgerBase64:original.toString('base64'),oldPolicyBase64:oldBytes.toString('base64'),newPolicyBase64:nextBytes.toString('base64'),approvalBase64:approvalBytes.toString('base64')}));
+    if(snapshot.length>4*1024*1024)reject();
+    const after={...before.payload,configSha,bindingRepair:head(a,repairSha,digest(snapshot))};
+    const replay=prior.configSha===configSha;
+    if(replay&&(hash(prior)!==hash(after)||!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot)))reject();
+    const validate=()=>{
+      owner();checkRoots(referenceRoots);checkControls(n=>verifier.chargeExternal(n));
+      const measured=verifier.scan(policy.roots);
+      if(measured.digest!==policy.baseline.digest||measured.metadataDigest!==policy.baseline.metadataDigest||measured.bytes!==policy.baseline.bytes||
+        measured.runtimeCopies!==policy.baseline.runtimeCopies||fs.readdirSync(policy.buildOnly.outputRoot).length)reject();
+      if(verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)reject();
+      verifyPredecessor();
+      bytes(repairPath,repairSha,65536);bytes(a.oldPolicyPath,a.oldPolicySha256);bytes(file,configSha);bytes(ledger+'.adopted',a.adoptionSha256,64);
+    };
+    validate();if(replay)return;
+    options.onBindingRepairStep?.('before-snapshot');validate();
+    if(present(snapshotPath)){if(!bytes(snapshotPath,digest(snapshot),4*1024*1024).equals(snapshot))reject();}
+    else{const fd=fs.openSync(snapshotPath,'wx',0o600);try{fs.writeFileSync(fd,snapshot);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+    options.onBindingRepairStep?.('before-commit');validate();
+    if(!bytes(ledger,a.priorLedgerSha256,65536).equals(original)||hash(fileIdentity(ledger))!==hash(a.priorLedgerIdentity))reject();
+    atomic(ledger,after);ledgerIdentity=fileIdentity(ledger);prior=after;
+    options.onBindingRepairStep?.('after-commit');
+    } catch { throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED'); }
+  };
+
   const save = () => {
     atomic(ledger, prior);
     ledgerIdentity = fileIdentity(ledger);
@@ -355,6 +629,24 @@ function open(request, options = {}, boundOperation) {
     const value = query();
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
+    if (preserving && !rootRoles && !expectedProcesses)
+      expectedProcesses = structuredClone(value.records.filter((r) => r.kind === 'processes'));
+    if (preserving && !rootRoles && refs) {
+      const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      if (hash(clean(value.records.filter((r) => r.kind === 'processes'))) !== hash(clean(expectedProcesses)))
+        throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+    }
+    if (preserving && preserving.operation !== 'build' && !refs) {
+      const a = preserving.active;
+      if (canonical(a.pointer) !== a.pointer || !policy.roots.some((r) => contains(r.path, a.pointer)) ||
+          fileHash(a.pointer) !== a.pointerSha256 || read(a.pointer).id !== a.currentId ||
+          policy.packageProofs?.[a.currentId] !== a.currentManifestSha256 ||
+          policy.packageProofs?.[a.candidateId] !== a.candidateManifestSha256 ||
+          !value.records.some((r) => r.kind === 'pointers' && r.pointerPath === a.pointer && r.packageId === a.currentId) ||
+          !value.records.some((r) => r.kind === 'processes' && r.packageId === a.currentId && r.pid === a.oldProcess.pid &&
+            r.startUtc === a.oldProcess.startUtc && r.executableSha256 === a.oldProcess.executableSha256))
+        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    }
     if (
       policy.phase === 'build-only' &&
       value.records.some((r) =>
@@ -364,7 +656,8 @@ function open(request, options = {}, boundOperation) {
       throw new Error('RELEASE_SCOPE_BUILD_ROOT_REFERENCED');
     const stable = (v) =>
       v.records
-        .filter((r) => !['processes', 'pointers'].includes(r.kind))
+        .filter((r) => r.kind !== 'pointers' && (preserving || r.kind !== 'processes'))
+        .map(({ ownedTransition, ...r }) => r)
         .map((r) =>
           r.viaPointer
             ? { ...r, packageId: undefined, packagePath: undefined }
@@ -374,21 +667,25 @@ function open(request, options = {}, boundOperation) {
     if (
       refs &&
       digest !== refs &&
-      (!allowTransition || hash(stable(value)) !== hash(stable(initialFacts)))
+      (!allowTransition || hash(stable(value)) !== hash(stable(preserving ? {
+        ...initialFacts, records: [...initialFacts.records.filter((r) => r.kind !== 'processes'), ...expectedProcesses],
+      } : initialFacts)))
     )
       throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
     return { value, digest };
   };
   const check = (allowTransition = false) => {
     owner();
-    checkRoots(policy.roots);
+    checkRoots(referenceRoots);
+    checkControls(n=>verifier.chargeExternal(n));
+    if(rootRoles || effectScope){
+      const current=verifier.scan(protectedPackages,[],{metadataOnly:true});
+      if(current.metadataDigest!==protectedSnapshot.metadataDigest)
+        throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
+    }
     if (present(ledger) && hash(state(ledger)) !== hash(prior))
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
-    const measure = verifier.scan(
-      policy.roots,
-      prior.outputs.map((row) => row.path),
-      { metadataOnly: useMetadata && fullValidated },
-    );
+    const measure = measureScope(prior.outputs);
     if (
       measure.metadataDigest !== policy.baseline.metadataDigest ||
       ((!useMetadata || !fullValidated) &&
@@ -424,6 +721,8 @@ function open(request, options = {}, boundOperation) {
           [],
           { metadataOnly: useMetadata && verifiedOutputs.has(row.path) },
         );
+        if (privateMode && snapshot.privateEntries !== 0)
+          throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
         if (
           snapshot.metadataDigest !== row.metadataDigest ||
           ((!useMetadata || !verifiedOutputs.has(row.path)) &&
@@ -450,11 +749,51 @@ function open(request, options = {}, boundOperation) {
     return measure;
   };
   try {
+    if ((repairPath || repairSha) && (!present(ledger) || !present(ledger + '.adopted')))
+      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');
+    if (privateMode) {
+      const packages = policy.windowsReferences?.packages;
+      if (!Array.isArray(packages) || packages.length < 1 || packages.length > 6)
+        throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+      if(rootRoles || effectScope){
+        protectedPackages=packages.map(row=>{
+          if(!row || !(effectScope ? policy.roots : readOnlyRoots).some(root=>contains(root.path,row.path)))
+            throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+          return {path:row.path,identity:identity(row.path)};
+        });
+        protectedSnapshot=verifier.scan(protectedPackages,[],{metadataOnly:true});
+      }
+      const checked = new Set(), covered = new Set();
+      let proofBytes = 0;
+      for (const row of packages) {
+        if (!row || !policy.protectedIds.includes(row.id) || typeof row.path !== 'string' ||
+            !path.isAbsolute(row.path) || path.resolve(row.path) !== row.path ||
+            canonical(row.path) !== row.path ||
+            !referenceRoots.some((root) => contains(root.path, row.path)) ||
+            checked.has(row.path.toLowerCase()))
+          throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+        const actualId = require('./private-artifact-proof.cjs').verifyManifest(
+          row.path, policy.packageProofs?.[row.id], (n) => {
+            proofBytes += n;
+            if (proofBytes > verifier.limits.scanReadBytes)
+              throw new Error('RELEASE_SCOPE_SCAN_READ_BUDGET');
+            verifier.chargeExternal(n);
+          });
+        if (actualId !== row.id) throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+        checked.add(row.path.toLowerCase());
+        covered.add(row.id);
+      }
+      if (policy.protectedIds.some((id) => !covered.has(id)))
+        throw new Error('RELEASE_SCOPE_ARTIFACT_BINDING_INVALID');
+      if((rootRoles || effectScope) && verifier.scan(protectedPackages,[],{metadataOnly:true}).metadataDigest!==protectedSnapshot.metadataDigest)
+        throw new Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
+    }
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
+      repairBinding();
       if (
-        prior.format !== 1 ||
+        prior.format !== policy.format ||
         prior.configSha !== configSha ||
         !Array.isArray(prior.outputs) ||
         prior.outputs.length > 128 ||
@@ -487,16 +826,21 @@ function open(request, options = {}, boundOperation) {
         fs.readdirSync(policy.buildOnly.outputRoot).length
       )
         throw new Error('RELEASE_SCOPE_BUILD_ROOT_NOT_EMPTY');
-      prior = { format: 1, configSha, outputs: [], claim: null };
-      const initial = verifier.scan(policy.roots);
+      prior = { format: policy.format, configSha, outputs: [], claim: null };
+      const initial = measureScope();
       if (
         initial.digest !== policy.baseline.digest ||
-        initial.metadataDigest !== policy.baseline.metadataDigest
+        initial.metadataDigest !== policy.baseline.metadataDigest ||
+        effectScope && hash(initial.allocationStates) !== hash(policy.baseline.allocationStates)
       )
         throw new Error('RELEASE_SCOPE_BASELINE_MISMATCH');
       fullValidated = true;
       save();
       fs.writeFileSync(sentinel, configSha, { flag: 'wx', mode: 0o600 });
+    }
+    if (effectScope) for (const allocation of effectScope.allocations) {
+      if (allocation.mode === 'exclusive-package' && present(allocation.path) && !prior.outputs.some((row) => row.path === allocation.path && row.complete))
+        throw new Error('RELEASE_PRESERVING_ALLOCATION_OCCUPIED');
     }
     const facts = references();
     refs = facts.digest;
@@ -549,10 +893,134 @@ function open(request, options = {}, boundOperation) {
       policy,
       check,
       assertWritable,
-      approveDescriptor(fd) {
-        descriptors.add(fd);
+      legacyMaintenanceRoots(snapshot) {
+        owner();
+        if(preserving?.operation!=='restart'||snapshot?.pid!==preserving.active.oldProcess.pid||snapshot.startUtc!==preserving.active.oldProcess.startUtc||!Array.isArray(expectedProcesses))
+          throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+        return Object.freeze([...new Set([snapshot.pid,...initialFacts.records.filter(p=>p.kind==='processes').map(p=>p.pid)])]);
+      },
+      legacyMaintenanceBoundary(snapshot,observe) {
+        const executableHash=fileHash(snapshot.executable);
+        const checked=()=>{
+          owner();assertWritable(['restart']);checkRoots(referenceRoots);
+          if(present(ledger)&&hash(state(ledger))!==hash(prior))throw Error('RELEASE_SCOPE_STATE_REPLACED');
+          const a=preserving?.active;
+          if(preserving?.operation!=='restart'||!legacyStopped||!Array.isArray(expectedProcesses)||expectedProcesses.length||
+              snapshot?.pid!==a.oldProcess.pid||snapshot.startUtc!==a.oldProcess.startUtc||executableHash!==a.oldProcess.executableSha256)
+            throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+          return Object.freeze({projectIdentity:hash({scopeId:policy.scopeId,roots:referenceRoots.map(r=>r.path)}),exitedAt:legacyStopped,claimAcquiredAt:legacyClaimAcquiredAt});
+        };
+        if(typeof observe!=='function')throw Error('LEGACY_MAINTENANCE_BOUNDED_OBSERVER_REQUIRED');
+        checked();
+        return Object.freeze({check:checked,observe(){const context=checked(),fact=observe();checked();if(fact?.complete!==true||!Array.isArray(fact.active)||fact.active.length)throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');return Object.freeze({...context,observedAt:Date.now()});}});
+      },
+      assertLegacyMaintenanceQuiescent(snapshot) {
+        owner(); check(true);
+        const observed=references(true).value;
+        const a = preserving?.active;
+        if (preserving?.operation !== 'restart' || !legacyStopped || !Array.isArray(expectedProcesses) || expectedProcesses.length ||
+            snapshot?.pid !== a.oldProcess.pid || snapshot.startUtc !== a.oldProcess.startUtc ||
+            fileHash(snapshot.executable) !== a.oldProcess.executableSha256 ||
+            observed.records.some(r => r.kind === 'processes'))
+          throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+        return Object.freeze({ projectIdentity: hash({ scopeId: policy.scopeId, roots: referenceRoots.map(r => r.path) }), exitedAt: legacyStopped, claimAcquiredAt: legacyClaimAcquiredAt });
+      },
+      confirmPreservingProcessExit(pid, receipt, owned) {
+        if (!preserving || preserving.operation !== 'restart') return;
+        owner();
+        if (receipt?.pid !== pid || receipt.stopped !== true)
+          throw new Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+        const known = expectedProcesses.filter((r) => r.pid === pid);
+        if(!known.length&&owned){
+          const s=owned.identity,pkg=policy.windowsReferences?.packages?.find(p=>p.id===owned.packageId&&canonical(path.join(p.path,'runtime/node.exe'))===canonical(s.executable));
+          if(!pkg||![preserving.active.currentId,preserving.active.candidateId].includes(pkg.id)||pid!==s.pid||s.commandLine!==owned.commandLine||['pid','startUtc','executable','commandLine'].some(k=>receipt[k]!==s[k]))throw Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        }else if (!known.length || (pid !== preserving.active.oldProcess.pid && !known.every((r) => r.ownedTransition === true)))
+          throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        const facts = query(); validateReferences(facts, policy); verifier.assertBudget();
+        const next = expectedProcesses.filter((r) => r.pid !== pid);
+        const actual = facts.records.filter((r) => r.kind === 'processes');
+        const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        if (hash(clean(actual)) !== hash(clean(next))) throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+        expectedProcesses = next;
+        if (pid === preserving.active.oldProcess.pid) legacyStopped = Date.now();
+      },
+      bindPreservingChild(snapshot, packageId, expectedCommand) {
+        if (!preserving || preserving.operation !== 'restart') return;
+        owner();
+        const a = preserving.active;
+        const pkg = policy.windowsReferences?.packages?.find((p) => p.id === packageId &&
+          canonical(path.join(p.path, 'runtime/node.exe')) === canonical(snapshot.executable));
+        if (!pkg || ![a.currentId, a.candidateId].includes(packageId) || !Number.isInteger(snapshot.pid) || snapshot.pid < 1 ||
+            snapshot.pid === a.oldProcess.pid || expectedProcesses.some((r) => r.pid === snapshot.pid) || snapshot.commandLine !== expectedCommand)
+          throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+        const facts = query(); validateReferences(facts, policy); verifier.assertBudget();
+        const actual = facts.records.filter((r) => r.kind === 'processes');
+        const added = actual.filter((r) => r.pid === snapshot.pid);
+        const clean = (rows) => rows.map(({ ownedTransition, ...r }) => r).sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        if (added.length !== 1 || added[0].packageId !== packageId || added[0].startUtc !== snapshot.startUtc ||
+            added[0].executableSha256 !== fileHash(snapshot.executable) ||
+            hash(clean(actual.filter((r) => r.pid !== snapshot.pid))) !== hash(clean(expectedProcesses)))
+          throw new Error('RELEASE_SCOPE_REFERENCES_CHANGED');
+        expectedProcesses.push({ ...added[0], ownedTransition: true });
+      },
+      authorizePointerCommit(temporary, destination, id, recovery) {
+        if (!preserving) return;
+        owner();
+        const a = preserving.active;
+        if (preserving.operation !== 'restart' || destination !== a.pointer || path.dirname(temporary) !== path.dirname(destination) ||
+            !/^active-[a-f0-9-]+\.tmp$/.test(path.basename(temporary)) || read(temporary).format !== 1 || read(temporary).id !== id ||
+            id !== (recovery ? a.currentId : a.candidateId))
+          throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+        const nextHash = crypto.createHash('sha256').update(JSON.stringify({ format: 1, id: a.candidateId }) + '\n').digest('hex');
+        if (!(recovery ? [a.pointerSha256, nextHash] : [a.pointerSha256]).includes(fileHash(destination)))
+          throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+        pointerCommit = { temporary, destination };
+        if (effectScope) approvedPointerHashes.add(fileHash(temporary));
+      },
+      approveDescriptor(fd, file, writing) {
+        if (writing) descriptors.add(fd);
       },
       assertFileAccess(method, args, writing) {
+        if (preserving && preserving.operation !== 'build' && writing && !['close', 'fsync', 'fdatasync'].includes(method)) {
+          const values = ['copyFile', 'cp', 'symlink', 'link'].includes(method) ? [args[1]] : method === 'rename' ? args.slice(0, 2) : [args[0]];
+          for (const value of values) {
+            if (typeof value === 'number' && descriptors.has(value)) continue;
+            if (typeof value !== 'string') throw new Error('RELEASE_PRESERVING_DESCRIPTOR_FORBIDDEN');
+            const at = path.resolve(value), root = claim.root;
+            if (effectScope && (at === path.join(root, '.release-lifecycle.json') ||
+                path.dirname(at) === root && /^\.release-lifecycle\.json\./.test(path.basename(at))))
+              throw new Error('RELEASE_PRESERVING_CONTROL_WRITE_FORBIDDEN');
+            if (effectScope && preserving.operation === 'restart' && path.dirname(at) === path.dirname(preserving.active.pointer) &&
+                /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)) && method === 'writeFile') {
+              if (present(at) || args[2]?.flag !== 'wx') throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+              transientControls.add(at);
+            }
+            if (effectScope && path.dirname(at) === path.dirname(preserving.active.pointer) && /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)) && !transientControls.has(at))
+              throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+            if (at === preserving.active.pointer) {
+              if (method !== 'rename' || !pointerCommit || args[0] !== pointerCommit.temporary || args[1] !== pointerCommit.destination)
+                throw new Error('RELEASE_PRESERVING_POINTER_COMMIT_FORBIDDEN');
+            }
+            const admin = at === path.join(root, '.build-budget.lock') || at === path.join(path.dirname(root), '.active-release.lock') ||
+              at === path.join(root, '.release-lifecycle.json') || (path.dirname(at) === root && /^\.release-lifecycle\.json\.[a-f0-9-]+\.tmp$/.test(path.basename(at))) ||
+              (preserving.operation === 'restart' && (at === preserving.active.pointer || (path.dirname(at) === path.dirname(preserving.active.pointer) && /^active-[a-f0-9-]+\.tmp$/.test(path.basename(at)))));
+            if (admin) {
+              if (['rm', 'rmdir', 'unlink'].includes(method) && !at.endsWith('.lock') && !at.endsWith('.tmp'))
+                throw new Error('RELEASE_PRESERVING_CONTROL_DELETE_FORBIDDEN');
+              if (present(at) && fs.lstatSync(at).isSymbolicLink()) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+              if (canonical(path.dirname(at)) !== path.dirname(at)) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+              continue;
+            }
+            const output = prior.outputs.find((r) => r.claim === claim.id && !r.complete && contains(r.path, at));
+            if (!output || ['rm', 'rmdir', 'unlink'].includes(method)) throw new Error('RELEASE_PRESERVING_WRITE_OUTSIDE_OUTPUT');
+            if (present(at) && (fs.lstatSync(at).isSymbolicLink() || !contains(output.path, canonical(at))))
+              throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+            let ancestor = path.dirname(at);
+            while (!present(ancestor)) ancestor = path.dirname(ancestor);
+            if (!policy.roots.some((r) => contains(r.path, canonical(ancestor)))) throw new Error('RELEASE_PRESERVING_WRITE_LINK_ESCAPE');
+          }
+          if (method === 'rename' && pointerCommit && args[1] === pointerCommit.destination) pointerCommit = undefined;
+        }
         if (policy.phase !== 'build-only') return;
         if (method === 'close') descriptors.delete(args[0]);
         const paths = ['copyFile', 'cp', 'symlink', 'link', 'rename'].includes(
@@ -723,12 +1191,13 @@ function open(request, options = {}, boundOperation) {
           throw new Error('RELEASE_SCOPE_RECOVERY_PROOF_CHANGED');
         const proof = JSON.parse(raw.toString('utf8')),
           m = read(path.join(folder, 'release.json'), 8 * 1024 ** 2);
+        const sameSchema = proof.kind === 'same-schema-unknown-claim-rollback';
         if (
           proof.format !== 1 ||
-          proof.kind !== 'additive-schema-unknown-claim-rollback' ||
+          (!sameSchema && proof.kind !== 'additive-schema-unknown-claim-rollback') ||
           proof.businessDatabaseRestored !== false ||
           [
-            'additiveSchema',
+            ...(sameSchema ? [] : ['additiveSchema']),
             'unknownClaimsPreserved',
             'businessRowsPreserved',
             'rollbackStarted',
@@ -739,6 +1208,15 @@ function open(request, options = {}, boundOperation) {
             fileHash(path.join(folder, 'release.json'))
         )
           throw new Error('RELEASE_SCOPE_RECOVERY_TARGET_UNPROVEN');
+        if (sameSchema) {
+          try {
+            require('./preserving-contract.cjs').validateSameSchemaCompatibility(proof, policy,
+              policy.windowsReferences.packages.map((p) => {
+                const root = canonical(p.path), file = path.join(root, 'release.json');
+                return { root, manifest: read(file, 8 * 1024 ** 2), manifestSha256: fileHash(file) };
+              }));
+          } catch { throw new Error('RELEASE_SCOPE_RECOVERY_TARGET_UNPROVEN'); }
+        }
         // This authorizes only the already installed compatible app. It grants
         // no new output, copy budget, registry reset or database restoration.
         return proof.rollback;
@@ -748,6 +1226,8 @@ function open(request, options = {}, boundOperation) {
         check();
         const at = path.resolve(output),
           parent = canonical(path.dirname(at));
+        if (effectScope && !effectScope.allocations.some((a) => a.mode === 'exclusive-package' ? at === a.path : at !== a.path && contains(a.path, at)))
+          throw new Error('RELEASE_PRESERVING_ALLOCATION_INVALID');
         if (
           path.dirname(at) !== parent ||
           !policy.roots.some((root) => contains(root.path, at)) ||
@@ -775,6 +1255,7 @@ function open(request, options = {}, boundOperation) {
       },
       allowCleanup(outputs) {
         assertWritable();
+        if (preserving) throw new Error('RELEASE_PRESERVING_CLEANUP_FORBIDDEN');
         check();
         const facts = references().value;
         if (
@@ -804,6 +1285,8 @@ function open(request, options = {}, boundOperation) {
             const receipt = verifier.scan([
               { path: row.path, identity: row.identity },
             ]);
+            if (privateMode && receipt.privateEntries !== 0)
+              throw new Error('RELEASE_SCOPE_PRIVATE_MANAGED_OUTPUT');
             row.digest = receipt.digest;
             row.metadataDigest = receipt.metadataDigest;
             row.complete = true;

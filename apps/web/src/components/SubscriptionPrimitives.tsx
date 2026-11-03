@@ -1,12 +1,10 @@
+import { Modal, Popover, Tooltip } from '@web/components/AppOverlays';
 import {
   Button,
   Checkbox,
-  Modal,
-  Popover,
   PopoverContent,
   PopoverTrigger,
   Progress,
-  Tooltip,
 } from '@nextui-org/react';
 import type { ComponentProps, ReactNode } from 'react';
 
@@ -189,7 +187,7 @@ export function ContentSelectionHeader({
         <span className="mr-2 text-xs">全选已加载</span>
         {title}
       </div>
-      <div className="compact-col-metadata !hidden md:!flex">信息</div>
+      <div className="compact-col-metadata content-metadata-heading">信息</div>
     </div>
   );
 }

@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+beforeAll(require('../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { findArticleListRows } from './article-list-page';
@@ -26,6 +27,7 @@ describe('finite private article read timings on actual single-connection Prisma
   beforeAll(async () => {
     directory = await mkdtemp(join(tmpdir(), 'wewe-read-timing-'));
     databaseUrl = 'file:' + join(directory, 'fixture.db').replace(/\\/g, '/');
+    await writeFile(join(directory,'fixture.db'),'',{flag:'wx'});
     process.env.DATABASE_URL = databaseUrl + '?connection_limit=1';
     process.env.ARTICLE_LIST_READ_TIMING = '1';
     output = jest.spyOn(console, 'info').mockImplementation((line: string) => {

@@ -78,7 +78,7 @@ function fixture(batch) {
           exports: shared.exports,
           require: (dependency) => {
             if (dependency === 'react/jsx-runtime') return { jsx, jsxs: jsx };
-            if (dependency === '@nextui-org/react')
+            if (dependency === '@nextui-org/react' || dependency === '@web/components/AppOverlays')
               return {
                 Progress: 'Progress',
                 Checkbox: 'Checkbox',

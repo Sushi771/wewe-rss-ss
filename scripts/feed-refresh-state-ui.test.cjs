@@ -221,7 +221,11 @@ function fixture({
                 ? react
                 : name === 'react/jsx-runtime'
                   ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-                  : name === '@nextui-org/react'
+                  : [
+                        '@nextui-org/react',
+                        '@web/components/AppOverlays',
+                        '@web/components/SubscriptionPrimitives',
+                      ].includes(name)
                     ? ui
                     : name === '@web/utils/trpc'
                       ? { trpc }
@@ -342,7 +346,7 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
         n.props.children[0] === '开始导出 ',
     );
   assert.equal(confirm().props.children[1], 37);
-  f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
+  f.find((n) => n.type === 'ContentExportScope').props.onChange('all');
   assert.match(f.text(), /公众号：Synthetic A/);
   assert.equal(
     f.find((n) => n.type === 'ArticleExportGuidance').props.singleFeed,
@@ -369,7 +373,7 @@ test('single export entry shows actual scope counts, limits ZIP to supported sco
   assert(!f.find((n) => n.type === 'Modal' && n.props.isOpen));
   f.navigate('');
   entry().props.onPress();
-  f.find((n) => n.type === 'input' && n.props.value === 'all').props.onChange();
+  f.find((n) => n.type === 'ContentExportScope').props.onChange('all');
   assert.match(f.text(), /公众号：全部订阅/);
   assert.equal(
     f.find((n) => n.type === 'option' && n.props.value === 'zip').props

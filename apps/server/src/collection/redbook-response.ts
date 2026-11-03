@@ -1,5 +1,11 @@
+import { createHash } from 'node:crypto';
+import { inspectCachedMp4 } from '../xhs-video-download';
 import { decodeInlineImage } from './image-fetch';
 import { XhsNormalizedCandidate } from './xiaohongshu-contract';
+import { xhsNoteMetrics } from './xhs-engagement-contract';
+import { XhsMediaError, XhsMediaLocalResponseError, mediaHttpError } from './xhs-media-error';
+import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { RedbookPauseError } from './redbook-client';
 
 /**
  * Provisional, fail-closed contract, NOT a real-response evidence assertion.
@@ -104,6 +110,16 @@ export function allowedRedbookMediaUrl(raw: string): URL {
   return url;
 }
 
+/** Fixed video CDN only; signed query strings stay in memory and are never logged. */
+export function allowedRedbookVideoUrl(raw: string): URL {
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE'); }
+  if (url.protocol !== 'https:' || url.hostname !== 'sns-video-bd.xhscdn.com' ||
+      url.port || url.username || url.password || url.hash || /^https:\/\/[^/]*:\d+(?:\/|$)/i.test(raw))
+    throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE');
+  return url;
+}
+
 /** Inject a reviewed transport explicitly. No ambient fetch or account headers. */
 export type RedbookMediaTransport = (
   url: URL,
@@ -118,7 +134,7 @@ const blockedMediaTransport: RedbookMediaTransport = async () => {
   throw new Error('REDBOOK_MEDIA_TRANSPORT_DISABLED');
 };
 
-async function downloadMedia(
+export async function downloadRedbookMedia(
   url: URL,
   remainingBytes: number,
   transport: RedbookMediaTransport,
@@ -131,26 +147,31 @@ async function downloadMedia(
       headers: Object.freeze({
         accept: 'image/png,image/jpeg,image/gif,image/webp',
       }),
-      signal: AbortSignal.timeout(10_000),
+      signal: new AbortController().signal,
     });
-  } catch {
+  } catch (error) {
     // Transport errors can contain signed URLs or secrets: return a fixed code.
-    throw new Error('REDBOOK_MEDIA_REQUEST_FAILED');
+    // A validation classification is only trusted after this call returned a response.
+    if (error instanceof XhsMediaLocalResponseError) throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
+    if (error instanceof XhsMediaError || error instanceof XhsSubscriptionError || error instanceof RedbookPauseError) throw error;
+    throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
   const type = (response.headers.get('content-type') || '')
     .split(';')[0]
     .trim()
     .toLowerCase();
+  if (response.status !== 200) { await response.body?.cancel(); throw mediaHttpError(response.status); }
   if (
-    response.status !== 200 ||
     response.redirected ||
     (response.url && response.url !== url.href) ||
-    !/^image\/(png|jpeg|gif|webp)$/.test(type) ||
-    !response.body
+    !/^image\/(png|jpeg|gif|webp)$/.test(type)
   ) {
     await response.body?.cancel();
-    throw new Error('REDBOOK_MEDIA_RESPONSE_REJECTED');
+    // HTML and other unexpected responses may be a login or verification page.
+    // Their origin and effect are unknown, even when the HTTP status is 200.
+    throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
   }
+  if (!response.body) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
   const reader = response.body.getReader();
   const chunks: Buffer[] = [];
   let length = 0;
@@ -161,22 +182,42 @@ async function downloadMedia(
       length += value.byteLength;
       if (length > Math.min(IMAGE_BUDGET, remainingBytes)) {
         await reader.cancel();
-        throw new Error('REDBOOK_MEDIA_BUDGET_EXCEEDED');
+        throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED');
       }
       chunks.push(Buffer.from(value));
     }
   } catch (error) {
-    if (
-      error instanceof Error &&
-      error.message === 'REDBOOK_MEDIA_BUDGET_EXCEEDED'
-    )
-      throw error;
-    throw new Error('REDBOOK_MEDIA_REQUEST_FAILED');
+    if (error instanceof XhsMediaError) throw error;
+    throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED');
   }
-  const inlineData = `data:${type};base64,${Buffer.concat(chunks).toString('base64')}`;
+  if (!length) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+  const bytes=Buffer.concat(chunks);
+  const hasImageSignature = (type==='image/png' && bytes.subarray(0,8).equals(Buffer.from('89504e470d0a1a0a','hex'))) ||
+    (type==='image/jpeg' && bytes.subarray(0,3).equals(Buffer.from('ffd8ff','hex'))) ||
+    (type==='image/gif' && ['GIF87a','GIF89a'].includes(bytes.subarray(0,6).toString('ascii'))) ||
+    (type==='image/webp' && bytes.subarray(0,4).toString('ascii')==='RIFF' && bytes.subarray(8,12).toString('ascii')==='WEBP');
+  if(!hasImageSignature) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+  const inlineData = `data:${type};base64,${bytes.toString('base64')}`;
   // Existing archive validator checks actual container bytes, including MIME.
-  decodeInlineImage(inlineData);
+  try { decodeInlineImage(inlineData); } catch { throw new XhsMediaLocalResponseError('XHS_MEDIA_BYTES_INVALID'); }
   return { inlineData, byteLength: length };
+}
+
+/** Identity-bound, media-independent projection of one already returned detail. */
+export function mapRedbookBasicDetail(raw: unknown, expectedAuthorId: string, expectedNoteId: string) {
+  const authorId = identifier(expectedAuthorId), noteId = identifier(expectedNoteId);
+  const detail = record(raw);
+  if (!Array.isArray(detail.items) || detail.items.length !== 1) throw new Error('REDBOOK_SCHEMA_REJECTED');
+  const item = record(detail.items[0]), card = record(item.note_card);
+  if (identifier(item.id) !== noteId || identifier(card.note_id) !== noteId) throw new Error('REDBOOK_NOTE_MISMATCH');
+  if (identifier(record(card.user).user_id) !== authorId) throw new Error('REDBOOK_AUTHOR_MISMATCH');
+  if (card.type !== 'normal' && card.type !== 'video') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
+  const timestamp = card.time;
+  const publishedAt = Number.isSafeInteger(timestamp) && (timestamp as number) >= 1356998400000 && (timestamp as number) <= Date.now() + 5 * 60_000
+    ? Math.floor((timestamp as number) / 1000) : null;
+  const title = typeof card.title === 'string' && card.title.length <= 500 ? card.title : null;
+  const text = typeof card.desc === 'string' && card.desc.length <= 1_000_000 ? card.desc : null;
+  return {authorId,noteId,kind:card.type === 'video' ? 'video' as const : 'image-text' as const,publishedAt,title,text,metrics:xhsNoteMetrics(card)};
 }
 
 export function inspectRedbookDetail(
@@ -195,7 +236,7 @@ export function inspectRedbookDetail(
     throw new Error('REDBOOK_NOTE_MISMATCH');
   if (identifier(record(card.user).user_id) !== authorId)
     throw new Error('REDBOOK_AUTHOR_MISMATCH');
-  if (card.type !== 'normal') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
+  if (card.type !== 'normal' && card.type !== 'video') throw new Error('REDBOOK_NOTE_KIND_REJECTED');
   if (
     !Number.isSafeInteger(card.time) ||
     (card.time as number) < 1356998400000 ||
@@ -210,7 +251,7 @@ export function inspectRedbookDetail(
   const urls = card.image_list.map((image) =>
     allowedRedbookMediaUrl(boundedString(record(image).url_default, 8192)),
   );
-  if (!text.trim() && urls.length === 0)
+  if (card.type === 'normal' && !text.trim() && urls.length === 0)
     throw new Error('REDBOOK_BODY_REJECTED');
   return {
     authorId,
@@ -219,6 +260,8 @@ export function inspectRedbookDetail(
     text,
     urls,
     publishedAt: Math.floor((card.time as number) / 1000),
+    kind: card.type === 'video' ? 'video' as const : 'image-text' as const,
+    card,
   };
 }
 
@@ -228,12 +271,20 @@ export async function mapRedbookDetail(
   expectedNoteId: string,
   transport: RedbookMediaTransport = blockedMediaTransport,
 ): Promise<XhsNormalizedCandidate> {
-  const { authorId, noteId, title, text, urls, publishedAt } =
+  const { authorId, noteId, title, text, urls, publishedAt, kind, card } =
     inspectRedbookDetail(raw, expectedAuthorId, expectedNoteId);
+  let videoUrl: URL | undefined;
+  if (kind === 'video') {
+    try {
+      const rawVideo = record(card.video), media = record(rawVideo.media), stream = record(media.stream);
+      if (!Array.isArray(stream.h264) || !stream.h264.length) throw Error();
+      videoUrl = allowedRedbookVideoUrl(boundedString(record(stream.h264[0]).master_url, 8192));
+    } catch { throw new XhsSubscriptionError('XHS_VIDEO_CACHE_UNAVAILABLE'); }
+  }
   let totalBytes = 0;
   const images: XhsNormalizedCandidate['images'] = [];
   for (const url of urls) {
-    const media = await downloadMedia(
+    const media = await downloadRedbookMedia(
       url,
       MEDIA_BUDGET - totalBytes,
       transport,
@@ -241,10 +292,34 @@ export async function mapRedbookDetail(
     totalBytes += media.byteLength;
     images.push({ ordinal: images.length + 1, inlineData: media.inlineData });
   }
+  let video: XhsNormalizedCandidate['video'];
+  if (kind === 'video') {
+    // One explicit source variant; never synthesize or try alternate URLs.
+    const url = videoUrl!;
+    let response: Response;
+    try { response = await transport(url, { redirect: 'manual', credentials: 'omit', headers: Object.freeze({ accept: 'video/mp4' }), signal: new AbortController().signal }); }
+    catch (e) { if (e instanceof XhsMediaError || e instanceof XhsSubscriptionError || e instanceof RedbookPauseError) throw e; throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED'); }
+    if (response.status !== 200) { await response.body?.cancel(); throw mediaHttpError(response.status); }
+    const length = response.headers.get('content-length'), mime = (response.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
+    if (response.redirected || (response.url && response.url !== url.href) || mime !== 'video/mp4' || !length || !/^[0-9]+$/.test(length) || Number(length) <= 0 || Number(length) > 100_000_000 || !response.body) {
+      await response.body?.cancel(); throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+    }
+    const reader = response.body.getReader(), chunks: Buffer[] = []; let n = 0;
+    try { for (;;) { const part = await reader.read(); if (part.done) break; n += part.value.byteLength;
+      if (n > Number(length) || n > 100_000_000) { await reader.cancel(); throw new XhsMediaError('XHS_MEDIA_SIZE_REJECTED'); }
+      chunks.push(Buffer.from(part.value)); } }
+    catch (e) { if (e instanceof XhsMediaError) throw e; throw new XhsMediaError('XHS_MEDIA_TRANSPORT_FAILED'); }
+    if (n !== Number(length)) throw new XhsMediaError('XHS_MEDIA_RESPONSE_INVALID');
+    const bytes = Buffer.concat(chunks), sha256 = createHash('sha256').update(bytes).digest('hex');
+    try { if (inspectCachedMp4(bytes).sha256 !== sha256) throw Error(); } catch { throw new XhsMediaError('XHS_MEDIA_BYTES_INVALID'); }
+    video = {complete:true,mimeType:'video/mp4',bytes,expectedBytes:n,sha256};
+  }
   return {
     authorId,
     noteId,
-    kind: 'image-text',
+    kind,
+    ...(video ? { video } : {}),
+    metrics: xhsNoteMetrics((raw as any).items[0].note_card),
     // Existing archive contract stores epoch seconds, truncating milliseconds.
     publishedAt,
     title,

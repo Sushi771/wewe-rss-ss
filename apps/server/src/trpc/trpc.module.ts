@@ -1,3 +1,9 @@
+import { XhsScheduledService } from '../collection/xhs-scheduled.service';
+import { bindXhsSourceTotalBudget } from '../collection/xhs-source-request-policy';
+import { XhsSourceRiskStore } from '../collection/xhs-source-risk-store';
+import { XhsLimitedRecoveryStore } from '../collection/xhs-limited-recovery-store';
+import { XhsBatchSubscriptionService } from '../collection/xhs-batch-subscription.service';
+import { XhsWholeCreatorService } from '../collection/xhs-whole-creator.service';
 import { Module } from '@nestjs/common';
 import { TrpcService } from '@server/trpc/trpc.service';
 import { TrpcRouter } from '@server/trpc/trpc.router';
@@ -9,6 +15,7 @@ import { SUBSCRIPTION_DISCOVERY } from '../collection/subscription-add';
 import { createNativeSubscriptionDiscovery } from '../collection/subscription-native-adapter';
 import { resolveWereadPublisherOriginal } from '../collection/weread-public-original';
 import { XiaohongshuService } from '../collection/xiaohongshu.service';
+import { XhsEngagementService } from '../collection/xhs-engagement.service';
 import {
   XHS_SUBSCRIPTION_SOURCE,
   XhsSubscriptionService,
@@ -27,9 +34,20 @@ import {
     CollectionService,
     XiaohongshuService,
     XhsSubscriptionService,
+    XhsScheduledService,
+    XhsBatchSubscriptionService,
+    XhsEngagementService,
+    XhsWholeCreatorService,
     {
       provide: XhsSubscriptionRuntime,
-      useFactory: createLocalXhsSubscriptionRuntime,
+      inject: [PrismaService],
+      useFactory: (db: PrismaService) => {
+        const runtime = createLocalXhsSubscriptionRuntime();
+        runtime.bindRiskStore(new XhsSourceRiskStore(db));
+        runtime.bindLimitedRecoveryStore(new XhsLimitedRecoveryStore(db));
+        bindXhsSourceTotalBudget(db, runtime);
+        return runtime;
+      },
     },
     { provide: XHS_SUBSCRIPTION_SOURCE, useExisting: XhsSubscriptionRuntime },
     {

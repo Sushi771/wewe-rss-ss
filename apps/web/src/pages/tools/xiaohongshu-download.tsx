@@ -32,7 +32,7 @@ export default function XiaohongshuDownload() {
     async (endpoint: string, body?: unknown, signal?: AbortSignal) => {
       const authCode = getAuthCode();
       const response = await fetch(
-        `${serverOriginUrl || ''}/download/article${endpoint}`,
+        `${serverOriginUrl || ''}/download/article${endpoint}${endpoint === '/settings' || endpoint === '/directory' ? '?target=xiaohongshu' : ''}`,
         {
           method: body === undefined ? 'GET' : 'POST',
           credentials: 'include',

@@ -1,3 +1,4 @@
+beforeAll(require('../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';

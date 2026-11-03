@@ -143,6 +143,7 @@ export const callWindowsDpapi: XhsVaultCall = (action, file, cookies) => {
       failed = false,
       diagnostic = 'XHS_VAULT_OPERATION_FAILED';
     const timer = setTimeout(() => {
+      diagnostic = 'XHS_VAULT_OPERATION_FAILED_TIMEOUT';
       failed = true;
       child.kill();
     }, 15000);
@@ -158,7 +159,10 @@ export const callWindowsDpapi: XhsVaultCall = (action, file, cookies) => {
     child.stderr.on('data', (part: Buffer) => {
       failed = true;
       const code = part.toString('utf8');
-      if (/^XHS_VAULT_OPERATION_FAILED_LINE_\d+_[A-Za-z]{1,80}$/.test(code))
+      if (
+        diagnostic !== 'XHS_VAULT_OPERATION_FAILED_TIMEOUT' &&
+        /^XHS_VAULT_OPERATION_FAILED_LINE_\d+_[A-Za-z]{1,80}$/.test(code)
+      )
         diagnostic = code;
       part.fill(0);
     });

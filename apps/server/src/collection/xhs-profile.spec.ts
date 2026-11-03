@@ -12,11 +12,19 @@ const sample = () => ({
 });
 describe('reviewed request-bound XHS profile parser (offline)', () => {
   it('uses the signed request ID and ignores display IDs and avatar URLs', () => {
-    expect(parseXhsProfile(sample(), AUTHOR)).toEqual({
+    expect(parseXhsProfile(sample(), AUTHOR)).toMatchObject({
       id: AUTHOR,
       name: 'Synthetic creator',
       profileUrl: 'https://www.xiaohongshu.com/user/profile/' + AUTHOR,
     });
+  });
+  it('maps a source-shaped avatar only on an allowed CDN without secret query', () => {
+    const raw = sample(); raw.basic_info.images = 'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg?token=secret';
+    expect(parseXhsProfile(raw, AUTHOR).avatarUrl).toBe('https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg');
+    raw.basic_info.images = 'https://attacker.example/avatar/synthetic.jpg';
+    expect(parseXhsProfile(raw, AUTHOR).avatarUrl).toBeUndefined();
+    raw.basic_info.images = 'https://sns-avatar-qc.xhscdn.com.evil.example/avatar/synthetic.jpg';
+    expect(parseXhsProfile(raw, AUTHOR).avatarUrl).toBeUndefined();
   });
   it('allows a returned stable ID only when it matches the requested author', () => {
     const raw = sample();
@@ -36,7 +44,10 @@ describe('reviewed request-bound XHS profile parser (offline)', () => {
     { ...sample(), result: { success: true, code: 1 } },
     { ...sample(), result: { success: true, code: '0' } },
     { ...sample(), basic_info: { nickname: '', red_id: 'display' } },
-    { ...sample(), basic_info: { nickname: 'a'.repeat(121), red_id: 'display' } },
+    {
+      ...sample(),
+      basic_info: { nickname: 'a'.repeat(121), red_id: 'display' },
+    },
     { ...sample(), basic_info: { nickname: 'name\n', red_id: 'display' } },
     { ...sample(), basic_info: { nickname: 'name', red_id: null } },
   ])('rejects unrecognized or unsuccessful profile data', (raw) => {

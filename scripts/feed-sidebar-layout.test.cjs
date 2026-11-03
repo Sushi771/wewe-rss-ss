@@ -96,7 +96,7 @@ for (const [width, height, folderCount, open] of [
       assert(match, 'Chromium must return completed geometry evidence');
       const evidence = JSON.parse(match[1]);
       console.log({ width, height, folderCount, open, evidence });
-      assert.equal(evidence.visible, width >= 768 || open);
+      assert.equal(evidence.visible, width >= 1100 || open);
       assert.equal(evidence.sideOnly, true);
       if (evidence.visible) {
         assert.equal(evidence.sideCanScroll, true);

@@ -194,22 +194,9 @@ export function useArticleListPosition(options: ListPositionOptions) {
     paused,
     capturePosition,
   ]);
-  const readerPosition = useRef<ReturnType<typeof readBrowsePosition>>();
-  const rememberForReader = useCallback(() => {
-    capturePosition();
-    readerPosition.current = lastPosition.current;
-  }, [capturePosition]);
-  const restoreAfterReader = useCallback(() => {
-    if (!readerPosition.current) return;
-    active.current.pending = readerPosition.current;
-    active.current.done = false;
-    readerPosition.current = undefined;
-  }, []);
   return {
     scrollRef,
     capturePosition,
     cancelRestore,
-    rememberForReader,
-    restoreAfterReader,
   };
 }

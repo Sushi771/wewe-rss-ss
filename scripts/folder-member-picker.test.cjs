@@ -131,7 +131,7 @@ test('failed batch retains checked rows and modal; pending save disables mutatio
   assert(f.options().every((n) => n.props.disabled));
   assert.equal(f.find('Modal').props.isDismissable, false);
   assert.equal(
-    f.find('p', (p) => p.role === 'alert').props.children,
+    f.find('div', (p) => p.role === 'alert').props.children.props.error,
     'Synthetic save failed',
   );
   f.find('Modal').props.onClose();

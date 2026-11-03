@@ -102,6 +102,21 @@ function storePointer({ release, manifest }, options = {}) {
 
 function storePointerLocked({ release, manifest }, options = {}) {
   const scope = require('./release-scope.cjs').session();
+  const preserving = scope?.policy?.preservingUpdate;
+  if (preserving) {
+    const active = preserving.active;
+    if (preserving.operation !== 'restart' || active.pointer !== pointer ||
+        fs.realpathSync(pointer) !== pointer || fs.lstatSync(pointer).isSymbolicLink())
+      throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    const currentHash = require('./lib.cjs').fileHash(pointer);
+    const nextHash = require('node:crypto').createHash('sha256')
+      .update(JSON.stringify({ format: 1, id: active.candidateId }) + '\n').digest('hex');
+    if (options.recovery === true) {
+      if (manifest.id !== active.currentId || ![active.pointerSha256, nextHash].includes(currentHash))
+        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    } else if (manifest.id !== active.candidateId || currentHash !== active.pointerSha256)
+      throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+  }
   if (scope) {
     if (options.recovery === true) scope.authorizeRecoveryPackage(release);
     else {
@@ -118,6 +133,7 @@ function storePointerLocked({ release, manifest }, options = {}) {
         flag: 'wx',
       },
     );
+    scope?.authorizePointerCommit?.(temporary, pointer, manifest.id, options.recovery === true);
     fs.renameSync(temporary, pointer);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);

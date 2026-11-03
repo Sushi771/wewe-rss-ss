@@ -1,9 +1,11 @@
+beforeAll(require('../../../../scripts/local-release/writer-self.fixture.test.cjs').prepareWriterSelf);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { PrismaService } from '../prisma/prisma.service';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
@@ -131,7 +133,69 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     )!;
     return fs.readFile(path.join(folder, name));
   };
-  beforeEach(async () => {
+  let setupPromise: Promise<void> | undefined;
+  let fixtureNumber = 0;
+  const timing = (stage: string, start: number, extra: object = {}) =>
+    console.info('SYNTHETIC_FIXTURE_TIMING', JSON.stringify({ case: fixtureNumber, stage, elapsedMs: Math.round(performance.now() - start), ...extra }));
+  let schemaRoot: string;
+  let schemaPromise: Promise<void> | undefined;
+  beforeAll(() => {
+    schemaPromise = (async () => {
+      const overall = performance.now();
+      let stage = overall;
+      schemaRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-schema-'));
+      // The application starts after migration has created the physical DB file.
+      await fs.writeFile(path.join(schemaRoot, 'schema.db'), '', { flag: 'wx' });
+      const savedUrl = process.env.DATABASE_URL;
+      process.env.DATABASE_URL = 'file:' + path.join(schemaRoot, 'schema.db').replaceAll('\\', '/') + '?connection_limit=1';
+      const schemaPrisma = new PrismaService();
+      try {
+        await schemaPrisma.$connect();
+    const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    let fileIndex = 0;
+    for (const name of (await fs.readdir(migrations)).sort()) {
+      fileIndex++;
+      const sql = await fs
+        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+        .catch(() => '');
+      let statementIndex = 0;
+      for (const statement of splitSqliteStatements(sql)
+        .map((s) => s.trim())
+        .filter(Boolean)) {
+        statementIndex++;
+        const started = performance.now();
+        timing('migration-statement-start', overall, { fileIndex, statementIndex });
+        await schemaPrisma.$executeRawUnsafe(statement);
+        if (performance.now() - started >= 250) timing('migration-statement-slow', started, { fileIndex, statementIndex });
+      }
+    }
+    timing('migrations-done', stage, { fileCount: fileIndex }); stage = performance.now();
+        await schemaPrisma.$queryRawUnsafe('PRAGMA journal_mode=DELETE');
+      } finally {
+        try { await schemaPrisma.$disconnect(); } finally {
+          if (savedUrl === undefined) delete process.env.DATABASE_URL;
+          else process.env.DATABASE_URL = savedUrl;
+        }
+      }
+      for (const suffix of ['-wal', '-shm', '-journal']) {
+        if (await fs.stat(path.join(schemaRoot, 'schema.db') + suffix).then(() => true, (e) => { if (e.code === 'ENOENT') return false; throw e; })) throw Error('SCHEMA_FIXTURE_HAS_SIDECAR');
+      }
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o444);
+      timing('schema-ready', overall);
+    })();
+    return schemaPromise;
+  }, 40000);
+  afterAll(async () => {
+    await schemaPromise?.catch(() => undefined);
+    if (schemaRoot && path.dirname(schemaRoot) === os.tmpdir() && path.basename(schemaRoot).startsWith('exact-media-schema-')) {
+      await fs.chmod(path.join(schemaRoot, 'schema.db'), 0o600).catch(() => undefined);
+      await fs.rm(schemaRoot, { recursive: true, force: true });
+    }
+  }, 40000);
+  const setupFixture = async () => {
+    fixtureNumber++;
+    const overall = performance.now();
+    let stage = performance.now();
     jest.clearAllMocks();
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'exact-media-synthetic-'));
     resources = path.join(root, 'assets');
@@ -146,11 +210,16 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       WECHAT2RSS_TOKEN: 'synthetic',
       WECHAT2RSS_CACHE_MEDIA: '0',
       SQLITE_PERIODIC_SNAPSHOT_ENABLED: '0',
-      WEWE_SAVED_MEDIA_ROOT: resources,
+      WEWE_SAVED_MEDIA_ROOT: await fs.realpath(resources),
     });
     delete process.env.WEWE_ACCEPTANCE_MODE;
+    timing('temp-ready', stage); stage = performance.now();
+    await fs.copyFile(path.join(schemaRoot, 'schema.db'), path.join(root, 'data.db'));
+    await fs.chmod(path.join(root, 'data.db'), 0o600);
     prisma = new PrismaService();
+    timing('connect-start', stage);
     await prisma.$connect();
+    timing('connect-done', stage); stage = performance.now();
     forceCasFailure = false;
     conditionalWrites = 0;
     prisma.$use(async (params, next) =>
@@ -161,16 +230,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
         ? { count: 0 }
         : next(params),
     );
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    timing('schema-copy-done', stage); stage = performance.now();
+    if (await prisma.feed.count() !== 0 || await prisma.article.count() !== 0) throw Error('SCHEMA_FIXTURE_NOT_EMPTY');
     await prisma.feed.create({
       data: {
         id: mpId,
@@ -239,14 +300,25 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     });
     await prisma.$executeRaw`INSERT INTO cache_refresh_commits(id,mp_id,result_json,committed_at_ms) VALUES('historical',${mpId},'{}',1)`;
     await writeManifest();
+    timing('seed-done', stage); stage = performance.now();
     collector = new CollectionService(prisma);
     service = new TrpcService(prisma, config, {} as any, collector);
     router = new TrpcRouter(service, prisma, config, {} as any, {} as any);
     before = await prisma.article.findMany({ orderBy: { id: 'asc' } });
     feedBefore = await prisma.feed.findUnique({ where: { id: mpId } });
+    timing('readback-done', stage); timing('setup-done', overall);
     jest.spyOn(global, 'fetch').mockRejectedValue(Error('NETWORK_FORBIDDEN'));
-  });
+  };
+  beforeEach(() => {
+    setupPromise = setupFixture();
+    return setupPromise;
+  }, 40000);
   afterEach(async () => {
+    const teardownStarted = performance.now();
+    timing('teardown-start', teardownStarted);
+    // A hook deadline does not cancel its Promise. Finish that exact setup
+    // before disconnecting/removing its database; Jest retains hook failure.
+    await setupPromise?.catch(() => undefined);
     service?.onModuleDestroy();
     await prisma?.$disconnect();
     jest.restoreAllMocks();
@@ -257,7 +329,8 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
       path.basename(root).startsWith('exact-media-synthetic-')
     )
       await fs.rm(root, { recursive: true, force: true });
-  });
+    timing('teardown-done', teardownStarted);
+  }, 40000);
   (process.platform === 'win32' ? it : it.skip)(
     'combined: one fresh startup protection is reused at lifecycle initialization; media write/reentry and restart allocate no extra copy',
     async () => {
@@ -341,6 +414,31 @@ describe('protected exact saved-media writeback on synthetic SQLite', () => {
     },
     30000,
   );
+  it('accepts the canonical fixture root and rejects a resolver alias before opening files', async () => {
+    const canonical = await fs.realpath(resources);
+    expect(process.env.WEWE_SAVED_MEDIA_ROOT).toBe(canonical);
+    expect((await readSavedMediaManifest()).root).toBe(canonical);
+    // Model a Windows short-name/junction alias without requiring symlink
+    // privileges: resolving the configured alias points at our real fixture.
+    const alias = path.join(root, 'synthetic-resource-alias');
+    const realpath = fs.realpath.bind(fs);
+    const resolve = jest
+      .spyOn(fs, 'realpath')
+      .mockImplementation((async (value: any) =>
+        String(value) === alias ? canonical : realpath(value)) as any);
+    const open = jest.spyOn(fs, 'open');
+    process.env.WEWE_SAVED_MEDIA_ROOT = alias;
+    try {
+      await expect(readSavedMediaManifest()).rejects.toThrow(
+        'SAVED_MEDIA_ROOT_INVALID',
+      );
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      open.mockRestore();
+      process.env.WEWE_SAVED_MEDIA_ROOT = canonical;
+    }
+  });
   it('updates only five existing bodies, including a legacy ID, through coordinator with zero network/backup and no historical feed/receipt changes', async () => {
     const marker = path.join(root, '.wechat2rss-media-blocked.json');
     await fs.writeFile(marker, 'synthetic existing media stop');

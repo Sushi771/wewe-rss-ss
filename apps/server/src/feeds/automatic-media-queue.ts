@@ -22,7 +22,7 @@ const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const MAX_STATE = 4_000_000;
 const MAX_ARTICLES = 1024;
 const MAX_RESOURCES = 2048;
-const MAX_CACHE = 128_000_000;
+const MAX_CACHE = 2 * 1024 ** 3;
 const BACKOFF = [60_000, 300_000, 1_800_000, 21_600_000];
 const resourceSchema = z
   .object({
@@ -76,7 +76,7 @@ export type AutomaticMediaScanRow = Pick<
   SavedMediaSnapshot,
   'id' | 'mpId' | 'contentHtml'
 > &
-  Partial<SavedMediaSnapshot> & { oversized?: boolean };
+  Partial<SavedMediaSnapshot> & { oversized?: boolean; mediaReady?: boolean };
 export type AutomaticMediaDependencies = {
   now(): number;
   scan(
@@ -141,6 +141,63 @@ async function atomic(file: string, value: unknown, limit: number) {
     await fs.rename(temp, file);
   } finally {
     await fs.rm(temp, { force: true });
+  }
+}
+
+async function readCachedMedia(directory: string, key: string, url: string) {
+  try {
+    const record = JSON.parse(
+      (
+        await readBounded(
+          path.join(directory, 'bytes', `${key}.json`),
+          14_000_000,
+        )
+      ).toString('utf8'),
+    );
+    if (
+      record.version !== 1 ||
+      record.url !== url ||
+      record.key !== key ||
+      typeof record.inline !== 'string'
+    )
+      throw Error('MEDIA_BYTES_INVALID');
+    const decoded = decodeInlineImage(record.inline);
+    if (hash(decoded.bytes) !== record.sha256)
+      throw Error('MEDIA_BYTES_INVALID');
+    return record.inline as string;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
+/** Read verified local bytes only; no queue mutation, HTTP or budget change. */
+export async function readAutomaticMediaImage(url: string) {
+  allowedImageUrl(url);
+  const configured = process.env.DATABASE_URL || '';
+  if (!configured.startsWith('file:')) return;
+  try {
+    const database = await fs.realpath(
+      decodeURIComponent(configured.slice(5).split('?')[0]),
+    );
+    if (!(await fs.stat(database)).isFile())
+      throw Error('MEDIA_DATABASE_INVALID');
+    const directory = path.join(
+      path.dirname(database),
+      '.wechat2rss-automatic-media',
+    );
+    const normalized = (value: string) =>
+      process.platform === 'win32'
+        ? path.resolve(value).toLowerCase()
+        : path.resolve(value);
+    for (const folder of [directory, path.join(directory, 'bytes')])
+      if (normalized(await fs.realpath(folder)) !== normalized(folder))
+        throw Error('MEDIA_STORAGE_INVALID');
+    const inline = await readCachedMedia(directory, hash(url), url);
+    return inline ? decodeInlineImage(inline) : undefined;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
   }
 }
 
@@ -285,38 +342,14 @@ export class AutomaticMediaQueue {
       state.blocked ? 'IMAGE_REQUEST_BLOCKED' : code,
     );
   }
-  private async cached(key: string, url: string) {
-    try {
-      const record = JSON.parse(
-        (
-          await readBounded(
-            path.join(this.directory, 'bytes', `${key}.json`),
-            14_000_000,
-          )
-        ).toString('utf8'),
-      );
-      if (
-        record.version !== 1 ||
-        record.url !== url ||
-        record.key !== key ||
-        typeof record.inline !== 'string'
-      )
-        throw Error('MEDIA_BYTES_INVALID');
-      const decoded = decodeInlineImage(record.inline);
-      if (hash(decoded.bytes) !== record.sha256)
-        throw Error('MEDIA_BYTES_INVALID');
-      return record.inline as string;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
+  private cached(key: string, url: string) {
+    return readCachedMedia(this.directory, key, url);
   }
   private async capacity(required: number) {
     const folder = path.join(this.directory, 'bytes');
-    const files = await fs.readdir(folder);
-    if (files.length >= 256) throw Error('MEDIA_STORAGE_CAPACITY');
     let bytes = 0;
-    for (const name of files) {
+    for await (const entry of await fs.opendir(folder)) {
+      const name = entry.name;
       // A process death can leave our own bounded temp; count it, never follow
       // or delete it, and do not mistake it for a verified resource.
       if (!/^[a-f0-9]{64}\.json(?:\.[a-f0-9-]{36}\.tmp)?$/.test(name))
@@ -325,8 +358,14 @@ export class AutomaticMediaQueue {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 14_000_000)
         throw Error('MEDIA_STORAGE_INVALID');
       bytes += stat.size;
+      if (bytes + required > MAX_CACHE) throw Error('MEDIA_STORAGE_CAPACITY');
     }
     if (bytes + required > MAX_CACHE) throw Error('MEDIA_STORAGE_CAPACITY');
+    // Preserve the existing byte quota; tiny cached records do not exhaust an
+    // unrelated file-count limit. Reserve disk space before spending HTTP.
+    const disk = await fs.statfs(folder, { bigint: true });
+    if (disk.bavail * disk.bsize < BigInt(4 * 1024 ** 3 + required))
+      throw Error('MEDIA_STORAGE_CAPACITY');
   }
   private async store(key: string, url: string, inline: string) {
     const decoded = decodeInlineImage(inline);
@@ -342,7 +381,11 @@ export class AutomaticMediaQueue {
     for (const row of rows) {
       const previous = state.articles.find((entry) => entry.id === row.id);
       const sources = row.oversized
-        ? { ready: false, urls: [], unknown: 1 }
+        ? {
+            ready: row.mediaReady === true,
+            urls: [],
+            unknown: row.mediaReady ? 0 : 1,
+          }
         : automaticMediaSources(row.contentHtml || '');
       if (sources.ready) {
         state.articles = state.articles.filter((entry) => entry.id !== row.id);
@@ -435,40 +478,45 @@ export class AutomaticMediaQueue {
   private async work(state: State) {
     let inspected = 0;
     for (const entry of [...state.articles]) {
+      // A body projection limit stops SQL embedding, not already queued cache
+      // work. Other exhausted/identity failures retain their original stop.
+      let cacheOnly = entry.code === 'MEDIA_BODY_LIMIT';
       if (
         this.closed ||
-        entry.writes >= 4 ||
-        entry.due > this.deps.now() ||
+        (!cacheOnly && entry.writes >= 4) ||
+        (!cacheOnly && entry.due > this.deps.now()) ||
         !entry.resources.length
       )
         continue;
       if (inspected++ >= 20) break;
       const images = new Map<string, string>();
+      const cached = new Set<string>();
       let cachedSize = 0;
       for (const key of entry.resources) {
         const resource = state.resources[key];
         const existing = await this.cached(key, resource.url);
         if (existing) {
+          cached.add(key);
           cachedSize += Buffer.byteLength(existing);
           if (cachedSize > 8_000_000) {
             entry.writes = 4;
             entry.code = 'MEDIA_BODY_LIMIT';
-            break;
+            cacheOnly = true;
           }
-          images.set(resource.url, existing);
+          if (!cacheOnly) images.set(resource.url, existing);
         }
       }
-      if (entry.writes >= 4) continue;
       const canRequest =
         !state.blocked &&
         this.deps.canFetch(entry.feedId) &&
         state.nextRequest <= this.deps.now() &&
         entry.resources.some(
           (key) =>
+            !cached.has(key) &&
             state.resources[key].state === 'pending' &&
             state.resources[key].due <= this.deps.now(),
         );
-      if (!images.size && !canRequest) {
+      if ((!images.size || cacheOnly) && !canRequest) {
         state.articles = [
           ...state.articles.filter((article) => article !== entry),
           entry,
@@ -486,16 +534,20 @@ export class AutomaticMediaQueue {
       }
       try {
         automaticMediaPlan(row, new Map());
-      } catch {
+      } catch (error) {
         entry.writes = 4;
-        entry.code = 'MEDIA_IDENTITY_UNVERIFIED';
+        entry.code =
+          error instanceof Error && error.message === 'MEDIA_BODY_LIMIT'
+            ? 'MEDIA_BODY_LIMIT'
+            : 'MEDIA_IDENTITY_UNVERIFIED';
         return;
       }
       let fetched = false;
       for (const key of entry.resources) {
         const resource = state.resources[key];
-        if (images.has(resource.url)) continue;
+        if (cached.has(key)) continue;
         if (
+          this.closed ||
           fetched ||
           state.blocked ||
           !this.deps.canFetch(entry.feedId) ||
@@ -512,6 +564,7 @@ export class AutomaticMediaQueue {
         // Reserve enough space for the largest permitted encoded response before
         // spending an upstream attempt. Capacity failure is a visible pause.
         await this.capacity(14_000_000);
+        if (this.closed) return;
         if (this.deps.now() - state.windowStart >= 3_600_000) {
           state.windowStart = this.deps.now();
           state.windowCount = 0;
@@ -528,12 +581,13 @@ export class AutomaticMediaQueue {
             : this.deps.now() + 1000;
         // A crash/ACK loss spends this attempt; restart respects the recorded due.
         await this.save(state);
+        if (this.closed) return;
         fetched = true;
         try {
           const value = await this.deps.fetch(resource.url);
           const inline = `data:${value.type};base64,${value.bytes.toString('base64')}`;
           await this.store(key, resource.url, inline);
-          images.set(resource.url, inline);
+          if (!cacheOnly) images.set(resource.url, inline);
           resource.code = undefined;
         } catch (error) {
           if (error instanceof ImageRequestBlockedError) {
@@ -567,7 +621,7 @@ export class AutomaticMediaQueue {
           }
         }
       }
-      if (images.size && !this.closed) {
+      if (images.size && !cacheOnly && !this.closed) {
         entry.writes++;
         entry.due = this.deps.now() + BACKOFF[entry.writes - 1];
         await this.save(state);
@@ -584,12 +638,11 @@ export class AutomaticMediaQueue {
           if (error instanceof Error && error.message === 'MEDIA_BODY_LIMIT') {
             entry.writes = 4;
             entry.code = 'MEDIA_BODY_LIMIT';
-            continue;
-          }
-          entry.code =
-            error instanceof Error && error.message === 'SAVED_MEDIA_CONFLICT'
-              ? 'MEDIA_BODY_CHANGED'
-              : 'MEDIA_SAVE_RETRY';
+          } else
+            entry.code =
+              error instanceof Error && error.message === 'SAVED_MEDIA_CONFLICT'
+                ? 'MEDIA_BODY_CHANGED'
+                : 'MEDIA_SAVE_RETRY';
         }
       }
       // Rotate pending rows so an unavailable resource never starves later feeds.

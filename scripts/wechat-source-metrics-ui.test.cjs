@@ -39,7 +39,7 @@ test('actual list rendering shows current availability and keeps retry history o
   };
   for (const row of [item, JSON.parse(JSON.stringify(item))]) {
     const view = fixture({ items: [row] }).render();
-    assert.match(view.text, /正文已保存，可阅读/);
+    assert.match(view.text, /正文已保存，可导出/);
     assert.doesNotMatch(
       JSON.stringify(view.nodes),
       /上次原文重试|HTTP 302|原文请求失败|1700000000/,
@@ -77,7 +77,7 @@ test('actual list rendering keeps missing-cache actions available and hides hist
       },
     ],
   }).render();
-  assert.match(ready.text, /正文已保存，可阅读/);
+  assert.match(ready.text, /正文已保存，可导出/);
   assert.doesNotMatch(ready.text, /上次原文重试|已补入正文|HTTP 302/);
 });
 test('current failed user retry gives a concise toast without publishing audit details into the row', async () => {
@@ -118,7 +118,10 @@ function fixture({
     query,
     sort = 'publishTime',
     direction = 'desc';
-  const jsx = (type, props) => ({ type, props: props || {} });
+  const jsx = (type, props) =>
+    typeof type === 'function'
+      ? type(props || {})
+      : { type, props: props || {} };
   const react = {
     useState(initial) {
       const i = cursor++;
@@ -196,15 +199,15 @@ function fixture({
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
-    '@web/components/ArticleReader': { default: 'ArticleReader' },
+    '@web/utils/wechat-original-url': loadActualTs(
+      'apps/web/src/utils/wechat-original-url.ts',
+    ),
     // Metric visibility is independent of scroll restoration.
     '@web/utils/use-article-list-position': {
       useArticleListPosition: () => ({
         scrollRef: { current: null },
         capturePosition() {},
         cancelRestore() {},
-        rememberForReader() {},
-        restoreAfterReader() {},
       }),
     },
     'react-router-dom': { useParams: () => params },
@@ -233,6 +236,8 @@ function fixture({
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/components/SubscriptionPrimitives')
+        return require('./offline-subscription-primitives.cjs')(jsx, react);
       if (name === '@web/components/OperationNotice')
         return {
           __esModule: true,

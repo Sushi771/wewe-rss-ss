@@ -27,6 +27,11 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
   );
   const url = 'https://mmbiz.qpic.cn/exact-resource?wx_fmt=png';
   let root: string, file: string, now: number;
+  let capacityTestWork: Promise<unknown> | undefined;
+  const trackCapacity = (work: () => Promise<void>) => {
+    capacityTestWork = work();
+    return capacityTestWork;
+  };
   let rows: Map<string, SavedMediaSnapshot>;
   let deps: AutomaticMediaDependencies;
   let fetch: jest.Mock, commit: jest.Mock, publish: jest.Mock, stop: jest.Mock;
@@ -51,6 +56,7 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     path.join(root, '.wechat2rss-automatic-media', 'queue.json');
   const state = async () => JSON.parse(await fs.readFile(stateFile(), 'utf8'));
   beforeEach(async () => {
+    capacityTestWork = undefined;
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'automatic-media-offline-'));
     file = path.join(root, 'data.db');
     await fs.writeFile(file, 'synthetic identity only');
@@ -101,8 +107,11 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     };
   });
   afterEach(async () => {
+    // Jest's timeout does not cancel the body. Join it before removing its
+    // files, without converting the timeout into a passing test.
+    await capacityTestWork?.catch(() => undefined);
     await fs.rm(root, { recursive: true, force: true });
-  });
+  }, 40000);
   it('deduplicates an exact URL across articles/jobs/restarts, then stores inline bytes without losing notes', async () => {
     await queue().tick();
     now += 1001;
@@ -298,20 +307,117 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     await queue().tick();
     expect(fetch).toHaveBeenCalledTimes(3);
   });
-  it('pauses before HTTP when its own cache is full and keeps the queue readable', async () => {
+  it.each([0, 1, 600])(
+    'queries volume space once per capacity assessment with %i cache files',
+    async (count) => {
+      deps.canFetch = () => false;
+      const worker = queue();
+      await worker.tick();
+      const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+      for (let n = 0; n < count; n++)
+        await fs.writeFile(
+          path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
+          '{}',
+        );
+      const capacity = worker as unknown as {
+        capacity(required: number): Promise<void>;
+      };
+      const disk = jest.spyOn(fs, 'statfs');
+      try {
+        await capacity.capacity(14_000_000);
+        expect(disk).toHaveBeenCalledTimes(1);
+        expect(disk).toHaveBeenCalledWith(await fs.realpath(folder), {
+          bigint: true,
+        });
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        disk.mockRestore();
+      }
+    },
+  );
+  it('exits on the byte quota before querying volume space or spending HTTP', async () => {
     deps.canFetch = () => false;
-    await queue().tick();
+    const worker = queue();
+    await worker.tick();
     const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
-    for (let n = 0; n < 256; n++)
+    for (let n = 0; n < 153; n++)
       await fs.writeFile(
         path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
         '{}',
       );
-    deps.canFetch = () => true;
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any, 'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name);
+      if (/^[a-f0-9]{64}\.json$/.test(path.basename(String(name)))) Object.assign(result, { size: 14_000_000 });
+      return result;
+    });
+    const capacity = worker as unknown as {
+      capacity(required: number): Promise<void>;
+    };
+    const disk = jest.spyOn(fs, 'statfs');
+    try {
+      await expect(capacity.capacity(14_000_000)).rejects.toThrow(
+        'MEDIA_STORAGE_CAPACITY',
+      );
+      expect(disk).not.toHaveBeenCalled();
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      stat.mockRestore();
+      disk.mockRestore();
+    }
+  });
+  it.each([-1, 0])(
+    'preserves the 4 GiB plus requested reservation disk boundary (delta %i)',
+    async (delta) => {
+      deps.canFetch = () => false;
+      const worker = queue();
+      await worker.tick();
+      const actual = await fs.statfs(root, { bigint: true });
+      const capacity = worker as unknown as {
+        capacity(required: number): Promise<void>;
+      };
+      const disk = jest.spyOn(fs, 'statfs').mockResolvedValue({
+        ...actual,
+        bsize: 1n,
+        bavail: BigInt(4 * 1024 ** 3 + 14_000_000 + delta),
+      });
+      try {
+        if (delta < 0)
+          await expect(capacity.capacity(14_000_000)).rejects.toThrow(
+            'MEDIA_STORAGE_CAPACITY',
+          );
+        else
+          await expect(capacity.capacity(14_000_000)).resolves.toBeUndefined();
+        expect(disk).toHaveBeenCalledTimes(1);
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        disk.mockRestore();
+      }
+    },
+  );
+
+  it('pauses before HTTP when its own cache is full and keeps the queue readable', async () => {
+    deps.canFetch = () => false;
     await queue().tick();
-    expect(fetch).not.toHaveBeenCalled();
-    expect((await state()).articles).toHaveLength(2);
-    expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+    for (let n = 0; n < 153; n++)
+      await fs.writeFile(
+        path.join(folder, `${n.toString(16).padStart(64, '0')}.json`),
+        '{}',
+      );
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any, 'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name);
+      if (/^[a-f0-9]{64}\.json$/.test(path.basename(String(name)))) Object.assign(result, { size: 14_000_000 });
+      return result;
+    });
+    try {
+      deps.canFetch = () => true;
+      await queue().tick();
+      expect(fetch).not.toHaveBeenCalled();
+      expect((await state()).articles).toHaveLength(2);
+      expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    } finally { stat.mockRestore(); }
   });
   it('retains backoff and cached bytes when SQL repeatedly fails, then reports a finite save failure', async () => {
     rows.delete(row(2).id);
@@ -383,4 +489,239 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
     expect(rows.get(row(1).id)!.contentHtml).toContain('data:image/');
     expect(rows.get(row(1).id)!.sourceUrl).toContain('new-saved-proof');
   });
+
+  const bodyLimited = async (count = 3) => {
+    const item = row(
+      1,
+      Array.from({ length: count }, (_, n) => url + '&n=' + n),
+    );
+    item.contentHtml += '<img data-wewe-image-unconfirmed="1">';
+    rows = new Map([[item.id, item]]);
+    commit.mockRejectedValue(Error('MEDIA_BODY_LIMIT'));
+    await queue().tick();
+    expect((await state()).articles[0]).toMatchObject({
+      writes: 4,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+    return item;
+  };
+  it('drains only queued resources after a real body projection limit; restart reuses every cached byte', async () => {
+    const item = row(1, [url, url + '&n=1', url + '&n=2']);
+    item.contentHtml += 'x'.repeat(
+      7_999_700 - Buffer.byteLength(item.contentHtml!),
+    );
+    const before = item.contentHtml;
+    rows = new Map([[item.id, item]]);
+    await queue().tick();
+    expect((await state()).articles[0].code).toBe('MEDIA_BODY_LIMIT');
+    expect(commit).toHaveBeenCalledTimes(1);
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    for (let n = 0; n < 2; n++) {
+      now += 1001;
+      await queue().tick();
+    }
+    now += 60_001;
+    await queue().tick();
+    expect(fetch.mock.calls.map(([source]) => source)).toEqual([
+      url,
+      url + '&n=1',
+      url + '&n=2',
+    ]);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(item.contentHtml).toBe(before);
+    const saved = await state();
+    expect(saved.windowCount).toBe(3);
+    expect(
+      Object.values(saved.resources).map((resource: any) => resource.attempts),
+    ).toEqual([1, 1, 1]);
+    expect(
+      (
+        await fs.readdir(
+          path.join(root, '.wechat2rss-automatic-media', 'bytes'),
+        )
+      ).filter((name) => name.endsWith('.json')),
+    ).toHaveLength(3);
+    expect(publish.mock.lastCall[0][0]).toMatchObject({
+      failed: 1,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+  }, 40_000);
+  it('preserves unknown slots and the body failure after cache completion, without repeated SQL or HTTP', async () => {
+    const item = await bodyLimited();
+    const before = item.contentHtml;
+    for (let n = 0; n < 3; n++) {
+      now += 60_001;
+      await queue().tick();
+    }
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(item.contentHtml).toBe(before);
+    expect(item.contentHtml).toContain('data-wewe-image-unconfirmed');
+    expect(publish.mock.lastCall[0][0]).toMatchObject({
+      failed: 1,
+      unconfirmed: 1,
+      code: 'MEDIA_BODY_LIMIT',
+    });
+  });
+  it('retains the persisted hourly allowance and download gate in cache-only mode', async () => {
+    await bodyLimited();
+    const saved = await state();
+    saved.windowCount = 120;
+    await fs.writeFile(stateFile(), JSON.stringify(saved));
+    now += 1001;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(120);
+    now += 3_600_001;
+    deps.canFetch = () => false;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    deps.canFetch = () => true;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await state()).windowCount).toBe(1);
+  });
+  it('keeps cache-only retry backoff finite and preserves blocked-source stops across restart', async () => {
+    await bodyLimited();
+    fetch.mockRejectedValue(new ImageRequestTransientError());
+    for (const gap of [1001, 60_001, 300_001, 1_800_001]) {
+      now += gap;
+      await queue().tick();
+    }
+    const saved = await state();
+    const failed = Object.values(saved.resources).find(
+      (resource: any) => resource.state === 'failed',
+    );
+    expect(failed).toMatchObject({
+      attempts: 4,
+      code: 'MEDIA_RETRY_EXHAUSTED',
+    });
+    fetch.mockRejectedValue(new ImageRequestBlockedError(403));
+    now += 1001;
+    await queue().tick();
+    now += 86_400_000;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect((await state()).blocked).toBe(true);
+    expect(publish.mock.lastCall[1]).toBe('IMAGE_REQUEST_BLOCKED');
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+  it('does not spend an attempt when capacity fails in cache-only mode', async () => {
+    await bodyLimited();
+    const actual = await fs.statfs(root, { bigint: true });
+    const disk = jest
+      .spyOn(fs, 'statfs')
+      .mockResolvedValue({ ...actual, bsize: 1n, bavail: 4n * 1024n ** 3n });
+    try {
+      now += 1001;
+      await queue().tick();
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect((await state()).windowCount).toBe(1);
+      expect(publish.mock.lastCall[1]).toBe('MEDIA_STORAGE_CAPACITY');
+    } finally {
+      disk.mockRestore();
+    }
+  });
+  it('closing cache-only work before dispatch spends nothing; reopening resumes without resetting history', async () => {
+    const item = await bodyLimited();
+    now += 1001;
+    const worker = queue();
+    deps.load = async () => {
+      worker.close();
+      return { ...item };
+    };
+    await worker.tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(1);
+    deps.load = async () => ({ ...item });
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((await state()).windowCount).toBe(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+  });
+  it('keeps successful cache-only bytes on close during HTTP and never downloads them again', async () => {
+    await bodyLimited(2);
+    now += 1001;
+    const worker = queue();
+    fetch.mockImplementationOnce(async () => {
+      worker.close();
+      return { bytes: png, type: 'image/png' };
+    });
+    await worker.tick();
+    now += 60_001;
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect((await state()).windowCount).toBe(2);
+    expect(
+      (
+        await fs.readdir(
+          path.join(root, '.wechat2rss-automatic-media', 'bytes'),
+        )
+      ).filter((name) => name.endsWith('.json')),
+    ).toHaveLength(2);
+  });
+  it('does not reuse an old body-limit exemption for a changed or conflicting author snapshot', async () => {
+    const item = await bodyLimited();
+    item.sourceUrl = row(3).sourceUrl;
+    now += 60_001;
+    await queue().tick();
+    await queue().tick();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await state()).articles[0].code).toBe('MEDIA_IDENTITY_UNVERIFIED');
+  });
+  it('2GiB isolated: serialized bytes plus 14MB reservation has an exact boundary across restart', () => trackCapacity(async () => {
+    const started = performance.now();
+    deps.canFetch = () => false;
+    const worker = queue(); await worker.tick();
+    const folder = path.join(root, '.wechat2rss-automatic-media', 'bytes');
+    for (let n=0;n<153;n++) await fs.writeFile(path.join(folder, `${n.toString(16).padStart(64,'0')}.json`), '{}');
+    const prepared = performance.now();
+    const original = fs.lstat.bind(fs);
+    const stat = jest.spyOn(fs as any,'lstat').mockImplementation(async (name: any) => {
+      const result = await original(name); const base = path.basename(String(name));
+      const n = parseInt(base.slice(0,64),16);
+      if (/^[a-f0-9]{64}\.json$/.test(base) && n < 153) Object.assign(result,{size:n<152?14_000_000:5_483_648});
+      return result;
+    });
+    try {
+      const first=worker as unknown as {capacity(n:number):Promise<void>};
+      await expect(first.capacity(14_000_000)).resolves.toBeUndefined();
+      await expect(first.capacity(14_000_001)).rejects.toThrow('MEDIA_STORAGE_CAPACITY');
+      const checked = performance.now();
+      const restarted=queue(); await restarted.tick();
+      const again=restarted as unknown as {capacity(n:number):Promise<void>};
+      await expect(again.capacity(14_000_000)).resolves.toBeUndefined();
+      expect(fetch).not.toHaveBeenCalled();
+      console.info('capacity timing ms', { setup: Math.round(prepared-started), checks: Math.round(checked-prepared), restart: Math.round(performance.now()-checked) });
+    } finally {stat.mockRestore();}
+  }));
+  it('2GiB isolated: concurrent queue instances serialize one outbound attempt', async () => {
+    rows = new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
+    fetch.mockImplementation(async()=>{ await new Promise((resolve)=>setTimeout(resolve,100)); return {bytes:png,type:'image/png'}; });
+    const a=queue(), b=queue(); await Promise.all([a.tick(),b.tick()]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('2GiB isolated: concurrent reservation near quota never starts a second fetch after restart', () => trackCapacity(async () => {
+    const started = performance.now();
+    deps.canFetch=()=>false; rows=new Map([row(1),row(2,[url+'&n=2'])].map((entry)=>[entry.id,entry]));
+    const first=queue(); await first.tick();
+    const folder=path.join(root,'.wechat2rss-automatic-media','bytes');
+    for(let n=0;n<153;n++) await fs.writeFile(path.join(folder,`${n.toString(16).padStart(64,'0')}.json`),'{}');
+    const prepared = performance.now();
+    const original=fs.lstat.bind(fs);
+    const stat=jest.spyOn(fs as any,'lstat').mockImplementation(async(name:any)=>{const result=await original(name);const base=path.basename(String(name));const n=parseInt(base.slice(0,64),16);if(/^[a-f0-9]{64}\.json$/.test(base)&&n<153)Object.assign(result,{size:n<152?14_000_000:5_483_648});return result;});
+    try {
+      deps.canFetch=()=>true; fetch.mockImplementation(async()=>{await new Promise((resolve)=>setTimeout(resolve,100));return {bytes:png,type:'image/png'};});
+      await Promise.all([first.tick(),queue().tick()]); expect(fetch).toHaveBeenCalledTimes(1);
+      const concurrent = performance.now();
+      now+=1001; await queue().tick(); expect(fetch).toHaveBeenCalledTimes(1);
+      expect(publish).toHaveBeenCalledWith(expect.anything(),'MEDIA_STORAGE_CAPACITY');
+      console.info('capacity concurrency timing ms', { setup: Math.round(prepared-started), concurrent: Math.round(concurrent-prepared), restart: Math.round(performance.now()-concurrent) });
+    } finally {stat.mockRestore();}
+  }));
+
 });

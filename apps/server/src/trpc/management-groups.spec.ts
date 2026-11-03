@@ -1,3 +1,4 @@
+const noteKey = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -27,7 +28,7 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      { encoding: 'utf8', windowsHide: true, cwd: path.resolve(__dirname, '../..') },
     );
     if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
   },
@@ -65,6 +66,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
     errorMsg: string | null = null,
     source?: XhsSource,
     collection: any = {},
+    client: PrismaClient = prisma,
   ) => {
     const config = new ConfigService({
       auth: { code: 'fixture' },
@@ -72,15 +74,15 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       feed: { updateDelayTime: 0 },
     });
     const service = new TrpcService(
-      prisma as any,
+      client as any,
       config,
       {} as any,
       collection,
     );
-    const xhs = new XiaohongshuService(prisma as any, source);
+    const xhs = new XiaohongshuService(client as any, source);
     const router = new TrpcRouter(
       service,
-      prisma as any,
+      client as any,
       config,
       {} as any,
       {} as any,
@@ -156,10 +158,10 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         id,
       );
     for (const [id, creatorId, status] of [
-      ['note-a', 'creator-a', 'complete'],
-      ['note-b', 'creator-a', 'complete'],
-      ['note-other', 'creator-b', 'complete'],
-      ['note-video', 'creator-a', 'video-skipped'],
+      [noteKey('note-a'), 'creator-a', 'complete'],
+      [noteKey('note-b'), 'creator-a', 'complete'],
+      [noteKey('note-other'), 'creator-b', 'complete'],
+      [noteKey('note-video'), 'creator-a', 'video-skipped'],
     ])
       await prisma.xhsNote.create({
         data: {
@@ -361,13 +363,26 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       const snapshots = jest
         .spyOn(backup, 'createVerifiedSqliteBackup')
         .mockRejectedValue(new Error('UNEXPECTED_FULL_BACKUP'));
-      await prisma.$executeRawUnsafe('PRAGMA synchronous=OFF');
+      // SQLite synchronous is connection-local. Use a dedicated single-connection
+      // pool so the transaction exercises the very connection configured here.
+      const guarded = new PrismaClient({ datasources: { db: { url: `${process.env.DATABASE_URL}?connection_limit=1` } } });
+      await guarded.$executeRawUnsafe('PRAGMA synchronous=OFF');
+      let actualSynchronous: number | undefined;
+      const transaction = guarded.$transaction.bind(guarded);
+      const observed = jest.spyOn(guarded, '$transaction').mockImplementationOnce(((action: any) =>
+        transaction(async (tx) => {
+          const rows = await tx.$queryRawUnsafe<Array<{ synchronous: number }>>('PRAGMA synchronous');
+          actualSynchronous = Number(rows[0]?.synchronous);
+          return action(tx);
+        })) as any);
       try {
-        await expect(operation(caller().api)).rejects.toThrow(
+        await expect(operation(caller(null, undefined, {}, guarded).api)).rejects.toThrow(
           'INCREMENTAL_DURABILITY_MODE_UNPROVED',
         );
+        expect(actualSynchronous).toBe(0);
       } finally {
-        await prisma.$executeRawUnsafe('PRAGMA synchronous=FULL');
+        observed.mockRestore();
+        await guarded.$disconnect();
       }
       const volume = await fs.statfs(root, { bigint: true });
       const disk = jest
@@ -944,8 +959,8 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
   it('exports only selected complete same-creator notes in an actual ZIP, rejecting foreign and incomplete selections', async () => {
     const { api } = caller();
     for (const noteIds of [
-      ['note-a', 'note-other'],
-      ['note-video'],
+      [noteKey('note-a'), noteKey('note-other')],
+      [noteKey('note-video')],
       ['missing'],
       [],
     ])
@@ -954,7 +969,7 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
       ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     const result = await api.xiaohongshu.export({
       creatorId: 'creator-a',
-      noteIds: ['note-a', 'note-a'],
+      noteIds: [noteKey('note-a'), noteKey('note-a')],
     });
     expect(result.notes).toBe(1);
     const zip = path.join(root, 'selected.zip');

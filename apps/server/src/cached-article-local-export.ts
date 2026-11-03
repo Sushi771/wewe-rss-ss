@@ -1,3 +1,4 @@
+import { readAutomaticMediaImage } from './feeds/automatic-media-queue';
 import { load } from 'cheerio';
 import { createHash } from 'node:crypto';
 import { Article } from '@prisma/client';
@@ -40,7 +41,8 @@ export function prepareCachedArticleLocalExport(
       snapshot,
       '',
       directory,
-      fetchAllowedImage,
+      async (url) =>
+        (await readAutomaticMediaImage(url)) || fetchAllowedImage(url),
       'image',
       limits,
       allowPartialImages,

@@ -11,7 +11,21 @@ type Admission = {
   active: boolean;
 };
 const context = new AsyncLocalStorage<Admission>();
+const transactionChecks = new AsyncLocalStorage<{admission:Admission;active:boolean}>();
 const key = (s: { dev: bigint; ino: bigint }) => `${s.dev}/${s.ino}`;
+
+/** Only a caller that holds an active incremental admission may bracket one
+ * interactive transaction. Detached callbacks cannot reuse an expired scope. */
+export async function withIncrementalTransactionChecks<T>(work:()=>Promise<T>):Promise<T> {
+  const admission=context.getStore();
+  if(!admission?.active)throw new Error('INCREMENTAL_ADMISSION_EXPIRED');
+  const scope={admission,active:true};
+  try{return await transactionChecks.run(scope,async()=>{await check(admission);const result=await work();await check(admission);return result;});}finally{scope.active=false;}
+}
+export function canReuseIncrementalTransactionChecks():boolean {
+  const scope=transactionChecks.getStore();
+  return !!scope?.active && scope.admission.active && context.getStore()===scope.admission;
+}
 
 /** Physical source-volume space only. Recovery-copy count/byte budgets are unrelated. */
 async function check(admission: Admission) {
@@ -46,7 +60,7 @@ export async function assertIncrementalTransaction(
     !['delete', 'truncate', 'persist', 'wal'].includes(journal[0]?.journal_mode)
   )
     throw new Error('INCREMENTAL_DURABILITY_MODE_UNPROVED');
-  await assertIncrementalWriteAdmission();
+  if(!canReuseIncrementalTransactionChecks())await assertIncrementalWriteAdmission();
 }
 
 export async function incrementalWrite<T>(
