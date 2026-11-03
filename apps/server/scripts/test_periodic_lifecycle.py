@@ -96,6 +96,52 @@ class LifecycleTests(unittest.TestCase):
         plan,approval,resources,now,policy=inputs
         return r.execute_periodic_batch(plan,approval,resources,now=now,policy=policy)
 
+    def test_protected_backup_preserves_held_periodic_allocation(self):
+        self.fill(); marker=self.root/'.space-budget.lock'; before=marker.read_bytes(); state_before=self.state(); points=self.copies()
+        self.change()
+        report=backup.create_backup(self.database,self.root)
+        self.assertEqual(report['recoveryOrigin']['kind'],'protected');self.assertEqual(report['integrityCheck'],'ok')
+        self.assertEqual(marker.read_bytes(),before);self.assertEqual(self.state(),state_before)
+        self.assertEqual(self.copies(),points);self.assertTrue(all(p.exists() for p in points))
+        with closing(sqlite3.connect(Path(report['backup']).as_uri()+'?mode=ro',uri=True)) as copied:
+            self.assertEqual(copied.execute('SELECT count(*) FROM articles').fetchone()[0],5)
+        again=backup.create_backup(self.database,self.root);self.assertTrue(again['reused']);self.assertEqual(again['backup'],report['backup'])
+        self.assertEqual(marker.read_bytes(),before);self.assertEqual(self.state(),state_before)
+
+    def test_protected_backup_cli_with_held_periodic_allocation(self):
+        self.fill();marker=self.root/'.space-budget.lock';before=marker.read_bytes();state_before=self.state();self.change()
+        script=Path(__file__).with_name('backup-sqlite.py')
+        result=subprocess.run([sys.executable,str(script),'--database',str(self.database),'--backup-root',str(self.root)],capture_output=True,text=True,timeout=55)
+        self.assertEqual(result.returncode,0,msg=result.stderr)
+        report=json.loads(result.stdout);self.assertEqual(report['recoveryOrigin']['kind'],'protected');self.assertEqual(report['integrityCheck'],'ok')
+        self.assertEqual(marker.read_bytes(),before);self.assertEqual(self.state(),state_before)
+
+    def test_protected_backup_pins_marker_and_retains_budget_limit(self):
+        self.fill(); marker=self.root/'.space-budget.lock'; original=marker.read_bytes(); self.change()
+        with patch.dict(os.environ,{'SQLITE_TEST_MAX_COPIES':'1'}):
+            with self.assertRaisesRegex(ValueError,'SQLITE_SPACE_BUDGET_EXCEEDED'):backup.create_backup(self.database,self.root)
+        self.assertEqual(marker.read_bytes(),original);self.assertEqual(len(list(self.root.glob('before-collection-*'))),0)
+        native=backup._create_backup;attempts=[]
+        def guarded(*args,**kwargs):
+            for operation in (lambda:marker.write_bytes(b'foreign'),lambda:marker.unlink()):
+                with self.assertRaises(PermissionError):operation()
+                attempts.append(True)
+            return native(*args,**kwargs)
+        with patch.object(backup,'_create_backup',guarded):report=backup.create_backup(self.database,self.root)
+        self.assertEqual(attempts,[True,True]);self.assertEqual(report['recoveryOrigin']['kind'],'protected')
+        self.assertEqual(marker.read_bytes(),original);self.assertEqual(self.state()['status'],'pending-confirmation')
+
+    def test_protected_backup_refuses_unverified_or_held_marker(self):
+        self.fill(); marker=self.root/'.space-budget.lock'; original=marker.read_bytes(); self.change()
+        marker.write_text('{"format":"foreign"}')
+        with self.assertRaises((ValueError,OSError,Exception)):backup.create_backup(self.database,self.root)
+        self.assertEqual(marker.read_text(),'{"format":"foreign"}');self.assertEqual(len(list(self.root.glob('before-collection-*'))),0)
+        marker.write_bytes(original)
+        # Altering an owned marker also changes its pinned identity; it must not
+        # be adopted even if the JSON bytes are restored.
+        with self.assertRaises(Exception):backup.create_backup(self.database,self.root)
+        self.assertEqual(len(list(self.root.glob('before-collection-*'))),0)
+
     def test_changed_restart_not_due_and_unchanged_complete_proof_preserve_original_generation(self):
         first=self.create();original=self.state()['lastGenerationEpoch']
         for _ in range(3):

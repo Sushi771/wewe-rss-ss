@@ -549,6 +549,35 @@ def _create_backup_legacy(database, backup_root, prefix="before-collection", tim
         # High-risk callers retain their existing protected-origin requirement.
         report = reusable(database, backup_root, deadline,
                           allow_periodic=prefix == 'periodic-snapshot')
+        if report is None and not automatic and lease.exists():
+            # A lifecycle allocation is a durable barrier, not an abandoned
+            # pathname lock. Keep it pinned while taking a separately budgeted
+            # protected backup under the same full-snapshot lock. Unknown,
+            # changing, or incomplete lifecycle state remains blocked.
+            if os.name != 'nt':
+                raise ValueError('SQLITE_PERIODIC_NATIVE_RELEASE_REQUIRED')
+            lifecycle = periodic_lifecycle()
+            if not all(p.exists() for p in lifecycle.paths(database, backup_root)):
+                raise FileExistsError('SQLite backup allocation is already held')
+            retention = lifecycle.retention()
+            with lifecycle.Store(database, backup_root) as store:
+                if store.state['status'] != 'pending-confirmation':
+                    raise ValueError('SQLITE_PERIODIC_LIFECYCLE_HELD')
+                marker, stamp = lifecycle.marker(store)
+                with retention.WindowsPin(marker, stamp, sharing=1) as pin:
+                    expected = store.state['allocation']['sha256']
+                    def check_barrier():
+                        lock.check()
+                        if store.read() != store.raw or lifecycle.marker(store)[1] != stamp:
+                            raise ValueError('SQLITE_PERIODIC_LIFECYCLE_HELD')
+                        if pin.sha(retention.ReadBudget(128 * 1024, 2)) != expected:
+                            raise ValueError('SQLITE_PERIODIC_LIFECYCLE_HELD')
+                    check_barrier()
+                    space_preflight(database, backup_root, deadline)
+                    check_barrier()
+                    report = _create_backup(database, backup_root, prefix,
+                                            deadline - time.monotonic(), diagnostics, copy_timeout)
+                    check_barrier()
         if report is None:
             initial=space_preflight(database, backup_root,deadline,reserve=automatic)
             backup_root.mkdir(parents=True, exist_ok=True)
