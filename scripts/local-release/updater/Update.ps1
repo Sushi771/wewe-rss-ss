@@ -24,7 +24,7 @@ $button.Enabled = $false
 $button.Add_Click({ $form.Close() })
 $form.Controls.AddRange(@($label, $bar, $button))
 $process = New-Object System.Diagnostics.Process
-$process.StartInfo.FileName = Join-Path $PSScriptRoot 'runtime\node.exe'
+$process.StartInfo.FileName = Join-Path (Split-Path $PSScriptRoot -Parent) 'runtime\node.exe'
 $process.StartInfo.Arguments = '"' + (Join-Path $PSScriptRoot 'update-entry.cjs') + '"'
 $process.StartInfo.UseShellExecute = $false
 $process.StartInfo.CreateNoWindow = $true

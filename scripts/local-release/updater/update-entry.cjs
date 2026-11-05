@@ -27,6 +27,10 @@ async function runUpdate({
   recoveryOnly = false,
   report = () => {},
 }) {
+  if (typeof host?.runMaintenance === 'function') {
+    const result = await host.runMaintenance({ request, recoveryOnly, report });
+    return result;
+  }
   // The installed host retains existing package/source validation, shared
   // startup exclusion and private data locations. The user never enters them.
   if (
@@ -65,7 +69,17 @@ async function main() {
   const hostFile = path.join(__dirname, 'installed-host.cjs');
   if (!fs.existsSync(hostFile))
     throw new Error('INSTALLED_UPDATE_HOST_REQUIRED');
-  const host = require(hostFile);
+  const bindingsFile = path.join(__dirname, 'installed-host-bindings.json');
+  const mode = fs.existsSync(bindingsFile)
+    ? JSON.parse(fs.readFileSync(bindingsFile, 'utf8').replace(/^\uFEFF/, ''))
+        .mode
+    : undefined;
+  const host =
+    mode === 'maintenance-driver-v1'
+      ? require('./maintenance-entry.cjs').createMaintenanceEntry({
+          bindingsFile,
+        })
+      : require(hostFile);
   const request = recoveryOnly
     ? undefined
     : JSON.parse(
