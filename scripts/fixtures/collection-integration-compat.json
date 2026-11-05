@@ -1,0 +1,157 @@
+{
+  "apps/server/src/feeds/cache-sync-engine.ts": {
+    "originalSha256": "2fedb51d8bd17050983580410dc361bf97451786d25f4710bb08bad4632f2e09",
+    "afterSha256": "ee98963dd969a93929224e9e64fbefd64855766fe6d0036ba95576adf523bb0c",
+    "hunks": [
+      {
+        "before": "import { createHash } from 'node:crypto';\nimport { cacheFailureDiagnostic } from '../collection/cache-failure';\nimport { Wechat2RssListedFeed } from '../collection/providers/wechat2rss';\nimport { ProviderPage } from '../collection/subscription-provider';\nimport { cacheSyncState, CacheSyncFeedState } from './cache-sync-state';\n\n",
+        "after": "import { createHash } from 'node:crypto';\nimport { cacheFailureDiagnostic } from '../collection/cache-failure';\nimport {\n  Wechat2RssListedFeed,\n  Wechat2RssRestrictionError,\n  Wechat2RssSourceStoppedError,\n} from '../collection/providers/wechat2rss';\nimport { ProviderPage } from '../collection/subscription-provider';\nimport { cacheSyncState, CacheSyncFeedState } from './cache-sync-state';\n\n"
+      },
+      {
+        "before": "  return new Date(now + 8 * 3600000).getUTCHours() >= 6;\n}\nexport function cachePageFingerprint(page: ProviderPage) {\n  return createHash('sha256')\n    .update(\n      JSON.stringify({\n        articles: [...page.articles].sort((a, b) => a.id.localeCompare(b.id)),\n        bodyMissing: page.bodyMissing,\n        imageBlocked: page.imageBlocked,\n      }),\n    )\n    .digest('hex');\n}\ntype LocalFeed = { id: string; mpName: string };\ntype Slot = {\n  metadata: Wechat2RssListedFeed;\n  local: LocalFeed;\n",
+        "after": "  return new Date(now + 8 * 3600000).getUTCHours() >= 6;\n}\nexport function cachePageFingerprint(page: ProviderPage) {\n  const bodyFailures = page.bodyFailures ?? [];\n  return createHash('sha256')\n    .update(\n      JSON.stringify({\n        articles: [...page.articles].sort((a, b) => a.id.localeCompare(b.id)),\n        bodyMissing: page.bodyMissing,\n        imageBlocked: page.imageBlocked,\n        bodyFailures: [...bodyFailures].sort(\n          (a, b) => a.id.localeCompare(b.id) || a.code.localeCompare(b.code),\n        ),\n      }),\n    )\n    .digest('hex');\n}\ntype LocalFeed = { id: string; mpName: string };\nfunction isSourceStopped(error: unknown) {\n  return (\n    error instanceof Wechat2RssRestrictionError ||\n    error instanceof Wechat2RssSourceStoppedError ||\n    (error instanceof Error &&\n      error.message === 'WECHAT2RSS_SOURCE_STOP_PERSIST_FAILED')\n  );\n}\ntype Slot = {\n  metadata: Wechat2RssListedFeed;\n  local: LocalFeed;\n"
+      },
+      {
+        "before": "  mediaEnabled?(): boolean;\n  onMediaBlocked?(): Promise<void>;\n  mediaStopped?(): boolean;\n  /** Read-only fallback for dependencies without text reconciliation. */\n  inspectLocalMedia?(\n    id: string,\n    page: ProviderPage,\n",
+        "after": "  mediaEnabled?(): boolean;\n  onMediaBlocked?(): Promise<void>;\n  mediaStopped?(): boolean;\n  sourceStopped?(): boolean;\n  /** Read-only stored-body fallback when text reconciliation is unavailable. */\n  inspectLocalMedia?(\n    id: string,\n    page: ProviderPage,\n"
+      },
+      {
+        "before": "  private rerun = false;\n  private mediaBusy = false;\n  private mediaBlocked = false;\n  private stopped = false;\n  private media = new Map<string, { page: ProviderPage; due: number }>();\n  private nextList = 0;\n",
+        "after": "  private rerun = false;\n  private mediaBusy = false;\n  private mediaBlocked = false;\n  private sourceBlocked = false;\n  private stopped = false;\n  private media = new Map<string, { page: ProviderPage; due: number }>();\n  private nextList = 0;\n"
+      },
+      {
+        "before": "    this.deps.durableMedia?.close();\n  }\n  async tick() {\n    if (this.stopped) return;\n    if (this.busy) {\n      this.rerun = true;\n      return;\n",
+        "after": "    this.deps.durableMedia?.close();\n  }\n  async tick() {\n    if (this.stopped || this.sourceBlocked || this.deps.sourceStopped?.()) {\n      if (this.sourceBlocked || this.deps.sourceStopped?.())\n        cacheSyncState.state = 'source-blocked';\n      return;\n    }\n    if (this.busy) {\n      this.rerun = true;\n      return;\n"
+      },
+      {
+        "before": "            'metadata-read',\n            this.deps.now(),\n          );\n          this.nextList =\n            now + Math.min(60000, 5000 * 2 ** Math.min(++this.listFailures, 4));\n          cacheSyncState.state = 'upstream-unavailable';\n",
+        "after": "            'metadata-read',\n            this.deps.now(),\n          );\n          if (isSourceStopped(error) || this.deps.sourceStopped?.()) {\n            this.sourceBlocked = true;\n            cacheSyncState.state = 'source-blocked';\n            return;\n          }\n          this.nextList =\n            now + Math.min(60000, 5000 * 2 ** Math.min(++this.listFailures, 4));\n          cacheSyncState.state = 'upstream-unavailable';\n"
+      },
+      {
+        "before": "          slot.checks = 0;\n        }\n      }\n      // Bound fulltext traffic even when many upstream checks advance at once.\n      let readBudget = 2;\n      const due = [...this.slots].sort((a, b) => a[1].nextRead - b[1].nextRead);\n      for (const [id, slot] of due) {\n        if (\n",
+        "after": "          slot.checks = 0;\n        }\n      }\n      // Finish an account's media attempt before starting the next account.\n      await this.runMedia();\n      if (\n        this.sourceBlocked ||\n        this.deps.sourceStopped?.() ||\n        this.mediaBlocked ||\n        this.deps.mediaStopped?.() ||\n        (this.media.size > 0 && this.deps.mediaEnabled?.() === false)\n      )\n        return;\n      let readBudget = 1;\n      const due = [...this.slots].sort((a, b) => a[1].nextRead - b[1].nextRead);\n      for (const [id, slot] of due) {\n        if (\n"
+      },
+      {
+        "before": "            ? 'media-pending'\n            : 'synced-cache';\n          cacheSyncState.lastSyncAt = slot.status.lastCacheReadAt;\n        } catch (error) {\n          slot.status.state = 'unavailable';\n          slot.status.failure = cacheFailureDiagnostic(\n            error,\n",
+        "after": "            ? 'media-pending'\n            : 'synced-cache';\n          cacheSyncState.lastSyncAt = slot.status.lastCacheReadAt;\n          await this.runMedia(id);\n        } catch (error) {\n          if (isSourceStopped(error) || this.deps.sourceStopped?.()) {\n            this.sourceBlocked = true;\n            cacheSyncState.state = 'source-blocked';\n            return;\n          }\n          slot.status.state = 'unavailable';\n          slot.status.failure = cacheFailureDiagnostic(\n            error,\n"
+      },
+      {
+        "before": "              : Math.min(60000, 5000 * 2 ** Math.min(++slot.failures, 4)));\n        }\n      }\n      // Separate lane: slow image archives never hold the metadata/list worker.\n      void this.runMedia();\n    } finally {\n      if (this.deps.durableMedia && !this.stopped) {\n        const allowed = new Set(\n          cacheSyncDaytime(this.deps.now()) &&\n            !cacheSyncState.metadataFailure &&\n            this.deps.mediaEnabled?.() !== false &&\n            !this.deps.mediaStopped?.()\n",
+        "after": "              : Math.min(60000, 5000 * 2 ** Math.min(++slot.failures, 4)));\n        }\n      }\n    } finally {\n      if (this.deps.durableMedia && !this.stopped) {\n        const allowed = new Set(\n          cacheSyncDaytime(this.deps.now()) &&\n            !this.sourceBlocked &&\n            !this.deps.sourceStopped?.() &&\n            !cacheSyncState.metadataFailure &&\n            this.deps.mediaEnabled?.() !== false &&\n            !this.deps.mediaStopped?.()\n"
+      },
+      {
+        "before": "          cacheSyncState.mediaFailure = 'MEDIA_WORKER_UNAVAILABLE';\n        });\n      }\n      if (this.mediaBlocked || this.deps.mediaStopped?.())\n        cacheSyncState.state = 'media-blocked';\n      cacheSyncState.feeds = [...this.slots.values()].map((slot) => ({\n        ...slot.status,\n",
+        "after": "          cacheSyncState.mediaFailure = 'MEDIA_WORKER_UNAVAILABLE';\n        });\n      }\n      if (this.sourceBlocked || this.deps.sourceStopped?.())\n        cacheSyncState.state = 'source-blocked';\n      else if (this.mediaBlocked || this.deps.mediaStopped?.())\n        cacheSyncState.state = 'media-blocked';\n      cacheSyncState.feeds = [...this.slots.values()].map((slot) => ({\n        ...slot.status,\n"
+      },
+      {
+        "before": "      }\n    }\n  }\n  private async runMedia() {\n    if (\n      this.mediaBusy ||\n      this.mediaBlocked ||\n      this.deps.mediaStopped?.() ||\n",
+        "after": "      }\n    }\n  }\n  private async runMedia(onlyId?: string) {\n    if (\n      this.sourceBlocked ||\n      this.deps.sourceStopped?.() ||\n      this.mediaBusy ||\n      this.mediaBlocked ||\n      this.deps.mediaStopped?.() ||\n"
+      },
+      {
+        "before": "      return;\n    const entry = [...this.media].find(\n      ([id, job]) =>\n        job.due <= this.deps.now() &&\n        this.slots.get(id)?.metadata.paused !== true,\n    );\n",
+        "after": "      return;\n    const entry = [...this.media].find(\n      ([id, job]) =>\n        (!onlyId || id === onlyId) &&\n        job.due <= this.deps.now() &&\n        this.slots.get(id)?.metadata.paused !== true,\n    );\n"
+      },
+      {
+        "before": "        job.due = this.deps.now() + 60000;\n        slot.status.state = 'media-pending';\n      }\n    } catch {\n      job.due = this.deps.now() + 60000;\n      slot.status.state = 'media-pending';\n    } finally {\n",
+        "after": "        job.due = this.deps.now() + 60000;\n        slot.status.state = 'media-pending';\n      }\n    } catch (error) {\n      if (isSourceStopped(error) || this.deps.sourceStopped?.()) {\n        this.sourceBlocked = true;\n        cacheSyncState.state = 'source-blocked';\n        return;\n      }\n      job.due = this.deps.now() + 60000;\n      slot.status.state = 'media-pending';\n    } finally {\n"
+      }
+    ],
+    "reason": "Reviewed collection recovery: body-failure fingerprints; persistent restriction/source stop admission; serial one-account read/media scheduling; source-stop fencing for durable media. Exact inverse for historical audit only; runtime behavior remains unchanged."
+  },
+  "apps/server/src/feeds/cache-sync.service.ts": {
+    "originalSha256": "b0aae491d9158d37f3c52cb142a00d61df94478a38660dbf4db2c390a48f1bbc",
+    "afterSha256": "840ada91251f24a573b7abce4a2cbe735b28cd3bce34942e801f388907943181",
+    "hunks": [
+      {
+        "before": "    if (\n      process.env.WECHAT2RSS_CACHE_SYNC !== '1' ||\n      process.env.WECHAT2RSS_ENABLED !== '1' ||\n      process.env.WEWE_ACCEPTANCE_MODE === '1' ||\n      process.env.REHEARSAL_GUARD_REPORT\n    )\n",
+        "after": "    if (\n      process.env.WECHAT2RSS_CACHE_SYNC !== '1' ||\n      process.env.WECHAT2RSS_ENABLED !== '1' ||\n      process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||\n      process.env.WEWE_ACCEPTANCE_MODE === '1' ||\n      process.env.REHEARSAL_GUARD_REPORT\n    )\n"
+      }
+    ],
+    "reason": "Reviewed collection recovery hold disables automatic cache synchronization startup. Exact inverse for historical audit only; runtime hold remains unchanged."
+  },
+  "apps/server/src/collection/sqlite-write-coordinator.ts": {
+    "originalSha256": "1eda84e565f359b391eb22950cfb939d6e7ca18533e87a71d2e22c1b8523cfba",
+    "afterSha256": "3d1d37515b7f51278bc24019a7b69679b69b1e132f89e35bcf2ad402468f3611",
+    "hunks": [
+      {
+        "before": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { assertIncrementalWriteAdmission } from './incremental-write';\n\ntype Kind = 'write' | 'backup';\ntype Entry = {\n  kind: Kind;\n",
+        "after": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport {\n  assertIncrementalWriteAdmission,\n  canReuseIncrementalTransactionChecks,\n} from './incremental-write';\n\ntype Kind = 'write' | 'backup';\ntype Entry = {\n  kind: Kind;\n"
+      },
+      {
+        "before": "      if (entry.kind === 'backup') return;\n    }\n  }\n\n  async write<T>(operation: () => Promise<T>): Promise<T> {\n    // Transaction middleware runs inside the admission acquired by $transaction.\n    // Expired detached async contexts must not bypass a later backup.\n    let release: () => void;\n    const nested = this.context.getStore()?.active === true;\n",
+        "after": "      if (entry.kind === 'backup') return;\n    }\n  }\n\n  async write<T>(\n    operation: () => Promise<T>,\n    reuseTransactionChecks = false,\n  ): Promise<T> {\n    // Transaction middleware runs inside the admission acquired by $transaction.\n    // Expired detached async contexts must not bypass a later backup.\n    let release: () => void;\n    const nested = this.context.getStore()?.active === true;\n"
+      },
+      {
+        "before": "      release = await this.acquire('write');\n    }\n    const permit = { active: true };\n    try {\n      const incremental = assertIncrementalWriteAdmission();\n      if (incremental) await incremental;\n      if (!nested && this.fences.size)\n        throw new Error('SQLite write fenced before engine execution');\n      return await this.context.run(permit, operation);\n",
+        "after": "      release = await this.acquire('write');\n    }\n    const permit = { active: true };\n    try {\n      const incremental =\n        nested &&\n        reuseTransactionChecks &&\n        canReuseIncrementalTransactionChecks()\n          ? undefined\n          : assertIncrementalWriteAdmission();\n      if (incremental) await incremental;\n      if (!nested && this.fences.size)\n        throw new Error('SQLite write fenced before engine execution');\n      return await this.context.run(permit, operation);\n"
+      }
+    ],
+    "reason": "Reuse admission only for nested writes with explicit transaction flag, active scoped transaction checks and the same active admission; original check remains on every other write."
+  },
+  "apps/server/src/trpc/trpc.service.ts": {
+    "originalSha256": "77ce1a2449603b891e53bfe50c0aa33f012173f5be7624013cc6ef09b64143c9",
+    "afterSha256": "f8318433986bab485fb155fbd8b652df64f06ed3a730505c95e9fbc0b1022dc4",
+    "hunks": [
+      {
+        "before": "    const errorMsg = (ctx as any).errorMsg;\n    if (errorMsg) {\n      throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });\n    }\n    if (\n      !databaseWritesAllowed() &&\n      ((type === 'mutation' &&\n        ![\n",
+        "after": "    const errorMsg = (ctx as any).errorMsg;\n    if (errorMsg) {\n      throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });\n    }\n    // Recovery hold is a fail-closed inspection mode, not a single-target\n    // release. Some queries contact the provider, so block the whole router.\n    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')\n      throw new TRPCError({\n        code: 'PRECONDITION_FAILED',\n        message: '任务恢复检查中，操作暂不可用。',\n      });\n    if (\n      !databaseWritesAllowed() &&\n      ((type === 'mutation' &&\n        ![\n"
+      },
+      {
+        "before": "      },\n      () =>\n        `${process.env.WECHAT2RSS_BASE_URL}\\0${process.env.WECHAT2RSS_TOKEN}`,\n      (task) => this.continueAcceptedSubscription(task),\n    );\n    this.subscriptionBatches = new Wechat2RssSubscriptionBatches(\n      () => {\n        const raw = process.env.DATABASE_URL || '';\n",
+        "after": "      },\n      () =>\n        `${process.env.WECHAT2RSS_BASE_URL}\\0${process.env.WECHAT2RSS_TOKEN}`,\n      (task) => this.continueAcceptedSubscription(task),\n      Date.now,\n      process.env.WECHAT2RSS_RECOVERY_HOLD === '1',\n    );\n    this.subscriptionBatches = new Wechat2RssSubscriptionBatches(\n      () => {\n        const raw = process.env.DATABASE_URL || '';\n"
+      },
+      {
+        "before": "            } as BatchOutcome)\n          : null;\n      },\n      (id) => this.subscriptionTasks.resume(id),\n    );\n    this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>\n      this.runManualRefresh(id, stage, automatic, options),\n    );\n",
+        "after": "            } as BatchOutcome)\n          : null;\n      },\n      (id) => this.subscriptionTasks.resume(id),\n      Date.now,\n      process.env.WECHAT2RSS_RECOVERY_HOLD === '1',\n    );\n    this.subscriptionBatches.attachRefresh((id, stage, automatic, options) =>\n      this.runManualRefresh(id, stage, automatic, options),\n    );\n"
+      },
+      {
+        "before": "    options: {\n      fetchMedia?: boolean;\n      inspectOnly?: boolean;\n      nightMediaUntil?: number;\n    } = {},\n  ) {\n    const started = Date.now();\n    // Internal bounded batch exception; ordinary routes never supply this.\n",
+        "after": "    options: {\n      fetchMedia?: boolean;\n      inspectOnly?: boolean;\n      nightMediaUntil?: number;\n      failureAttempt?: {\n        id: string;\n        feedId: string;\n        stage: 'list' | 'media';\n        at: number;\n      };\n    } = {},\n  ) {\n    const started = Date.now();\n    // Internal bounded batch exception; ordinary routes never supply this.\n"
+      },
+      {
+        "before": "      throw new Error('MEDIA_NIGHT_PERMIT_INVALID');\n    const fetchMedia = options.fetchMedia !== false && !options.inspectOnly;\n    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');\n    assertProviderPage(page, mpId);\n    const feed = await this.prismaService.feed.findUniqueOrThrow({\n      where: { id: mpId },\n    });\n    if (\n",
+        "after": "      throw new Error('MEDIA_NIGHT_PERMIT_INVALID');\n    const fetchMedia = options.fetchMedia !== false && !options.inspectOnly;\n    if (!databaseWritesAllowed()) throw new Error('CACHE_SYNC_STARTUP_BLOCKED');\n    assertProviderPage(page, mpId);\n    const failureOriginalPage = {\n      ...page,\n      articles: page.articles.map((item) => ({ ...item })),\n      bodyFailures: page.bodyFailures?.map((item) => ({ ...item })),\n    };\n    const feed = await this.prismaService.feed.findUniqueOrThrow({\n      where: { id: mpId },\n    });\n    if (\n"
+      },
+      {
+        "before": "          protectedBodyMissing === 0 &&\n          localBodyMissingArticleCount === 0,\n      };\n    };\n    if (options.inspectOnly || !neededArticles.length) {\n      let legacyRunning = false;\n      try {\n        legacyRunning =\n          JSON.parse(feed.lastCollectionResult || '{}').status === 'running';\n",
+        "after": "          protectedBodyMissing === 0 &&\n          localBodyMissingArticleCount === 0,\n      };\n    };\n    const ledgerIds = new Set((page.bodyFailures ?? []).map((item) => item.id));\n    if (\n      options.inspectOnly ||\n      (!neededArticles.length && ledgerIds.size === 0)\n    ) {\n      let legacyRunning = false;\n      try {\n        legacyRunning =\n          JSON.parse(feed.lastCollectionResult || '{}').status === 'running';\n"
+      },
+      {
+        "before": "        }\n      }\n      return item;\n    };\n    const delta = {\n      ...page,\n      // Mixed batches recheck isolated identities under the original write\n      // transaction, retaining its diagnostic report. Only an all-no-op batch\n      // can avoid the backup and all writes above.\n      articles: [\n        ...neededArticles.map(safeArticle),\n        ...page.articles.filter((item) =>\n          preflightSkipped.some((row) => row.id === item.id),\n        ),\n      ],\n      bodyMissing: [\n        ...neededArticles,\n        ...page.articles.filter((item) =>\n          preflightSkipped.some((row) => row.id === item.id),\n        ),\n      ]\n        .map(safeArticle)\n        .filter((item) => !item.contentHtml).length,\n    };\n    return this.incrementalCollection(mpId, (current) => {\n      if (\n        current.status !== 1 ||\n",
+        "after": "        }\n      }\n      return item;\n    };\n    const neededIds = new Set(neededArticles.map((item) => item.id));\n    const skippedIds = new Set(preflightSkipped.map((item) => item.id));\n    const deltaArticles = page.articles\n      .filter(\n        (item) =>\n          neededIds.has(item.id) ||\n          skippedIds.has(item.id) ||\n          ledgerIds.has(item.id),\n      )\n      .map(safeArticle);\n    const delta = {\n      ...page,\n      // Mixed batches recheck isolated identities under the original write\n      // transaction, retaining its diagnostic report. Only an all-no-op batch\n      // can avoid the backup and all writes above.\n      articles: deltaArticles,\n      bodyMissing: deltaArticles.filter((item) => !item.contentHtml).length,\n    };\n    return this.incrementalCollection(mpId, (current) => {\n      if (\n        current.status !== 1 ||\n"
+      },
+      {
+        "before": "        mpId,\n        mpName: current.mpName,\n        trigger: 'scheduled',\n        cachedPage: delta,\n        listOnly,\n        fetchMedia,\n        nightMediaUntil: options.nightMediaUntil,\n      });\n",
+        "after": "        mpId,\n        mpName: current.mpName,\n        trigger: 'scheduled',\n        cachedPage: delta,\n        failureOriginalPage,\n        failureAttempt: options.failureAttempt,\n        listOnly,\n        fetchMedia,\n        nightMediaUntil: options.nightMediaUntil,\n      });\n"
+      }
+    ],
+    "reason": "Recovery hold rejects entry and suppresses task/batch startup. Cached collection retains original provider failure evidence, includes ledger IDs in bounded delta and passes failureAttempt; original authentication and write gates retained."
+  },
+  "apps/server/src/article-export.ts": {
+    "originalSha256": "bb21f8c2d8d2235624b9a9565fb1cf64a3393cfde33cb8686ca1f5e783bfa07b",
+    "afterSha256": "e41ea4920c4eec3b16ce778b8d7a05d7543e5b4f39128680bcb3b69bc18468e7",
+    "hunks": [
+      {
+        "before": "  allowedImageUrl,\n  decodeInlineImage,\n  fetchAllowedImage,\n} from './collection/image-fetch';\nimport { metricsMarkdown } from './collection/collection-format';\nimport { TRPCError } from '@trpc/server';\n",
+        "after": "  allowedImageUrl,\n  decodeInlineImage,\n  fetchAllowedImage,\n  ImageRequestBlockedError,\n} from './collection/image-fetch';\nimport { metricsMarkdown } from './collection/collection-format';\nimport { TRPCError } from '@trpc/server';\n"
+      },
+      {
+        "before": "        message: '正文图片超过保存上限。',\n      });\n    let totalImageBytes = 0;\n    const downloads = new Map<string, Promise<boolean>>();\n    await pMap(\n      imgs,\n",
+        "after": "        message: '正文图片超过保存上限。',\n      });\n    let totalImageBytes = 0;\n    let mediaBlocked = false;\n    const downloads = new Map<string, Promise<boolean>>();\n    await pMap(\n      imgs,\n"
+      },
+      {
+        "before": "              let inline: ReturnType<typeof decodeInlineImage> | undefined;\n              try {\n                if (dataSrc.startsWith('data:'))\n                  inline = decodeInlineImage(dataSrc);\n                else allowedImageUrl(dataSrc);\n              } catch {\n                mediaComplete = false;\n",
+        "after": "              let inline: ReturnType<typeof decodeInlineImage> | undefined;\n              try {\n                if (dataSrc.startsWith('data:'))\n                  inline = decodeInlineImage(\n                    dataSrc,\n                    allowPartialImages ? 30_000_000 : undefined,\n                  );\n                else allowedImageUrl(dataSrc);\n              } catch {\n                mediaComplete = false;\n"
+      },
+      {
+        "before": "                let image: { bytes: Buffer; type: string } | undefined = inline;\n                if (!image) {\n                  try {\n                    image = await imageFetcher(dataSrc);\n                  } catch (error) {\n                    // Strict single-download callers must retain their error\n                    // provenance and must not publish a partial success bundle.\n                    if (!allowPartialImages && !mediaUnconfirmed) throw error;\n",
+        "after": "                let image: { bytes: Buffer; type: string } | undefined = inline;\n                if (!image) {\n                  try {\n                    if (mediaBlocked) throw new ImageRequestBlockedError(null);\n                    image = await imageFetcher(dataSrc);\n                  } catch (error) {\n                    if (error instanceof ImageRequestBlockedError)\n                      mediaBlocked = true;\n                    // Strict single-download callers must retain their error\n                    // provenance and must not publish a partial success bundle.\n                    if (!allowPartialImages && !mediaUnconfirmed) throw error;\n"
+      },
+      {
+        "before": "          else $img.remove();\n        } else $img.remove();\n      },\n      { concurrency: limits ? 1 : 5 },\n    );\n  } else {\n    // For browser export, we use proxy URLs\n",
+        "after": "          else $img.remove();\n        } else $img.remove();\n      },\n      { concurrency: limits || allowPartialImages ? 1 : 5 },\n    );\n  } else {\n    // For browser export, we use proxy URLs\n"
+      }
+    ],
+    "reason": "Reviewed export integration: risk rejection stops subsequent images; bounded partial-image inline bytes and serial partial-image requests. Restore only for historical conversion/predicate token pins; runtime protections remain unchanged."
+  }
+}

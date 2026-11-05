@@ -67,13 +67,41 @@ const cacheFailures = compile(
       ? responseDiagnostics
       : require(name),
 );
+// Load the provider's actual TypeScript dependency graph with Node's normal
+// per-file resolution. The scheduler uses its real restriction/stop classes;
+// replacing them with stand-ins would invalidate instanceof control flow.
+function loadTypeScriptModule(file) {
+  const previous = require.extensions['.ts'];
+  require.extensions['.ts'] = (loaded, filename) => {
+    const code = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+        experimentalDecorators: true,
+      },
+      fileName: filename,
+    }).outputText;
+    loaded._compile(code, filename);
+  };
+  try {
+    return require(file);
+  } finally {
+    if (previous) require.extensions['.ts'] = previous;
+    else delete require.extensions['.ts'];
+  }
+}
+const wechat2rss = loadTypeScriptModule(
+  path.join(repo, 'apps/server/src/collection/providers/wechat2rss.ts'),
+);
 const loadEngine = (source) =>
   compile(source, (name) =>
     name === './cache-sync-state'
       ? state
       : name === '../collection/cache-failure'
         ? cacheFailures
-        : require(name),
+        : name === '../collection/providers/wechat2rss'
+          ? wechat2rss
+          : require(name),
   ).CacheSyncEngine;
 const engines = {
   before: loadEngine(beforeSource),

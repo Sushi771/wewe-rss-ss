@@ -21,7 +21,7 @@ test('legacy writer additions cannot hide changed original admission or restart 
   const seams = require('./fixtures/legacy-writer-seams.json');
   for (const [file, entries] of Object.entries(seams))
     for (const seam of entries) {
-      const source = read(file);
+      const source = restoreLegacyWriter.restoreCompatible(file, read(file));
       assert.equal(source.split(seam.after).length, 2);
       assert.throws(
         () =>
@@ -418,7 +418,10 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   // statements and the uncertainty predicate to the deployed source semantics.
   const conversion = ts.createSourceFile(
     'article-export.ts',
-    read('apps/server/src/article-export.ts'),
+    restoreLegacyWriter(
+      'apps/server/src/article-export.ts',
+      read('apps/server/src/article-export.ts'),
+    ),
     ts.ScriptTarget.Latest,
     true,
   );

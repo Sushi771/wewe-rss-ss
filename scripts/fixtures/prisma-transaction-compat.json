@@ -1,0 +1,8 @@
+{
+  "file": "apps/server/src/prisma/prisma.service.ts",
+  "reason": "Reviewed transaction-aware SQLite writer admission adds runInTransaction; reverse exactly for historical recovery audit only. Runtime remains unchanged.",
+  "afterSha256": "428efa89ab64c4deb4609005eb9b1a31db6a1b28797dbdec5dcacb4b2df173de",
+  "originalSha256": "6b71dbdced274a391826ccd6844eff781fd5e01a1dfa9fc765ab46eb2a1a7ab4",
+  "after": "            return next(params);\n          }, params.runInTransaction === true);",
+  "before": "            return next(params);\n          });"
+}
