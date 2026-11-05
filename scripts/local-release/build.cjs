@@ -812,6 +812,7 @@ function build(options = {}) {
                 format: 1,
                 protocol: 'wewe-installed-lifecycle-v1',
                 journalBasename: '.wewe-update.json',
+                writeHoldProtocol: 'project-writer-prisma-query-only-v1',
               },
             }
           : {}),

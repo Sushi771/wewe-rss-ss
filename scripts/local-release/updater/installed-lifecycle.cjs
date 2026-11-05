@@ -86,7 +86,8 @@ function createController(config, primitives) {
     const file = path.join(release.path, 'installed-startup-gate.cjs');
     if (
       manifest.installedLifecycle?.protocol !== 'wewe-installed-lifecycle-v1' ||
-      manifest.installedLifecycle?.allWriters !== true ||
+      manifest.installedLifecycle?.writeHoldProtocol !==
+        'project-writer-prisma-query-only-v1' ||
       manifest.installedLifecycle?.journalBasename !==
         path.basename(config.journalFile) ||
       !fs.existsSync(file) ||
