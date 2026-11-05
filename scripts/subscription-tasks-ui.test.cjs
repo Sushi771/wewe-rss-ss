@@ -109,6 +109,7 @@ function fixture(
         if (id === 'sonner')
           return { toast: { success: (...args) => notifications.push(args) } };
         if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx };
+        if (id === '@web/components/AppOverlays') return { Modal: 'Modal' };
         if (id === '@nextui-org/react')
           return new Proxy({}, { get: (_, key) => key });
         if (id === '@web/utils/trpc')
