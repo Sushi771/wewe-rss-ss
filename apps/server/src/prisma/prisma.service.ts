@@ -169,17 +169,17 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
       Symbol.for('wewe.installed-startup-gate.v1')
     ];
     if (update && !update.writesAllowed()) {
-      await this.updateModeControl.run(true, () =>
-        this.$executeRawUnsafe('PRAGMA query_only=ON'),
-      );
+      await this.updateModeControl.run(true, async () => {
+        await this.$executeRawUnsafe('PRAGMA query_only=ON');
+      });
       void update
         .waitUntilPermitted()
         .then(async (permitted: boolean) => {
           if (!permitted) return;
           this.writerLease?.check();
-          await this.updateModeControl.run(true, () =>
-            this.$executeRawUnsafe('PRAGMA query_only=OFF'),
-          );
+          await this.updateModeControl.run(true, async () => {
+            await this.$executeRawUnsafe('PRAGMA query_only=OFF');
+          });
           update.markDatabaseWritable();
         })
         .catch(() => {
