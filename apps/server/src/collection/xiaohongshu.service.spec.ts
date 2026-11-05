@@ -100,6 +100,7 @@ describe('production XHS router/service → additive SQLite and original export 
         n !== '20261009050000_add_xhs_local_archive' &&
         n !== '20261009063000_add_management_groups' &&
         n !== '20261106000000_xhs_refresh_batches' &&
+        n !== '20261107000000_unified_bigint_timestamps' &&
         n !== '20261010090000_management_group_order' &&
         n !== '20261009080000_add_xhs_video_cache',
     ))
@@ -137,6 +138,8 @@ describe('production XHS router/service → additive SQLite and original export 
     await apply('20261010090000_management_group_order');
     await apply('20261009080000_add_xhs_video_cache');
     await apply('20261106000000_xhs_refresh_batches');
+    // The forward rebuild requires the complete union32, including deferred tables.
+    await apply('20261107000000_unified_bigint_timestamps');
     expect(await oldRows()).toEqual(snapshot);
     expect(await prisma.$queryRawUnsafe('PRAGMA integrity_check')).toEqual([
       { integrity_check: 'ok' },
@@ -216,7 +219,11 @@ describe('production XHS router/service → additive SQLite and original export 
       {} as any,
       service,
     ).appRouter;
-    const api = router.createCaller({ errorMsg, isLocal: true });
+    const api = router.createCaller({
+      errorMsg,
+      isLocal: true,
+      isLocalSave: true,
+    });
     // Legacy normalized cache seam is tested directly; public refresh now queues metadata only.
     return {
       xiaohongshu: api.xiaohongshu,
@@ -713,7 +720,7 @@ describe('production XHS router/service → additive SQLite and original export 
     } finally {
       await app.close();
     }
-  });
+  }, 30000);
   it('serializes one creator while source is in flight and releases lock after failure', async () => {
     let reject!: (e: Error) => void;
     const pending = new Promise<never>((_, r) => (reject = r));
@@ -1069,5 +1076,28 @@ describe('production XHS router/service → additive SQLite and original export 
     expect(
       await prisma.$queryRawUnsafe('SELECT * FROM xhs_refresh_failures'),
     ).toHaveLength(1);
+  });
+});
+
+describe('legacy refresh compatibility', () => {
+  it('delegates the original arguments and promise without bypassing legacy guards', () => {
+    const service = Object.create(
+      XiaohongshuService.prototype,
+    ) as XiaohongshuService;
+    const result = Promise.resolve({
+      status: 'paused' as const,
+      added: 0,
+      message: 'paused',
+    });
+    const guarded = jest
+      .spyOn(service, 'legacyRefresh')
+      .mockReturnValue(result);
+    expect(service.refresh('synthetic-creator', 'synthetic-operation')).toBe(
+      result,
+    );
+    expect(guarded).toHaveBeenCalledWith(
+      'synthetic-creator',
+      'synthetic-operation',
+    );
   });
 });

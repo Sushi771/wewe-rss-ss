@@ -135,11 +135,12 @@ function fixture() {
         if (id === 'react') return hooks;
         if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx };
         if (id === '@web/utils/trpc') return { trpc: { account } };
+        // The shared overlay exposes the same Modal props to this hook-only harness.
+        if (id === '@web/components/AppOverlays') return { Modal: 'Modal' };
         if (id === '@nextui-org/react')
           return Object.fromEntries(
             [
               'Button',
-              'Modal',
               'ModalBody',
               'ModalContent',
               'ModalFooter',

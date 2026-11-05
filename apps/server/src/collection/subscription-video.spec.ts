@@ -34,9 +34,10 @@ jest.mock('../offline-archive', () => ({
         destination,
         source,
       ],
-      { encoding: 'utf8', windowsHide: true },
+      { encoding: 'utf8', windowsHide: true, cwd: resolve(__dirname, '../..') },
     );
-    if (child.status !== 0) throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED');
+    if (child.status !== 0)
+      throw new Error('ACTUAL_ARCHIVE_CHILD_FAILED: ' + child.stderr);
   },
 }));
 
@@ -186,8 +187,12 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
   });
   const service = (items = [videoNote()], evidenceVerified = true) =>
     new XiaohongshuService(prisma as any, source(items, evidenceVerified));
+  const temporaryRoot =
+    process.platform === 'win32' && process.env.LOCALAPPDATA
+      ? join(process.env.LOCALAPPDATA, 'Temp')
+      : tmpdir();
   beforeAll(async () => {
-    root = await fs.mkdtemp(join(tmpdir(), 'wewe-subscription-video-'));
+    root = await fs.mkdtemp(join(temporaryRoot, 'wv-'));
     const url = 'file:' + join(root, 'fixture.sqlite').replace(/\\/g, '/');
     process.env.DATABASE_URL = url;
     prisma = new PrismaClient({ datasources: { db: { url } } });
@@ -205,7 +210,11 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     for (const entry of (await fs.readdir(migrations, { withFileTypes: true }))
       .filter((e) => e.isDirectory())
       .sort((a, b) => a.name.localeCompare(b.name)))
-      if (entry.name !== migration) await apply(entry.name);
+      if (
+        entry.name !== migration &&
+        entry.name !== '20261107000000_unified_bigint_timestamps'
+      )
+        await apply(entry.name);
     await prisma.account.create({
       data: { id: 'old-account', name: 'old account', token: 'synthetic-only' },
     });
@@ -298,6 +307,8 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
         await prisma.$queryRawUnsafe<any[]>('PRAGMA table_info(xhs_notes)')
       ).slice(0, columns.length),
     ).toEqual(columns);
+    // Apply the forward rebuild only after the deferred video migration.
+    await apply('20261107000000_unified_bigint_timestamps');
     oldWechat = await oldRows();
     oldImage = await prisma.xhsNote.findUniqueOrThrow({
       where: { id: imageKey },
@@ -321,6 +332,9 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
     jest.spyOn(axios, 'get').mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
     jest.spyOn(axios, 'post').mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
+    // Independent synthetic cases start with no prior source attempt.
+    await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_failures');
+    await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_jobs');
     await prisma.xhsNote.deleteMany({
       where: { id: { notIn: [imageKey, skippedKey] } },
     });
@@ -364,8 +378,8 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     process.env = originalEnv;
     if (
       root &&
-      dirname(root) === tmpdir() &&
-      root.split(/[\\/]/).pop()!.startsWith('wewe-subscription-video-')
+      dirname(root) === temporaryRoot &&
+      root.split(/[\\/]/).pop()!.startsWith('wv-')
     )
       await fs.rm(root, { recursive: true, force: true });
   });
@@ -457,7 +471,7 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
     const frozen = await freezeCachedXhsSelection(prisma, [
       { id: videoKey, creatorId: 'creator' },
     ]);
-    const output = join(root, 'cached-video-output');
+    const output = join(root, 'o');
     const store = new LocalArticleStore(
       join(root, 'cached-video-preferences.json'),
       output,
@@ -584,8 +598,11 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       kind: 'image-text' as const,
     };
     delete image.video;
-    await expect(service([image]).refresh('creator')).rejects.toMatchObject({
-      code: 'PRECONDITION_FAILED',
+    await expect(service([image]).refresh('creator')).resolves.toMatchObject({
+      status: 'partial',
+      added: 0,
+      failedCount: 1,
+      failureScope: 'article',
     });
     expect(
       await prisma.xhsNote.findUnique({
@@ -593,7 +610,7 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       }),
     ).toBeNull();
   });
-  it('rejects a complete batch before backup/write on bad hash, empty/truncated bytes, wrong author, incomplete text or covers', async () => {
+  it('isolates invalid video notes while committing the verified peer', async () => {
     const snapshot = await prisma.xhsNote.findMany({ orderBy: { id: 'asc' } });
     const gate = jest.spyOn(backup, 'createVerifiedSqliteBackup');
     const invalid: XhsSubscriptionCandidate[] = [];
@@ -631,13 +648,44 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       invalid.push(note);
     }
     for (const note of invalid) {
+      // Each malformed source response is a distinct synthetic case.
+      await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_failures');
+      await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_jobs');
+      await prisma.xhsNote.deleteMany({
+        where: { id: { notIn: [imageKey, skippedKey] } },
+      });
+      if (note.authorId === 'other-author') {
+        await expect(
+          service([videoNote('new-good'), note]).refresh('creator'),
+        ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+        expect(
+          await prisma.xhsNote.findMany({ orderBy: { id: 'asc' } }),
+        ).toEqual(snapshot);
+        continue;
+      }
       await expect(
         service([videoNote('new-good'), note]).refresh('creator'),
-      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
-      expect(await prisma.xhsNote.findMany({ orderBy: { id: 'asc' } })).toEqual(
-        snapshot,
-      );
+      ).resolves.toMatchObject({
+        status: 'partial',
+        added: 1,
+        failedCount: 1,
+        failureScope: 'article',
+      });
+      const rows = await prisma.xhsNote.findMany({ orderBy: { id: 'asc' } });
+      expect(
+        rows.filter((row) => snapshot.some((old) => old.id === row.id)),
+      ).toEqual(snapshot);
+      expect(rows).toHaveLength(snapshot.length + 1);
+      expect(
+        rows.some(
+          (row) =>
+            row.id === JSON.stringify(['xiaohongshu', 'note', 'new-good']),
+        ),
+      ).toBe(true);
+      expect(rows.some((row) => row.id === videoKey)).toBe(false);
     }
+    await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_failures');
+    await prisma.$executeRawUnsafe('DELETE FROM xhs_refresh_jobs');
     await expect(
       service([videoNote()], false).refresh('creator'),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
@@ -656,6 +704,9 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
       before,
     );
     gate.mockRestore();
+  });
+  it('rejects creator mixing and corrupted local video identities without publication', async () => {
+    const api = service();
     await api.refresh('creator');
     await expect(
       api.prepareLocalDownload('other-creator', videoKey),

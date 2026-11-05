@@ -297,7 +297,8 @@ test(
           assert.equal(request.reserveBytes, 1);
           assert.equal(request.runtimeCopies, 0);
           scoped = true;
-          return { assertWritable() {}, close() {} };
+          // Match a normal lease's policy contract; preserving scopes forbid reuse.
+          return { policy: {}, assertWritable() {}, close() {} };
         };
         assert.equal(
           require('./build.cjs').build({ compact: true }),

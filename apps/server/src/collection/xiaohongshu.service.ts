@@ -774,6 +774,14 @@ export class XiaohongshuService {
       )
       .digest('hex');
   }
+  // Preserve internal callers of the original guarded collection operation.
+  // The router's metadata refresh remains on XhsSubscriptionService.
+  refresh(
+    ...args: Parameters<XiaohongshuService['legacyRefresh']>
+  ): ReturnType<XiaohongshuService['legacyRefresh']> {
+    return this.legacyRefresh(...args);
+  }
+
   async legacyRefresh(id: string, operationId?: string) {
     if (this.active.has(id))
       return fail('该博主正在处理，不会重复发送请求。', 'CONFLICT');
