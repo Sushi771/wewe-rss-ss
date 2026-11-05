@@ -907,7 +907,17 @@ if (require.main === module) {
       plan: values.plan,
     });
   } catch (error) {
-    console.error(error.message);
+    const seen = new Set();
+    const report = (item, depth = 0) => {
+      if (!item || seen.has(item) || depth > 4 || seen.size >= 12) return;
+      seen.add(item);
+      console.error(
+        `${'  '.repeat(depth)}${item.code || item.name || 'Error'}: ${String(item.message || item).slice(0, 16000)}`,
+      );
+      for (const child of item.errors || []) report(child, depth + 1);
+      report(item.cause, depth + 1);
+    };
+    report(error);
     process.exitCode = 1;
   }
 }

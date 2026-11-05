@@ -19,15 +19,23 @@ require('node:net').connect = rejectNetwork;
 require('node:tls').connect = rejectNetwork;
 
 const sourceRoot = path.resolve(__dirname, '../apps/server/src');
+// article-download uses the pure shared official-verification URL validator.
+// Admit this exact dependency only; other sources outside the server stay denied.
+const sharedVerificationSource = path.resolve(
+  __dirname,
+  '../packages/shared/src/article-verification.ts',
+);
 require.extensions['.ts'] = (mod, filename) => {
   assert.ok(
-    filename.startsWith(sourceRoot + path.sep),
+    filename.startsWith(sourceRoot + path.sep) ||
+      filename === sharedVerificationSource,
     'unexpected runtime source',
   );
   const compiled = ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
     compilerOptions: {
       module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2022,
+      experimentalDecorators: true,
     },
   });
   mod._compile(compiled.outputText, filename);
@@ -443,7 +451,7 @@ test('CDN authentication/risk rejection stops all subsequent image requests', as
   }
 });
 
-test('background global media block preserves other jobs, list lane still runs', async () => {
+test('background global media block preserves other jobs and stops subsequent source reads', async () => {
   const f = setup({
     count: 2,
     sync: async (_id, _page, listOnly) => ({
@@ -464,10 +472,15 @@ test('background global media block preserves other jobs, list lane still runs',
   assert.equal(stopped, true);
   assert.equal(
     f.reads.length,
-    4,
-    'list/cache discovery survives global media stop',
+    1,
+    'global stop must prevent further source reads, including peers',
   );
-  assert.ok(cacheSyncState.feeds.every((row) => row.state === 'media-pending'));
+  assert.equal(cacheSyncState.feeds[0].state, 'media-pending');
+  assert.equal(cacheSyncState.feeds.length, 2);
+  assert.equal(
+    f.calls.some((row) => row.id === ids[1]),
+    false,
+  );
   f.engine.close();
 });
 
@@ -545,7 +558,10 @@ test('REGRESSION: superseding snapshot cannot discard an in-flight CDN global bl
     stopped = true;
   };
   f.deps.mediaStopped = () => stopped;
-  await f.tick();
+  // The real scheduler awaits this media attempt; hold its tick while signaling.
+  const inFlightTick = f.tick();
+  await drain();
+  assert.equal(typeof finish, 'function');
   f.deps.read = async () => {
     const fresh = fixture(ids[0]);
     fresh.articles[0].contentHtml += '<p>synthetic new snapshot</p>';
@@ -555,6 +571,7 @@ test('REGRESSION: superseding snapshot cannot discard an in-flight CDN global bl
   f.engine.signal({ [ids[0]]: 'synthetic-next-snapshot' });
   await f.tick();
   finish({ bodyMissing: 0, imageBlocked: 1, mediaRequestBlocked: true });
+  await inFlightTick;
   await drain();
   assert.equal(
     stopped,

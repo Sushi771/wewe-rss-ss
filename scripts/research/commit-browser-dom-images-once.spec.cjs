@@ -62,7 +62,46 @@ function makeSourceDb(file, { groups = true } = {}) {
   const db = new DatabaseSync(file);
   try {
     const migrations = path.join(ROOT, 'apps/server/prisma/migrations');
-    for (const name of fs.readdirSync(migrations).sort()) {
+    // This one-off import supports the reviewed historical layout, not every
+    // future migration. Use real SQL from that fixed inventory, including search.
+    const historicalMigrations = [
+      '20240301104100_init',
+      '20241214172323_has_history',
+      '20260319021733_make_feed_optional',
+      '20260319022805_add_cascade_delete',
+      '20260324094912_add_feed_order',
+      '20260927050000_public_albums',
+      '20260927080000_local_collection',
+      '20260927090000_collection_result',
+      '20260927110000_collection_channel',
+      '20260928020000_article_body_status',
+      '20260928030000_article_body_retry',
+      '20260929010000_provider_refresh_cooldown',
+      '20261009050000_add_xhs_local_archive',
+      '20261009063000_add_management_groups',
+      '20261009080000_add_xhs_video_cache',
+      '20261010090000_management_group_order',
+      '20261011090000_cache_insert_batches',
+      '20261012043000_article_feed_lookup_index',
+      '20261015090000_incremental_refresh_commits',
+      '20261020100000_article_global_sort_index',
+      '20261020160000_local_body_search',
+    ];
+    const baseInventory = historicalMigrations
+      .filter((name) => name !== '20261020160000_local_body_search')
+      .map((name) => [
+        name,
+        sha256(
+          fs
+            .readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8')
+            .replace(/\r\n/g, '\n'),
+        ),
+      ]);
+    assert.equal(
+      sha256(JSON.stringify(baseInventory)),
+      '952c507616467fb5b9d428e1a54a4d09ef4257be03c07654a34956bf2edb6c76',
+    );
+    for (const name of historicalMigrations) {
       if (
         !groups &&
         [
@@ -75,7 +114,7 @@ function makeSourceDb(file, { groups = true } = {}) {
       )
         continue;
       const sqlFile = path.join(migrations, name, 'migration.sql');
-      if (fs.existsSync(sqlFile)) db.exec(fs.readFileSync(sqlFile, 'utf8'));
+      db.exec(fs.readFileSync(sqlFile, 'utf8'));
     }
     db.exec(
       'CREATE TABLE "_prisma_migrations" (id TEXT PRIMARY KEY, checksum TEXT NOT NULL)',
@@ -274,6 +313,22 @@ test('snapshots the legacy schema and rejects unknown or incomplete additive tab
   try {
     makeSourceDb(file, { groups: false });
     assert.equal(Object.keys(readSnapshot(file).tables).length, 6);
+    // A real later migration must not silently broaden this historical importer.
+    db = new DatabaseSync(file);
+    db.exec(
+      fs.readFileSync(
+        path.join(
+          ROOT,
+          'apps/server/prisma/migrations/20261013000000_article_failure_events/migration.sql',
+        ),
+        'utf8',
+      ),
+    );
+    assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    db.close();
+    db = null;
+    fs.unlinkSync(file);
+    makeSourceDb(file, { groups: false });
     db = new DatabaseSync(file);
     db.exec('DROP TABLE xhs_notes; DROP TABLE xhs_creators');
     assert.deepEqual(Object.keys(readSnapshot(file).tables), [
