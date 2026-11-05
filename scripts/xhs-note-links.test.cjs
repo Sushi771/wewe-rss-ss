@@ -31,7 +31,10 @@ test('fixed source codes have short natural messages and arbitrary source errors
   assert.match(message('XHS_REQUEST_BUDGET_EXHAUSTED'), /已用完/);
   assert.match(message('XHS_REQUEST_RATE_PAUSED'), /间隔/);
   assert.match(message('XHS_SESSION_CHANGED'), /连接/);
-  assert.match(message('XHS_SOURCE_VERIFICATION_BLOCKED'), /来源明确提示需要验证/);
+  assert.match(
+    message('XHS_SOURCE_VERIFICATION_BLOCKED'),
+    /来源明确提示需要验证/,
+  );
   const raw = 'https://evil.invalid/?xsec_token=private';
   assert.equal(message(raw), message());
   assert(!message(raw).includes(raw));
@@ -68,9 +71,24 @@ test('malformed identities, protocols, empty links and injection never become hr
     );
 });
 
-test('only the exact safe comment anchor survives original-link validation',()=>{
- const note=JSON.stringify(['xiaohongshu','note','00AbC123']),url='https://www.xiaohongshu.com/discovery/item/00AbC123?xsec_token=synthetic&xsec_source=pc_share';
- assert.equal(verifiedOriginalUrl(note,url+'#comment-section'),url+'#comment-section');
- for(const hash of ['#javascript:alert(1)','#xsec_token=synthetic','#%63omment-section','#comment-section/../bad','#other'])assert.equal(verifiedOriginalUrl(note,url+hash),undefined);
- assert.equal(verifiedOriginalUrl(note,'https://xhslink.cn/o/synthetic#comment-section'),undefined);
+test('only the exact safe comment anchor survives original-link validation', () => {
+  const note = JSON.stringify(['xiaohongshu', 'note', '00AbC123']),
+    url =
+      'https://www.xiaohongshu.com/discovery/item/00AbC123?xsec_token=synthetic&xsec_source=pc_share';
+  assert.equal(
+    verifiedOriginalUrl(note, url + '#comment-section'),
+    url + '#comment-section',
+  );
+  for (const hash of [
+    '#javascript:alert(1)',
+    '#xsec_token=synthetic',
+    '#%63omment-section',
+    '#comment-section/../bad',
+    '#other',
+  ])
+    assert.equal(verifiedOriginalUrl(note, url + hash), undefined);
+  assert.equal(
+    verifiedOriginalUrl(note, 'https://xhslink.cn/o/synthetic#comment-section'),
+    undefined,
+  );
 });

@@ -43,6 +43,7 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'lib.cjs',
   'runtime.cjs',
   'engine-audit.cjs',
+  'installed-startup-gate.cjs',
   'project-writer-gate.cjs',
   'legacy-maintenance-loader.cjs',
   'inspect-sqlite.py',
@@ -104,12 +105,25 @@ function copyRuntimeClosure(sourceRoot, release, { legacy = false } = {}) {
           ].includes(name),
       )
     : SERVER_HELPERS;
+  const updaterEntries = [];
+  if (!legacy)
+    walk(
+      path.join(sourceRoot, 'scripts/local-release/updater'),
+      (relative, kind) => {
+        if (kind === 'file')
+          updaterEntries.push([
+            `scripts/local-release/updater/${slash(relative)}`,
+            `updater/${slash(relative)}`,
+          ]);
+      },
+    );
   const entries = [
     ...helpers.map((name) => [
       `apps/server/scripts/${name}`,
       `server/scripts/${name}`,
     ]),
     ...RUNTIME_WRAPPERS.map((name) => [`scripts/local-release/${name}`, name]),
+    ...updaterEntries,
   ];
   const copied = {};
   for (const [source, destination] of entries) {
@@ -792,6 +806,15 @@ function build(options = {}) {
           : {}),
         schemaCompatibility: legacy ? 'legacy-additive' : 'current',
         startupInspection: legacy ? 'full' : 'schema-only-v1',
+        ...(!legacy
+          ? {
+              installedLifecycle: {
+                format: 1,
+                protocol: 'wewe-installed-lifecycle-v1',
+                journalBasename: '.wewe-update.json',
+              },
+            }
+          : {}),
         ...(compact
           ? {
               executionLayout: 'compact-cjs-v1',
@@ -813,12 +836,13 @@ function build(options = {}) {
         ...fingerprint(release),
       };
       if (!legacy) manifest.migrationContract = migrationContract(manifest);
-      if (!legacy) manifest.prewriteSchemaContract = {
-        format: 1,
-        file: 'switch-schema-contract.json',
-        sha256: fileHash(path.join(release, 'switch-schema-contract.json')),
-        gateSha256: fileHash(path.join(release, 'switch-prewrite.cjs')),
-      };
+      if (!legacy)
+        manifest.prewriteSchemaContract = {
+          format: 1,
+          file: 'switch-schema-contract.json',
+          sha256: fileHash(path.join(release, 'switch-schema-contract.json')),
+          gateSha256: fileHash(path.join(release, 'switch-prewrite.cjs')),
+        };
       reservation.check();
       writeJson(path.join(release, 'release.json'), manifest);
       reservation.check();

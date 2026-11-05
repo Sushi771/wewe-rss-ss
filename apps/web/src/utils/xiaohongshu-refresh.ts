@@ -17,6 +17,62 @@ export type PersistentCreatorBatch = {
   }>;
 };
 
+/** Validate API enum values before they can drive persistent batch actions. */
+export function parsePersistentCreatorBatch(
+  value: unknown,
+): PersistentCreatorBatch {
+  if (!value || typeof value !== 'object')
+    throw new Error('Invalid creator batch');
+  const batch = value as Record<string, unknown>;
+  const state = batch.state;
+  if (
+    typeof batch.id !== 'string' ||
+    !batch.id ||
+    (state !== 'running' &&
+      state !== 'paused' &&
+      state !== 'stopped' &&
+      state !== 'complete') ||
+    !Array.isArray(batch.items)
+  )
+    throw new Error('Invalid creator batch');
+  const items: PersistentCreatorBatch['items'] = batch.items.map(
+    (raw: unknown) => {
+      if (!raw || typeof raw !== 'object')
+        throw new Error('Invalid creator batch item');
+      const item = raw as Record<string, unknown>;
+      const state = item.state;
+      if (
+        typeof item.position !== 'number' ||
+        !Number.isSafeInteger(item.position) ||
+        item.position < 0 ||
+        typeof item.creatorId !== 'string' ||
+        !item.creatorId ||
+        typeof item.operationId !== 'string' ||
+        !item.operationId ||
+        (state !== 'queued' &&
+          state !== 'reserved' &&
+          state !== 'complete' &&
+          state !== 'partial' &&
+          state !== 'cancelled')
+      )
+        throw new Error('Invalid creator batch item');
+      return {
+        position: item.position,
+        creatorId: item.creatorId,
+        operationId: item.operationId,
+        state,
+        outcome: item.outcome,
+      };
+    },
+  );
+  return { id: batch.id, state, items };
+}
+export function parseOptionalPersistentCreatorBatch(
+  value: unknown,
+): PersistentCreatorBatch | null {
+  return value === null ? null : parsePersistentCreatorBatch(value);
+}
+
 const batchKey = 'xhs-refresh-batch';
 const uuid =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

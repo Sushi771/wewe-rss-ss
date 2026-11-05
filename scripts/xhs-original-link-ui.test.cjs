@@ -173,28 +173,80 @@ test('a missing budget is a visible configuration next step without a retry', as
   assert.equal(calls, 1);
 });
 
-
 test('an expired link can be explicitly prepared again without automatic requests or closing the original tab', async () => {
-  const inputs=[];let next;
-  const f=fixture(input=>{inputs.push(input);return new Promise(resolve=>next=resolve)});
-  f.render().find(n=>n.type==='button').props.onClick();
-  const base='https://www.xiaohongshu.com/explore/'+'a'.repeat(24);
-  next({state:'ready',url:base+'?xsec_token=synthetic-first&xsec_source=pc_user'});await tick();
-  assert.equal(inputs.length,1);
-  const retry=f.render().find(n=>n.type==='button'&&n.props['aria-label']?.startsWith('重新准备原文'));
-  assert(retry);retry.props.onClick();retry.props.onClick();assert.equal(inputs.length,2);assert.equal(inputs[1].refreshContext,true);
-  next({state:'ready',url:base+'?xsec_token=synthetic-renewed&xsec_source=pc_user'});await tick();
-  assert.match(f.render().find(n=>n.type==='a').props.href,/synthetic-renewed/);assert.equal(inputs.length,2);
+  const inputs = [];
+  let next;
+  const f = fixture((input) => {
+    inputs.push(input);
+    return new Promise((resolve) => (next = resolve));
+  });
+  f.render()
+    .find((n) => n.type === 'button')
+    .props.onClick();
+  const base = 'https://www.xiaohongshu.com/explore/' + 'a'.repeat(24);
+  next({
+    state: 'ready',
+    url: base + '?xsec_token=synthetic-first&xsec_source=pc_user',
+  });
+  await tick();
+  assert.equal(inputs.length, 1);
+  const retry = f
+    .render()
+    .find(
+      (n) =>
+        n.type === 'button' &&
+        n.props['aria-label']?.startsWith('重新准备原文'),
+    );
+  assert(retry);
+  retry.props.onClick();
+  retry.props.onClick();
+  assert.equal(inputs.length, 2);
+  assert.equal(inputs[1].refreshContext, true);
+  next({
+    state: 'ready',
+    url: base + '?xsec_token=synthetic-renewed&xsec_source=pc_user',
+  });
+  await tick();
+  assert.match(
+    f.render().find((n) => n.type === 'a').props.href,
+    /synthetic-renewed/,
+  );
+  assert.equal(inputs.length, 2);
 });
 
 test('explicit renewal failure removes the stale URL and a late renewal after unmount cannot restore it', async () => {
-  let next;let calls=0;
-  const f=fixture(()=>{calls++;return new Promise(resolve=>next=resolve)});
-  const ready={state:'ready',url:'https://www.xiaohongshu.com/explore/'+'a'.repeat(24)+'?xsec_token=synthetic-only&xsec_source=pc_user'};
-  f.render().find(n=>n.type==='button').props.onClick();next(ready);await tick();
-  f.render().find(n=>n.type==='button').props.onClick();
-  next({state:'not_ready',code:'XHS_REQUEST_BUDGET_EXHAUSTED'});await tick();
-  assert(!f.render().some(n=>n.type==='a'));assert(f.render().some(n=>n.props?.role==='alert'));assert.equal(calls,2);
-  f.render().find(n=>n.type==='button').props.onClick();f.unmount();next(ready);await tick();
-  assert.equal(f.slots[0],undefined);assert.equal(calls,3);
+  let next;
+  let calls = 0;
+  const f = fixture(() => {
+    calls++;
+    return new Promise((resolve) => (next = resolve));
+  });
+  const ready = {
+    state: 'ready',
+    url:
+      'https://www.xiaohongshu.com/explore/' +
+      'a'.repeat(24) +
+      '?xsec_token=synthetic-only&xsec_source=pc_user',
+  };
+  f.render()
+    .find((n) => n.type === 'button')
+    .props.onClick();
+  next(ready);
+  await tick();
+  f.render()
+    .find((n) => n.type === 'button')
+    .props.onClick();
+  next({ state: 'not_ready', code: 'XHS_REQUEST_BUDGET_EXHAUSTED' });
+  await tick();
+  assert(!f.render().some((n) => n.type === 'a'));
+  assert(f.render().some((n) => n.props?.role === 'alert'));
+  assert.equal(calls, 2);
+  f.render()
+    .find((n) => n.type === 'button')
+    .props.onClick();
+  f.unmount();
+  next(ready);
+  await tick();
+  assert.equal(f.slots[0], undefined);
+  assert.equal(calls, 3);
 });

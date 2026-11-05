@@ -18,6 +18,10 @@ export function startupAudit(): Audit | undefined {
 export async function startSnapshotsAfterStartupAudit(
   startSnapshots: () => Promise<void>,
 ) {
+  const update = (globalThis as any)[
+    Symbol.for('wewe.installed-startup-gate.v1')
+  ];
+  if (update && !(await update.waitUntilEnabled())) return false;
   const audit = startupAudit();
   audit?.start();
   if (audit && !(await audit.ready)) return false;
@@ -43,6 +47,10 @@ export function startupMessage() {
     : '正在检查已有数据，可先查看内容；检查完成后自动恢复更新和修改。';
 }
 export function databaseWritesAllowed() {
+  const update = (globalThis as any)[
+    Symbol.for('wewe.installed-startup-gate.v1')
+  ];
+  if (update && !update.writesAllowed()) return false;
   const audit = startupAudit();
   return databaseRecovery === 'ready' && (!audit || audit.status === 'ready');
 }

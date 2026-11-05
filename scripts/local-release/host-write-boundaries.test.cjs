@@ -32,12 +32,54 @@ const catalog = {
     'startup-sqlite',
     'switch',
     'test-artifacts',
+    'switch-prewrite',
+    'task-document-preflight',
+    'updater/install-binding/role-aware/switch-prewrite',
+    'updater/install-binding/role-aware/task-document-preflight',
   ],
-  indirect: ['lifecycle-owner-fixture', 'recover-test-run', 'startup-audit'],
-  pure: ['engine-audit', 'refresh-wave-rollback-compat', 'frontend-companion'],
-  readonly: ['scope-inventory', 'verify-source', 'windows-release-references'],
+  indirect: [
+    'updater/installed-recovery-host',
+    'lifecycle-owner-fixture',
+    'recover-test-run',
+    'startup-audit',
+  ],
+  pure: [
+    'engine-audit',
+    'refresh-wave-rollback-compat',
+    'frontend-companion',
+    'reference-diagnostics',
+    'switch-contract',
+    'updater/install-binding/role-aware/switch-contract',
+    'switch-recovery',
+  ],
+  readonly: [
+    'scope-inventory',
+    'verify-source',
+    'windows-release-references',
+    'legacy-maintenance-loader',
+    'preserving-contract',
+    'private-artifact-proof',
+    'updater/legacy-maintenance-adapter',
+    'updater/install-binding/restore-identity-binding',
+  ],
+  // Identity-bound native writer leases, locks and durable recovery receipts.
+  writerCoordination: [
+    'updater/installed-host',
+    'updater/installed-lifecycle',
+    'updater/installed-native-primitives',
+    'updater/sqlite-hooks',
+    'updater/install-binding/migration-recovery',
+    'updater/installer/update-engine',
+    'guarded-prisma',
+    'normal-start-lock',
+    'project-writer-gate',
+    'start-current',
+    'writer-exit-recovery',
+  ],
   registry: ['release-scope'],
-  gateway: ['lib'],
+  // Read native identities, then delegate startup and update effects to reviewed hosts.
+  nativeControl: ['installed-startup-gate', 'updater/update-entry'],
+  gateway: ['lib', 'updater/install-binding/role-aware/lib'],
 };
 
 test('every host JavaScript module has a reviewed effect classification', () => {
@@ -46,7 +88,17 @@ test('every host JavaScript module has a reviewed effect classification', () => 
     .map((name) => name + '.cjs')
     .sort();
   const actual = fs
-    .readdirSync(__dirname)
+    .readdirSync(__dirname, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) =>
+      path
+        .relative(
+          __dirname,
+          path.join(entry.parentPath || entry.path, entry.name),
+        )
+        .split(path.sep)
+        .join('/'),
+    )
     .filter((name) => name.endsWith('.cjs') && !name.endsWith('.test.cjs'))
     .sort();
   assert.equal(new Set(expected).size, expected.length);
@@ -57,6 +109,8 @@ test('host effects use the common gateway; native imports are limited to named r
   const nativeExceptions = new Set([
     ...catalog.readonly,
     ...catalog.registry,
+    ...catalog.writerCoordination,
+    ...catalog.nativeControl,
     ...catalog.gateway,
   ]);
   for (const name of Object.values(catalog).flat()) {

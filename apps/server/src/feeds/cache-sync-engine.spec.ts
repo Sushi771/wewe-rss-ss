@@ -169,9 +169,10 @@ describe('fresh unchanged-page text reconciliation', () => {
 });
 describe('existing-cache synchronization', () => {
   it('retains safe read-limit diagnostics, continues peers, and clears the error after recovery', async () => {
+    let mediaEnabled = false;
     const f = setup(
       2,
-      () => false,
+      () => mediaEnabled,
       jest.fn().mockResolvedValue({ mediaReady: true }),
     );
     f.read.mockRejectedValueOnce(
@@ -195,7 +196,11 @@ describe('existing-cache synchronization', () => {
     const snapshot = cacheSyncStatus();
     snapshot.feeds[0].failure!.responseBytes = 0;
     expect(cacheSyncState.feeds[0].failure!.responseBytes).toBe(16777217);
+    // Resume the paused peer media queue before expecting source reads to recover.
+    mediaEnabled = true;
     f.time(10000);
+    await f.engine.tick();
+    // One account per tick: the peer is read before the failed account retries.
     await f.engine.tick();
     expect(cacheSyncState.feeds[0].state).toBe('media-pending');
     expect(cacheSyncState.feeds[0].failure).toBeUndefined();

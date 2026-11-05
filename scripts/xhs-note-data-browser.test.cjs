@@ -15,17 +15,26 @@ const evidence = fs.mkdtempSync(
 );
 function resolveChromium(env = process.env) {
   const isFile = (file) => {
-    try { return fs.statSync(file).isFile(); } catch { return false; }
+    try {
+      return fs.statSync(file).isFile();
+    } catch {
+      return false;
+    }
   };
   if (env.RESPONSIVE_TEST_BROWSER) {
-    assert(isFile(env.RESPONSIVE_TEST_BROWSER),
-      'RESPONSIVE_TEST_BROWSER must identify an installed Chromium executable');
+    assert(
+      isFile(env.RESPONSIVE_TEST_BROWSER),
+      'RESPONSIVE_TEST_BROWSER must identify an installed Chromium executable',
+    );
     return env.RESPONSIVE_TEST_BROWSER;
   }
-  const names = process.platform === 'win32'
-    ? ['chrome.exe', 'msedge.exe', 'chromium.exe']
-    : ['google-chrome', 'chromium', 'chromium-browser', 'chrome'];
-  for (const directory of (env.PATH || env.Path || '').split(path.delimiter).filter(Boolean)) {
+  const names =
+    process.platform === 'win32'
+      ? ['chrome.exe', 'msedge.exe', 'chromium.exe']
+      : ['google-chrome', 'chromium', 'chromium-browser', 'chrome'];
+  for (const directory of (env.PATH || env.Path || '')
+    .split(path.delimiter)
+    .filter(Boolean)) {
     for (const name of names) {
       const candidate = path.join(directory, name);
       if (isFile(candidate)) return candidate;
@@ -262,7 +271,9 @@ const server = http.createServer((req, res) => {
                   url:
                     'https://www.xiaohongshu.com/explore/' +
                     JSON.parse(input.noteId)[2] +
-                    (input.refreshContext ? '?xsec_token=synthetic-renewed&xsec_source=pc_share' : '?xsec_token=synthetic-private&xsec_source=pc_share'),
+                    (input.refreshContext
+                      ? '?xsec_token=synthetic-renewed&xsec_source=pc_share'
+                      : '?xsec_token=synthetic-private&xsec_source=pc_share'),
                 },
               },
             };
@@ -402,10 +413,13 @@ const server = http.createServer((req, res) => {
           return;
         }
         const n = ++id;
-        const timer = setTimeout(() => {
-          pending.delete(n);
-          reject(cdpFailure(method, phase, null, 'timeout'));
-        }, Math.min(10000, timeoutMs));
+        const timer = setTimeout(
+          () => {
+            pending.delete(n);
+            reject(cdpFailure(method, phase, null, 'timeout'));
+          },
+          Math.min(10000, timeoutMs),
+        );
         pending.set(n, { resolve, reject, timer, method, phase });
         try {
           ws.send(JSON.stringify({ id: n, method, params }));
@@ -523,13 +537,18 @@ const server = http.createServer((req, res) => {
     await send('Page.enable');
 
     cdpPhase = 'initial-navigation';
-    await navigation.navigate('Page.navigate', { url: origin + '/dash/xiaohongshu' }, 'initial-navigation');
+    await navigation.navigate(
+      'Page.navigate',
+      { url: origin + '/dash/xiaohongshu' },
+      'initial-navigation',
+    );
     await wait(
       'document.querySelectorAll(".content-article-row").length===20',
       '20 initial rows',
     );
     cdpPhase = 'scenario';
-    const action = (i) => `[...document.querySelectorAll('.content-article-row')].find(row=>row.querySelector('[data-original-note-id]')?.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))}||row.querySelector('a.xhs-note-title')?.href.includes('/explore/'+${JSON.stringify(JSON.parse(noteKey(i))[2])}))?.querySelector('.xhs-note-title')`;
+    const action = (i) =>
+      `[...document.querySelectorAll('.content-article-row')].find(row=>row.querySelector('[data-original-note-id]')?.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))}||row.querySelector('a.xhs-note-title')?.href.includes('/explore/'+${JSON.stringify(JSON.parse(noteKey(i))[2])}))?.querySelector('.xhs-note-title')`;
     const shot = async (name) => {
       const r = await send('Page.captureScreenshot', { format: 'png' });
       fs.writeFileSync(
@@ -596,7 +615,10 @@ const server = http.createServer((req, res) => {
       await click(
         `[...document.querySelectorAll('[data-original-note-id]')].find(e=>e.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(i))})`,
       );
-      await wait(`Boolean((${action(i)})?.closest('.content-article-row').querySelector('a[target="_blank"]'))`,'prepared link ready');
+      await wait(
+        `Boolean((${action(i)})?.closest('.content-article-row').querySelector('a[target="_blank"]'))`,
+        'prepared link ready',
+      );
     }
     const links = await ev(
       `[...document.querySelectorAll('.content-article-row a[target="_blank"]')].map(e=>({url:e.href,rel:e.rel,referrerPolicy:e.referrerPolicy}))`,
@@ -607,12 +629,26 @@ const server = http.createServer((req, res) => {
       assert.equal(link.rel, 'noopener noreferrer');
       assert.equal(link.referrerPolicy, 'no-referrer');
     }
-    const beforeRenew = apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').length;
+    const beforeRenew = apiReads.filter(
+      (x) => x.name === 'xiaohongshu.prepareOriginalLink',
+    ).length;
     await click(`document.querySelector('.xhs-note-origin-refresh')`);
-    await wait(`[...document.querySelectorAll('.xhs-note-title[href]')].some(e=>e.href.includes('synthetic-renewed'))`, 'explicit renewal settled');
-    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').length,beforeRenew+1);
-    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.prepareOriginalLink').at(-1).input.refreshContext,true);
-    checks.push({explicitRenewal:true});
+    await wait(
+      `[...document.querySelectorAll('.xhs-note-title[href]')].some(e=>e.href.includes('synthetic-renewed'))`,
+      'explicit renewal settled',
+    );
+    assert.equal(
+      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .length,
+      beforeRenew + 1,
+    );
+    assert.equal(
+      apiReads
+        .filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .at(-1).input.refreshContext,
+      true,
+    );
+    checks.push({ explicitRenewal: true });
     await click(
       `[...document.querySelectorAll('[data-original-note-id]')].find(e=>e.getAttribute('data-original-note-id')===${JSON.stringify(noteKey(0))})`,
     );
@@ -674,9 +710,23 @@ const server = http.createServer((req, res) => {
         ),
         'list fits available width',
       );
-      assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0,'deleted comment UI stays absent at every width');
-      assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.engagement'||x.name==='xiaohongshu.collectComments').length,0,'render never reads comment bodies');
-      checks.push({width,commentEntry:false,commentQueries:0});
+      assert.equal(
+        await ev(
+          "document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length",
+        ),
+        0,
+        'deleted comment UI stays absent at every width',
+      );
+      assert.equal(
+        apiReads.filter(
+          (x) =>
+            x.name === 'xiaohongshu.engagement' ||
+            x.name === 'xiaohongshu.collectComments',
+        ).length,
+        0,
+        'render never reads comment bodies',
+      );
+      checks.push({ width, commentEntry: false, commentQueries: 0 });
     }
     await send('Emulation.setDeviceMetricsOverride', {
       width: 2048,
@@ -709,11 +759,42 @@ const server = http.createServer((req, res) => {
     await shot('sidebar-constrained-2048');
     await ev(`document.querySelector('.feed-content').style.maxWidth=''`);
     // Archived/listed notes retain their own counts; comment bodies are not displayed.
-    for(const i of [0,4,2,3]){const values=await cellValues(i);assert.equal(values.length,4);assert.deepEqual(values,i===2?['7','4','2','6']:i===4?['0','12','—','19']:['—','—','—','—']);}
-    assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);
-    assert.equal(apiReads.filter(x=>x.name==='xiaohongshu.engagement'||x.name==='xiaohongshu.collectComments').length,0);
-    assert.equal(comments.length,19,'historical fixture comments remain unchanged');
-    checks.push({fourArchiveMetricCombinations:true,commentBodiesDisplayed:false,commentQueries:0});
+    for (const i of [0, 4, 2, 3]) {
+      const values = await cellValues(i);
+      assert.equal(values.length, 4);
+      assert.deepEqual(
+        values,
+        i === 2
+          ? ['7', '4', '2', '6']
+          : i === 4
+            ? ['0', '12', '—', '19']
+            : ['—', '—', '—', '—'],
+      );
+    }
+    assert.equal(
+      await ev(
+        "document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length",
+      ),
+      0,
+    );
+    assert.equal(
+      apiReads.filter(
+        (x) =>
+          x.name === 'xiaohongshu.engagement' ||
+          x.name === 'xiaohongshu.collectComments',
+      ).length,
+      0,
+    );
+    assert.equal(
+      comments.length,
+      19,
+      'historical fixture comments remain unchanged',
+    );
+    checks.push({
+      fourArchiveMetricCombinations: true,
+      commentBodiesDisplayed: false,
+      commentQueries: 0,
+    });
     assert.equal(
       apiReads.filter(
         (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
@@ -724,14 +805,42 @@ const server = http.createServer((req, res) => {
     await click(
       `[...document.querySelectorAll('summary')].find(e=>e.textContent.includes('来源与本机保存设置'))`,
     );
-    assert.equal(await ev("document.querySelectorAll('.xhs-source-budget').length"), 0, 'no cumulative quota control in source settings');
-    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.configureSourceRequestBudget').length, 0);
-    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.prepareOriginalLink').length, 4, 'opening settings does not repeat a source request');
+    assert.equal(
+      await ev("document.querySelectorAll('.xhs-source-budget').length"),
+      0,
+      'no cumulative quota control in source settings',
+    );
+    assert.equal(
+      apiReads.filter(
+        (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
+      ).length,
+      0,
+    );
+    assert.equal(
+      apiReads.filter((x) => x.name === 'xiaohongshu.prepareOriginalLink')
+        .length,
+      4,
+      'opening settings does not repeat a source request',
+    );
     await shot('source-settings-2048');
-    await click(`[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='订阅')`);
-    await wait('Boolean(document.querySelector("[role=dialog]"))', 'subscription dialog');
-    assert.equal(await ev("document.querySelectorAll('.xhs-source-budget').length"), 0, 'subscription does not expose a cumulative quota control');
-    assert.equal(apiReads.filter(x => x.name === 'xiaohongshu.configureSourceRequestBudget').length, 0);
+    await click(
+      `[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='订阅')`,
+    );
+    await wait(
+      'Boolean(document.querySelector("[role=dialog]"))',
+      'subscription dialog',
+    );
+    assert.equal(
+      await ev("document.querySelectorAll('.xhs-source-budget').length"),
+      0,
+      'subscription does not expose a cumulative quota control',
+    );
+    assert.equal(
+      apiReads.filter(
+        (x) => x.name === 'xiaohongshu.configureSourceRequestBudget',
+      ).length,
+      0,
+    );
     await shot('subscription-without-quota');
     await key('Escape', 27);
     await wait(
@@ -741,7 +850,10 @@ const server = http.createServer((req, res) => {
     for (const call of apiReads.filter(
       (x) => x.name === 'xiaohongshu.prepareOriginalLink',
     ))
-      assert.deepEqual(Object.keys(call.input), call.input.refreshContext ? ['noteId','refreshContext'] : ['noteId']);
+      assert.deepEqual(
+        Object.keys(call.input),
+        call.input.refreshContext ? ['noteId', 'refreshContext'] : ['noteId'],
+      );
     checks.push({ cumulativeQuotaControlAbsent: true, autoConfigure: 0 });
     assert.deepEqual(forbidden, []);
     assert.equal(

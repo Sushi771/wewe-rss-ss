@@ -1624,5 +1624,7 @@ button:active {
 }
 
 @media (max-height: 700px) {
-  .article-date-calendar { max-height: min(240px, calc(100dvh - 24px)); }
+  .article-date-calendar {
+    max-height: min(240px, calc(100dvh - 24px));
+  }
 }

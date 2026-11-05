@@ -108,9 +108,17 @@ async function run(mode, stablePopover = true) {
     send: async (method, params) => {
       events.push({ method, ...params });
       pressed ||= params.type === 'mousePressed';
-      const types = params.type === 'mousePressed' ? ['pointerdown'] : ['pointerup', 'click'];
+      const types =
+        params.type === 'mousePressed'
+          ? ['pointerdown']
+          : ['pointerup', 'click'];
       for (const type of types)
-        listeners.get(type)?.({ type, target, clientX: params.x, clientY: params.y });
+        listeners.get(type)?.({
+          type,
+          target,
+          clientX: params.x,
+          clientY: params.y,
+        });
     },
   };
   vm.createContext(context);
@@ -118,7 +126,10 @@ async function run(mode, stablePopover = true) {
     helper.getText(ast) + '\nglobalThis.click=' + click.getText(ast) + ';',
     context,
   );
-  const action = context.click("document.querySelector('#target')", stablePopover);
+  const action = context.click(
+    "document.querySelector('#target')",
+    stablePopover,
+  );
   if (mode === 'transient' || mode === 'stable') {
     await action;
     assert.equal(events.length, 2);
@@ -131,7 +142,11 @@ async function run(mode, stablePopover = true) {
     if (mode === 'transient') assert.ok(frame >= 7);
     assert.equal(browser.__overlayClickPin, undefined);
     assert.equal(listeners.size, 0);
-    if (stablePopover) assert.deepEqual(Array.from(pointerClicks[0].events, (e) => e.type), ['pointerdown', 'pointerup', 'click']);
+    if (stablePopover)
+      assert.deepEqual(
+        Array.from(pointerClicks[0].events, (e) => e.type),
+        ['pointerdown', 'pointerup', 'click'],
+      );
     else assert.equal(pointerClicks.length, 0);
   } else {
     await assert.rejects(action);
@@ -156,22 +171,34 @@ test('transient popover animation settles before exactly one CDP mouse press/rel
 test('xhs export uses the visible toolbar target for one checked pointer click', async () => {
   let exportCase, exportClick;
   function findCase(n) {
-    if (ts.isCallExpression(n) && n.expression.getText(ast) === 'run' &&
-        n.arguments[0]?.text === 'xhs-export') exportCase = n.arguments[1];
+    if (
+      ts.isCallExpression(n) &&
+      n.expression.getText(ast) === 'run' &&
+      n.arguments[0]?.text === 'xhs-export'
+    )
+      exportCase = n.arguments[1];
     ts.forEachChild(n, findCase);
   }
   findCase(ast);
   assert.ok(exportCase);
   function findClick(n) {
-    if (ts.isCallExpression(n) && n.expression.getText(ast) === 'click' &&
-        ts.isCallExpression(n.arguments[0]) &&
-        n.arguments[0].expression.getText(ast) === 'button' &&
-        n.arguments[0].arguments[0]?.text === '导出笔记') exportClick = n;
+    if (
+      ts.isCallExpression(n) &&
+      n.expression.getText(ast) === 'click' &&
+      ts.isCallExpression(n.arguments[0]) &&
+      n.arguments[0].expression.getText(ast) === 'button' &&
+      n.arguments[0].arguments[0]?.text === '导出笔记'
+    )
+      exportClick = n;
     ts.forEachChild(n, findClick);
   }
   findClick(exportCase);
   assert.ok(exportClick);
-  assert.equal(exportClick.arguments.length, 1, 'toolbar target does not use popover-only readiness');
+  assert.equal(
+    exportClick.arguments.length,
+    1,
+    'toolbar target does not use popover-only readiness',
+  );
   await run('stable', false);
 });
 test('persistent popover obstruction fails within the bound without a mouse event', async () => {
@@ -198,26 +225,43 @@ test('all three import scenarios use the pinned popover wait without adding a cl
   function collect(n) {
     if (ts.isCallExpression(n) && n.expression.getText(ast) === 'click') {
       const button = n.arguments[0];
-      if (button && ts.isCallExpression(button) &&
-          button.expression.getText(ast) === 'button' &&
-          button.arguments[0]?.text === '\u5bfc\u5165\u5df2\u6709\u6587\u4ef6') calls.push(n);
+      if (
+        button &&
+        ts.isCallExpression(button) &&
+        button.expression.getText(ast) === 'button' &&
+        button.arguments[0]?.text === '\u5bfc\u5165\u5df2\u6709\u6587\u4ef6'
+      )
+        calls.push(n);
     }
     ts.forEachChild(n, collect);
   }
   collect(ast);
   assert.equal(calls.length, 3);
-  for (const call of calls) assert.equal(call.arguments[1]?.kind, ts.SyntaxKind.TrueKeyword);
-  assert.equal((click.getText(ast).match(/send\('Input.dispatchMouseEvent'/g) || []).length, 2);
+  for (const call of calls)
+    assert.equal(call.arguments[1]?.kind, ts.SyntaxKind.TrueKeyword);
+  assert.equal(
+    (click.getText(ast).match(/send\('Input.dispatchMouseEvent'/g) || [])
+      .length,
+    2,
+  );
   assert.match(source, /await modalMatrix\('wechat-import'\)/);
   assert.match(source, /await modalMatrix\('wechat-import-long'\)/);
   assert.match(source, /await modalMatrix\('toast-with-import'\)/);
 });
 
 test('CI retains only synthetic failure evidence and never uploads the temporary profile', () => {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/responsive-reading-ci.yml'), 'utf8');
+  const workflow = fs.readFileSync(
+    path.join(root, '.github/workflows/responsive-reading-ci.yml'),
+    'utf8',
+  );
   assert.match(workflow, /id: overlay-matrix/);
-  assert.match(workflow, /if: failure\(\) && steps\.overlay-matrix\.outputs\.evidence != ''/);
-  const block = workflow.split('name: Preserve failed synthetic overlay evidence')[1].split('- name:')[0];
+  assert.match(
+    workflow,
+    /if: failure\(\) && steps\.overlay-matrix\.outputs\.evidence != ''/,
+  );
+  const block = workflow
+    .split('name: Preserve failed synthetic overlay evidence')[1]
+    .split('- name:')[0];
   assert.match(block, /\/failure\*\.json/);
   assert.match(block, /\/failure\*\.png/);
   assert.match(block, /\/result\.json/);

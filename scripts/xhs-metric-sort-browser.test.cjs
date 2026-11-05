@@ -238,7 +238,16 @@ function data(name, input) {
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
-          metrics: {values:{likes:i<2?null:i,collects:i%7,shares:i%9,comments:i%11},collectedAt:1,evidence:'source-only'},
+          metrics: {
+            values: {
+              likes: i < 2 ? null : i,
+              collects: i % 7,
+              shares: i % 9,
+              comments: i % 11,
+            },
+            collectedAt: 1,
+            evidence: 'source-only',
+          },
           status: 'complete',
         })),
       };
@@ -587,42 +596,141 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});
-    await wait("document.querySelectorAll('.content-article-row').length===20",'initial notes');
-    const results=[];
-    assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action').length"),0);
-    assert.equal(await ev("document.querySelectorAll('.xhs-creator-avatar').length"),1);
-    const header = metric => "[...document.querySelectorAll('[role=columnheader] button')].find(e=>e.textContent.includes("+JSON.stringify(metric)+"))";
-    const state=()=>ev("[...document.querySelectorAll('[role=columnheader]')].filter(e=>!e.textContent.includes('发布时间')).map(e=>e.getAttribute('aria-sort'))");
-    const first=()=>ev("document.querySelector('.content-article-row .xhs-note-metric[data-metric=likes]').textContent.trim()");
-    await click(header('点赞')); assert.equal((await state())[0],'descending'); assert.equal(await first(),'119');
-    await click(header('点赞')); assert.equal((await state())[0],'ascending'); assert.equal(await first(),'2');
-    await click(header('点赞')); assert.equal((await state())[0],'none'); assert.equal(await first(),'—');
-    await click(header('点赞')); await click(header('分享'));assert.equal((await state())[2],'descending');
-    await send('Emulation.setFocusEmulationEnabled',{enabled:true});await ev(header('收藏')+'.focus()');await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await pause(100);assert.equal((await state())[1],'descending');
-    results.push({name:'three-state-full-set-switch-keyboard',status:'passed'});
-    await viewport(1440,900);
-    const timeHeader=header('发布时间');
-    const timeState=()=>ev(timeHeader+".closest('[role=columnheader]').getAttribute('aria-sort')");
-    assert.equal(await timeState(),'none','metric sort remains active');
-    await click(timeHeader);assert.equal(await timeState(),'ascending');assert.equal(await first(),'119');
-    await click(header('点赞'));assert.equal((await state())[0],'descending');
-    await click(header('点赞'));assert.equal((await state())[0],'ascending');
-    await click(header('点赞'));assert.equal(await timeState(),'none');assert.equal(await first(),'—','third metric click restores default order');
-    await click(header('收藏'));await click(timeHeader);assert.equal(await timeState(),'ascending','time header switches back to oldest-first');
-    await click(timeHeader);assert.equal(await timeState(),'descending');
-    await click(timeHeader);assert.equal(await timeState(),'none');
-    results.push({name:'accurate-sort-label-and-time-memory',status:'passed'});
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial notes',
+    );
+    const results = [];
+    assert.equal(
+      await ev("document.querySelectorAll('.xhs-note-data-action').length"),
+      0,
+    );
+    assert.equal(
+      await ev("document.querySelectorAll('.xhs-creator-avatar').length"),
+      1,
+    );
+    const header = (metric) =>
+      "[...document.querySelectorAll('[role=columnheader] button')].find(e=>e.textContent.includes(" +
+      JSON.stringify(metric) +
+      '))';
+    const state = () =>
+      ev(
+        "[...document.querySelectorAll('[role=columnheader]')].filter(e=>!e.textContent.includes('发布时间')).map(e=>e.getAttribute('aria-sort'))",
+      );
+    const first = () =>
+      ev(
+        "document.querySelector('.content-article-row .xhs-note-metric[data-metric=likes]').textContent.trim()",
+      );
+    await click(header('点赞'));
+    assert.equal((await state())[0], 'descending');
+    assert.equal(await first(), '119');
+    await click(header('点赞'));
+    assert.equal((await state())[0], 'ascending');
+    assert.equal(await first(), '2');
+    await click(header('点赞'));
+    assert.equal((await state())[0], 'none');
+    assert.equal(await first(), '—');
+    await click(header('点赞'));
+    await click(header('分享'));
+    assert.equal((await state())[2], 'descending');
+    await send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await ev(header('收藏') + '.focus()');
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      text: '\r',
+    });
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    });
+    await pause(100);
+    assert.equal((await state())[1], 'descending');
+    results.push({
+      name: 'three-state-full-set-switch-keyboard',
+      status: 'passed',
+    });
+    await viewport(1440, 900);
+    const timeHeader = header('发布时间');
+    const timeState = () =>
+      ev(
+        timeHeader +
+          ".closest('[role=columnheader]').getAttribute('aria-sort')",
+      );
+    assert.equal(await timeState(), 'none', 'metric sort remains active');
+    await click(timeHeader);
+    assert.equal(await timeState(), 'ascending');
+    assert.equal(await first(), '119');
+    await click(header('点赞'));
+    assert.equal((await state())[0], 'descending');
+    await click(header('点赞'));
+    assert.equal((await state())[0], 'ascending');
+    await click(header('点赞'));
+    assert.equal(await timeState(), 'none');
+    assert.equal(
+      await first(),
+      '—',
+      'third metric click restores default order',
+    );
+    await click(header('收藏'));
+    await click(timeHeader);
+    assert.equal(
+      await timeState(),
+      'ascending',
+      'time header switches back to oldest-first',
+    );
+    await click(timeHeader);
+    assert.equal(await timeState(), 'descending');
+    await click(timeHeader);
+    assert.equal(await timeState(), 'none');
+    results.push({
+      name: 'accurate-sort-label-and-time-memory',
+      status: 'passed',
+    });
 
-    for(const width of [320,390,768,1024,1440,1580,2048]){
-      await viewport(width,900);await pause(100);
-      if(width>=1440)assert(await ev("(()=>{const r=document.querySelector('aside .xhs-creator-avatar').getBoundingClientRect();return r.width>=32&&r.height>=32})()"),'sidebar avatar visibly sized');
-      const geometry=await ev("({width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth+1,headers:[...document.querySelectorAll('[role=columnheader] button')].filter(e=>!e.textContent.includes('发布时间')).map(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.x>=0&&r.right<=innerWidth})})");
-      assert(!geometry.overflow && geometry.headers.length===4 && geometry.headers.every(Boolean),JSON.stringify(geometry));results.push({name:'layout',width,status:'passed',geometry});
-      const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'metrics-'+width+'.png'),Buffer.from(shot.data,'base64'));
+    for (const width of [320, 390, 768, 1024, 1440, 1580, 2048]) {
+      await viewport(width, 900);
+      await pause(100);
+      if (width >= 1440)
+        assert(
+          await ev(
+            "(()=>{const r=document.querySelector('aside .xhs-creator-avatar').getBoundingClientRect();return r.width>=32&&r.height>=32})()",
+          ),
+          'sidebar avatar visibly sized',
+        );
+      const geometry = await ev(
+        "({width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth+1,headers:[...document.querySelectorAll('[role=columnheader] button')].filter(e=>!e.textContent.includes('发布时间')).map(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.x>=0&&r.right<=innerWidth})})",
+      );
+      assert(
+        !geometry.overflow &&
+          geometry.headers.length === 4 &&
+          geometry.headers.every(Boolean),
+        JSON.stringify(geometry),
+      );
+      results.push({ name: 'layout', width, status: 'passed', geometry });
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(evidence, 'metrics-' + width + '.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
     }
-    assert.equal(apiReads.filter(r=>/engagement|comments/.test(r.name)).length,0);assert.deepEqual(forbidden,[]);
-    fs.writeFileSync(path.join(evidence,'result.json'),JSON.stringify({results,forbidden,commentCalls:0},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    assert.equal(
+      apiReads.filter((r) => /engagement|comments/.test(r.name)).length,
+      0,
+    );
+    assert.deepEqual(forbidden, []);
+    fs.writeFileSync(
+      path.join(evidence, 'result.json'),
+      JSON.stringify({ results, forbidden, commentCalls: 0 }, null, 2),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

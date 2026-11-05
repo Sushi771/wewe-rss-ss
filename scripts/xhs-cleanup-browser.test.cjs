@@ -9,7 +9,24 @@ const root = path.resolve(__dirname, '..'),
     path.join(require('os').tmpdir(), 'wewe-xhs-batch-'),
   );
 fs.mkdirSync(evidence, { recursive: true });
-const apiReads = []; const batchPosts=[]; let batchReceipt=null,resumeCount=0; const initialItems=()=>Array.from({length:20},(_,index)=>({index,fingerprint:'synthetic-'+index,state:index===0?'subscribed':index===2?'duplicate':index===1?'needs_context':'queued',...(index===1?{code:'XHS_SOURCE_VERIFICATION_BLOCKED'}:{})}));
+const apiReads = [];
+const batchPosts = [];
+let batchReceipt = null,
+  resumeCount = 0;
+const initialItems = () =>
+  Array.from({ length: 20 }, (_, index) => ({
+    index,
+    fingerprint: 'synthetic-' + index,
+    state:
+      index === 0
+        ? 'subscribed'
+        : index === 2
+          ? 'duplicate'
+          : index === 1
+            ? 'needs_context'
+            : 'queued',
+    ...(index === 1 ? { code: 'XHS_SOURCE_VERIFICATION_BLOCKED' } : {}),
+  }));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const image =
   'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="%23007aff"/></svg>';
@@ -214,8 +231,17 @@ function data(name, input) {
         contentHtml:
           '<h1>示例正文</h1><p>这是一段仅用于界面验收的示例文字。阅读正文时可以查找关键词。</p><p>第二段示例文字，保持正常阅读间距。</p><img alt="本地示例图片" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">',
       };
-    case 'xiaohongshu.subscriptionBatch': return batchReceipt;
-    case 'xiaohongshu.sourceRequestBudget':return {budgetId:'synthetic-budget',limit:50,used:2,remaining:48,nextAt:0,intervalMs:5000};
+    case 'xiaohongshu.subscriptionBatch':
+      return batchReceipt;
+    case 'xiaohongshu.sourceRequestBudget':
+      return {
+        budgetId: 'synthetic-budget',
+        limit: 50,
+        used: 2,
+        remaining: 48,
+        nextAt: 0,
+        intervalMs: 5000,
+      };
     case 'xiaohongshu.capability':
       return { canRefresh: false };
     case 'xiaohongshu.connectionStatus':
@@ -228,10 +254,33 @@ function data(name, input) {
             displayName: '合成博主',
             enabled: false,
             groupId: null,
-            _count: { notes: 120 }, metrics:{values:{fans:0,following:null},collectedAt:1760000000000,evidence:'source-only'}
+            _count: { notes: 120 },
+            metrics: {
+              values: { fans: 0, following: null },
+              collectedAt: 1760000000000,
+              evidence: 'source-only',
+            },
           },
-          {id:'creator-large',displayName:'合成大数',enabled:false,groupId:null,_count:{notes:5},metrics:{values:{fans:1234567890,following:0},collectedAt:1760000000000,evidence:'source-only'}},
-          {id:'creator-unknown',displayName:'合成未知',enabled:false,groupId:null,_count:{notes:3},metrics:null},
+          {
+            id: 'creator-large',
+            displayName: '合成大数',
+            enabled: false,
+            groupId: null,
+            _count: { notes: 5 },
+            metrics: {
+              values: { fans: 1234567890, following: 0 },
+              collectedAt: 1760000000000,
+              evidence: 'source-only',
+            },
+          },
+          {
+            id: 'creator-unknown',
+            displayName: '合成未知',
+            enabled: false,
+            groupId: null,
+            _count: { notes: 3 },
+            metrics: null,
+          },
         ],
       };
     case 'xiaohongshu.notes':
@@ -242,7 +291,16 @@ function data(name, input) {
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
-          metrics: {values:{likes:i<2?null:i,collects:i%7,shares:i%9,comments:i%11},collectedAt:1,evidence:'source-only'},
+          metrics: {
+            values: {
+              likes: i < 2 ? null : i,
+              collects: i % 7,
+              shares: i % 9,
+              comments: i % 11,
+            },
+            collectedAt: 1,
+            evidence: 'source-only',
+          },
           status: 'complete',
         })),
       };
@@ -267,7 +325,8 @@ function data(name, input) {
       };
     case 'feed.subscriptionTasks':
     case 'account.manualRefreshOptions':
-    case 'xiaohongshu.wholeCreatorJobs': return [];
+    case 'xiaohongshu.wholeCreatorJobs':
+      return [];
     case 'xiaohongshu.recentTasks':
       return { items: [] };
     default:
@@ -342,13 +401,66 @@ const server = http.createServer((req, res) => {
       }),
     );
   }
-  if(req.method==='POST'&&/^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(u.pathname)){
-    let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{const parsed=JSON.parse(raw),input=parsed[0]??parsed,route=u.pathname.split('.').at(-1);batchPosts.push({route,clientRequestId:input.clientRequestId,batchId:input.batchId,groupId:input.groupId,textLength:input.text?.length});
-      if(route==='startSubscriptionBatch')batchReceipt={batchId:'synthetic-batch',state:'paused',items:initialItems()};
-      if(route==='resumeSubscriptionBatch'){resumeCount++;batchReceipt={...batchReceipt,state:resumeCount===1?'running':'paused',items:batchReceipt.items.map(item=>item.index===1?{...item,state:resumeCount===1?'resolving':'unknown',code:resumeCount===1?undefined:'XHS_TASK_RECEIPT_UNCERTAIN'}:item)};}
-      if(route==='cancelSubscriptionBatch')batchReceipt={...batchReceipt,state:'cancelled',items:batchReceipt.items.map(item=>['queued','resolving'].includes(item.state)?{...item,state:'needs_context'}:item)};
-      setTimeout(()=>res.end(JSON.stringify({result:{data:batchReceipt}})),150);
-    });return;
+  if (
+    req.method === 'POST' &&
+    /^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(
+      u.pathname,
+    )
+  ) {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    req.on('end', () => {
+      const parsed = JSON.parse(raw),
+        input = parsed[0] ?? parsed,
+        route = u.pathname.split('.').at(-1);
+      batchPosts.push({
+        route,
+        clientRequestId: input.clientRequestId,
+        batchId: input.batchId,
+        groupId: input.groupId,
+        textLength: input.text?.length,
+      });
+      if (route === 'startSubscriptionBatch')
+        batchReceipt = {
+          batchId: 'synthetic-batch',
+          state: 'paused',
+          items: initialItems(),
+        };
+      if (route === 'resumeSubscriptionBatch') {
+        resumeCount++;
+        batchReceipt = {
+          ...batchReceipt,
+          state: resumeCount === 1 ? 'running' : 'paused',
+          items: batchReceipt.items.map((item) =>
+            item.index === 1
+              ? {
+                  ...item,
+                  state: resumeCount === 1 ? 'resolving' : 'unknown',
+                  code:
+                    resumeCount === 1
+                      ? undefined
+                      : 'XHS_TASK_RECEIPT_UNCERTAIN',
+                }
+              : item,
+          ),
+        };
+      }
+      if (route === 'cancelSubscriptionBatch')
+        batchReceipt = {
+          ...batchReceipt,
+          state: 'cancelled',
+          items: batchReceipt.items.map((item) =>
+            ['queued', 'resolving'].includes(item.state)
+              ? { ...item, state: 'needs_context' }
+              : item,
+          ),
+        };
+      setTimeout(
+        () => res.end(JSON.stringify({ result: { data: batchReceipt } })),
+        150,
+      );
+    });
+    return;
   }
   if (req.method !== 'GET') {
     forbidden.push(req.url);
@@ -599,14 +711,124 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});
-    await wait("document.querySelectorAll('.content-article-row').length===20",'initial notes');
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial notes',
+    );
 
-
-    const results=[];await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});await wait("document.querySelectorAll('.content-article-row').length===20",'initial rows');
-    const choose=async id=>{await ev('(()=>{const e=document.querySelector("select[aria-label=手机选择小红书博主]");e.value='+JSON.stringify(id)+';e.dispatchEvent(new Event("change",{bubbles:true}))})()');await wait('document.querySelector("h1")?.textContent.includes('+JSON.stringify(id==='creator-one'?'合成博主':id==='creator-large'?'合成大数':'合成未知')+')','creator selection');};
-    for(const [width,height,zoom]of [[320,700,1],[390,540,1.25],[768,800,1],[1024,800,1],[1440,900,1]]){await viewport(width,height,zoom);for(const [id,value]of [['creator-one','0'],['creator-large','1,234,567,890'],['creator-unknown','未采集']]){if(width>=1100){await ev('(()=>{const b=[...document.querySelectorAll(".feed-sidebar button")].find(e=>e.textContent.includes('+JSON.stringify(id==='creator-one'?'合成博主':id==='creator-large'?'合成大数':'合成未知')+'));b.click()})()');await pause(200);}else await choose(id);const g=await ev('(()=>{const h=document.querySelector("h1"),m=h?.parentElement?.querySelector("[aria-label=博主资料]"),r=m?.getBoundingClientRect();return {text:m?.innerText,width:r?.width,height:r?.height,font:m?getComputedStyle(m).fontSize:null,overflow:document.documentElement.scrollWidth>innerWidth+1,body:document.body.innerText}})()');assert(g.text?.includes('粉丝 '+value),JSON.stringify({id,g}));assert(g.width>0&&g.height>0&&parseFloat(g.font)>=14&&!g.overflow,JSON.stringify(g));assert(!g.body.includes('整号互动覆盖与待补清单')&&!g.body.includes('逐篇事实与缺口'));results.push({width,height,zoom,id,value,status:'passed'});}const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'ui-'+width+'.png'),Buffer.from(shot.data,'base64'));}
-    await viewport(1440,900,1);const sidebar=await ev('(()=>{const rows=[...document.querySelectorAll("li.mac-sidebar-item")];return rows.map(e=>{const a=e.getBoundingClientRect(),m=e.querySelector("[aria-label=博主资料]")?.getBoundingClientRect();return {top:a.top,bottom:a.bottom,height:a.height,metricTop:m?.top,metricBottom:m?.bottom,overflow:e.scrollWidth>e.clientWidth+1}})})()');assert(sidebar.length===3,JSON.stringify(sidebar));for(let i=0;i<sidebar.length;i++){const r=sidebar[i];assert(r.metricTop>=r.top-1&&r.metricBottom<=r.bottom+1&&!r.overflow,JSON.stringify(r));if(i)assert(r.top>=sidebar[i-1].bottom-1,JSON.stringify(sidebar));}results.push({name:'sidebar-long-value-no-overlap',status:'passed',sidebar});assert.equal(apiReads.filter(x=>/collectComments|prepareOriginalLink|resolveSubscription|refreshMetrics/.test(x.name)).length,0);assert.deepEqual(forbidden,[]);fs.writeFileSync(path.join(evidence,'result.json'),JSON.stringify({results,sourceCalls:0,forbidden},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    const results = [];
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial rows',
+    );
+    const choose = async (id) => {
+      await ev(
+        '(()=>{const e=document.querySelector("select[aria-label=手机选择小红书博主]");e.value=' +
+          JSON.stringify(id) +
+          ';e.dispatchEvent(new Event("change",{bubbles:true}))})()',
+      );
+      await wait(
+        'document.querySelector("h1")?.textContent.includes(' +
+          JSON.stringify(
+            id === 'creator-one'
+              ? '合成博主'
+              : id === 'creator-large'
+                ? '合成大数'
+                : '合成未知',
+          ) +
+          ')',
+        'creator selection',
+      );
+    };
+    for (const [width, height, zoom] of [
+      [320, 700, 1],
+      [390, 540, 1.25],
+      [768, 800, 1],
+      [1024, 800, 1],
+      [1440, 900, 1],
+    ]) {
+      await viewport(width, height, zoom);
+      for (const [id, value] of [
+        ['creator-one', '0'],
+        ['creator-large', '1,234,567,890'],
+        ['creator-unknown', '未采集'],
+      ]) {
+        if (width >= 1100) {
+          await ev(
+            '(()=>{const b=[...document.querySelectorAll(".feed-sidebar button")].find(e=>e.textContent.includes(' +
+              JSON.stringify(
+                id === 'creator-one'
+                  ? '合成博主'
+                  : id === 'creator-large'
+                    ? '合成大数'
+                    : '合成未知',
+              ) +
+              '));b.click()})()',
+          );
+          await pause(200);
+        } else await choose(id);
+        const g = await ev(
+          '(()=>{const h=document.querySelector("h1"),m=h?.parentElement?.querySelector("[aria-label=博主资料]"),r=m?.getBoundingClientRect();return {text:m?.innerText,width:r?.width,height:r?.height,font:m?getComputedStyle(m).fontSize:null,overflow:document.documentElement.scrollWidth>innerWidth+1,body:document.body.innerText}})()',
+        );
+        assert(g.text?.includes('粉丝 ' + value), JSON.stringify({ id, g }));
+        assert(
+          g.width > 0 &&
+            g.height > 0 &&
+            parseFloat(g.font) >= 14 &&
+            !g.overflow,
+          JSON.stringify(g),
+        );
+        assert(
+          !g.body.includes('整号互动覆盖与待补清单') &&
+            !g.body.includes('逐篇事实与缺口'),
+        );
+        results.push({ width, height, zoom, id, value, status: 'passed' });
+      }
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(evidence, 'ui-' + width + '.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
+    }
+    await viewport(1440, 900, 1);
+    const sidebar = await ev(
+      '(()=>{const rows=[...document.querySelectorAll("li.mac-sidebar-item")];return rows.map(e=>{const a=e.getBoundingClientRect(),m=e.querySelector("[aria-label=博主资料]")?.getBoundingClientRect();return {top:a.top,bottom:a.bottom,height:a.height,metricTop:m?.top,metricBottom:m?.bottom,overflow:e.scrollWidth>e.clientWidth+1}})})()',
+    );
+    assert(sidebar.length === 3, JSON.stringify(sidebar));
+    for (let i = 0; i < sidebar.length; i++) {
+      const r = sidebar[i];
+      assert(
+        r.metricTop >= r.top - 1 &&
+          r.metricBottom <= r.bottom + 1 &&
+          !r.overflow,
+        JSON.stringify(r),
+      );
+      if (i)
+        assert(r.top >= sidebar[i - 1].bottom - 1, JSON.stringify(sidebar));
+    }
+    results.push({
+      name: 'sidebar-long-value-no-overlap',
+      status: 'passed',
+      sidebar,
+    });
+    assert.equal(
+      apiReads.filter((x) =>
+        /collectComments|prepareOriginalLink|resolveSubscription|refreshMetrics/.test(
+          x.name,
+        ),
+      ).length,
+      0,
+    );
+    assert.deepEqual(forbidden, []);
+    fs.writeFileSync(
+      path.join(evidence, 'result.json'),
+      JSON.stringify({ results, sourceCalls: 0, forbidden }, null, 2),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

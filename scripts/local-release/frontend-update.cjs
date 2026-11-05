@@ -1043,7 +1043,7 @@ function productionAdapter(p) {
         });
         assert(response.ok, 'FRONTEND_RESOURCE_HTTP_FAILED');
         const bytes = Buffer.from(await response.arrayBuffer());
-        if (f.path === "index.hbs") {
+        if (f.path === 'index.hbs') {
           // Vite chunks may be loaded by the entry module rather than by HTML.
           // Bind the served entry references to the reviewed template; every
           // artifact, including indirect chunks, still receives its HTTP hash check.
@@ -1054,16 +1054,16 @@ function productionAdapter(p) {
               .map((match) => match[1])
               .sort();
           const expected = references(template.toString());
-          assert(expected.length > 0, "FRONTEND_TEMPLATE_REFERENCES_MISSING");
+          assert(expected.length > 0, 'FRONTEND_TEMPLATE_REFERENCES_MISSING');
           for (const asset of expected)
             assert(
-              files.some((file) => "/dash/" + file.path === asset),
-              "FRONTEND_TEMPLATE_ASSET_UNREVIEWED",
+              files.some((file) => '/dash/' + file.path === asset),
+              'FRONTEND_TEMPLATE_ASSET_UNREVIEWED',
             );
           assert.deepEqual(
             references(bytes.toString()),
             expected,
-            "FRONTEND_STALE_TEMPLATE",
+            'FRONTEND_STALE_TEMPLATE',
           );
         } else equal(hash(bytes), f.sha256);
       }

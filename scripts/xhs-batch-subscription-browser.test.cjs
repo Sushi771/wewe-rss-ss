@@ -9,7 +9,24 @@ const root = path.resolve(__dirname, '..'),
     path.join(require('os').tmpdir(), 'wewe-xhs-batch-'),
   );
 fs.mkdirSync(evidence, { recursive: true });
-const apiReads = []; const batchPosts=[]; let batchReceipt=null,resumeCount=0; const initialItems=()=>Array.from({length:20},(_,index)=>({index,fingerprint:'synthetic-'+index,state:index===0?'subscribed':index===2?'duplicate':index===1?'needs_context':'queued',...(index===1?{code:'XHS_SOURCE_VERIFICATION_BLOCKED'}:{})}));
+const apiReads = [];
+const batchPosts = [];
+let batchReceipt = null,
+  resumeCount = 0;
+const initialItems = () =>
+  Array.from({ length: 20 }, (_, index) => ({
+    index,
+    fingerprint: 'synthetic-' + index,
+    state:
+      index === 0
+        ? 'subscribed'
+        : index === 2
+          ? 'duplicate'
+          : index === 1
+            ? 'needs_context'
+            : 'queued',
+    ...(index === 1 ? { code: 'XHS_SOURCE_VERIFICATION_BLOCKED' } : {}),
+  }));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const image =
   'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="%23007aff"/></svg>';
@@ -214,8 +231,17 @@ function data(name, input) {
         contentHtml:
           '<h1>示例正文</h1><p>这是一段仅用于界面验收的示例文字。阅读正文时可以查找关键词。</p><p>第二段示例文字，保持正常阅读间距。</p><img alt="本地示例图片" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">',
       };
-    case 'xiaohongshu.subscriptionBatch': return batchReceipt;
-    case 'xiaohongshu.sourceRequestBudget':return {budgetId:'synthetic-budget',limit:50,used:2,remaining:48,nextAt:0,intervalMs:5000};
+    case 'xiaohongshu.subscriptionBatch':
+      return batchReceipt;
+    case 'xiaohongshu.sourceRequestBudget':
+      return {
+        budgetId: 'synthetic-budget',
+        limit: 50,
+        used: 2,
+        remaining: 48,
+        nextAt: 0,
+        intervalMs: 5000,
+      };
     case 'xiaohongshu.capability':
       return { canRefresh: false };
     case 'xiaohongshu.connectionStatus':
@@ -240,7 +266,16 @@ function data(name, input) {
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
-          metrics: {values:{likes:i<2?null:i,collects:i%7,shares:i%9,comments:i%11},collectedAt:1,evidence:'source-only'},
+          metrics: {
+            values: {
+              likes: i < 2 ? null : i,
+              collects: i % 7,
+              shares: i % 9,
+              comments: i % 11,
+            },
+            collectedAt: 1,
+            evidence: 'source-only',
+          },
           status: 'complete',
         })),
       };
@@ -340,13 +375,66 @@ const server = http.createServer((req, res) => {
       }),
     );
   }
-  if(req.method==='POST'&&/^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(u.pathname)){
-    let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{const parsed=JSON.parse(raw),input=parsed[0]??parsed,route=u.pathname.split('.').at(-1);batchPosts.push({route,clientRequestId:input.clientRequestId,batchId:input.batchId,groupId:input.groupId,textLength:input.text?.length});
-      if(route==='startSubscriptionBatch')batchReceipt={batchId:'synthetic-batch',state:'paused',items:initialItems()};
-      if(route==='resumeSubscriptionBatch'){resumeCount++;batchReceipt={...batchReceipt,state:resumeCount===1?'running':'paused',items:batchReceipt.items.map(item=>item.index===1?{...item,state:resumeCount===1?'resolving':'unknown',code:resumeCount===1?undefined:'XHS_TASK_RECEIPT_UNCERTAIN'}:item)};}
-      if(route==='cancelSubscriptionBatch')batchReceipt={...batchReceipt,state:'cancelled',items:batchReceipt.items.map(item=>['queued','resolving'].includes(item.state)?{...item,state:'needs_context'}:item)};
-      setTimeout(()=>res.end(JSON.stringify({result:{data:batchReceipt}})),150);
-    });return;
+  if (
+    req.method === 'POST' &&
+    /^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(
+      u.pathname,
+    )
+  ) {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    req.on('end', () => {
+      const parsed = JSON.parse(raw),
+        input = parsed[0] ?? parsed,
+        route = u.pathname.split('.').at(-1);
+      batchPosts.push({
+        route,
+        clientRequestId: input.clientRequestId,
+        batchId: input.batchId,
+        groupId: input.groupId,
+        textLength: input.text?.length,
+      });
+      if (route === 'startSubscriptionBatch')
+        batchReceipt = {
+          batchId: 'synthetic-batch',
+          state: 'paused',
+          items: initialItems(),
+        };
+      if (route === 'resumeSubscriptionBatch') {
+        resumeCount++;
+        batchReceipt = {
+          ...batchReceipt,
+          state: resumeCount === 1 ? 'running' : 'paused',
+          items: batchReceipt.items.map((item) =>
+            item.index === 1
+              ? {
+                  ...item,
+                  state: resumeCount === 1 ? 'resolving' : 'unknown',
+                  code:
+                    resumeCount === 1
+                      ? undefined
+                      : 'XHS_TASK_RECEIPT_UNCERTAIN',
+                }
+              : item,
+          ),
+        };
+      }
+      if (route === 'cancelSubscriptionBatch')
+        batchReceipt = {
+          ...batchReceipt,
+          state: 'cancelled',
+          items: batchReceipt.items.map((item) =>
+            ['queued', 'resolving'].includes(item.state)
+              ? { ...item, state: 'needs_context' }
+              : item,
+          ),
+        };
+      setTimeout(
+        () => res.end(JSON.stringify({ result: { data: batchReceipt } })),
+        150,
+      );
+    });
+    return;
   }
   if (req.method !== 'GET') {
     forbidden.push(req.url);
@@ -597,24 +685,173 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});
-    await wait("document.querySelectorAll('.content-article-row').length===20",'initial notes');
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial notes',
+    );
 
-    await viewport(1440,900);
-    const results=[],button=text=>"[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==="+JSON.stringify(text)+")";
-    const paste=async text=>{await click("document.querySelector('textarea[aria-label=批量订阅内容]')");await send('Input.insertText',{text});await pause(150);};
-    const text='分享 https://xhslink.com/a/synthetic-one?xsec_token=synthetic-private\nhttps://xhslink.com/a/synthetic-two\n重复 https://xhslink.com/a/synthetic-one?xsec_token=synthetic-private';
-    const openBatch=async()=>{const visible='(()=>{const e='+button('批量订阅')+';return !!e&&e.getBoundingClientRect().width>0})()';if(!await ev(visible))await click("document.querySelector('button[aria-label=更多订阅操作]')");await wait(visible,'batch menu visible');await click(button('批量订阅'));};
-    assert.equal(batchPosts.length,0);await openBatch();await wait("Boolean(document.querySelector('textarea'))",'batch entry');assert.equal(batchPosts.length,0,'opening never submits');
-    await paste(text);assert(await ev("document.querySelector('[role=dialog]:has(textarea)').textContent.includes('初步识别 3 条链接，完全相同重复 1 条')"));
-    await ev("(()=>{const e=document.querySelector('select[aria-label=批量订阅文件夹]');e.value='fixture-folder';e.dispatchEvent(new Event('change',{bubbles:true}));})()");
-    await click(button('开始批量订阅'));await wait("Boolean(document.querySelector('[aria-label=批量订阅回执]'))",'batch receipt');assert.equal(batchPosts.filter(x=>x.route==='startSubscriptionBatch').length,1);assert.equal(batchPosts[0].groupId,'fixture-folder');assert.match(batchPosts[0].clientRequestId,/^[0-9a-f-]{36}$/i);
-    assert(await ev("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('重复博主')"));assert(await ev("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('来源已暂停')"));results.push({name:'preview-submit-receipt-risk',status:'passed'});
-    for(const width of [320,390,768,1440]){await viewport(width,800);const g=await ev("(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),r=d.getBoundingClientRect(),c=d.querySelector('button[aria-label=Close]'),cr=c.getBoundingClientRect(),hit=document.elementFromPoint(cr.x+cr.width/2,cr.y+cr.height/2);return {x:r.x,right:r.right,y:r.y,bottom:r.bottom,width:innerWidth,height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1,close:hit===c||c.contains(hit),scrolls:[...d.querySelectorAll('*')].filter(e=>e.tagName!=='TEXTAREA'&&getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length};})()");assert(g.x>=8&&g.right<=g.width-8&&g.y>=8&&g.bottom<=g.height-8&&!g.overflow&&g.close&&g.scrolls<=1,JSON.stringify(g));const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'batch-'+width+'.png'),Buffer.from(shot.data,'base64'));results.push({name:'receipt-layout',width,status:'passed',geometry:g});}
-    await click(button('关闭'));await wait("!document.querySelector('[role=dialog]:has(textarea)')",'closed');await openBatch();await wait("Boolean(document.querySelector('[aria-label=批量订阅回执]'))",'restored local receipt');assert.equal(await ev("document.querySelector('textarea').value"),'');assert.equal(batchPosts.length,1);assert(await ev(button('继续未完成项')+'.disabled'));
-    await paste(text);await click(button('继续未完成项'));await wait("Boolean([...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='取消批次'))",'running cancel');await click(button('取消批次'));await wait("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('已取消')",'cancel receipt');
-    await click(button('继续未完成项'));await wait("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('结果未确认')",'uncertain item');assert.equal(await ev("[...document.querySelectorAll('button')].some(e=>e.textContent.trim()==='继续未完成项')"),false);assert.equal(batchPosts.filter(x=>x.route==='resumeSubscriptionBatch').length,2);assert.equal(batchPosts.filter(x=>x.route==='cancelSubscriptionBatch').length,1);assert(await ev("Object.keys(sessionStorage).filter(k=>k.startsWith('wewe.xhs.subscriptionBatch')).every(k=>!sessionStorage.getItem(k).includes('http')&&!sessionStorage.getItem(k).includes('synthetic-private'))"));results.push({name:'close-reopen-local-read-explicit-resume-cancel-unknown',status:'passed'});
-    assert.equal(apiReads.filter(x=>/prepareOriginalLink|resolveSubscription|collectComments|refreshMetrics/.test(x.name)).length,0);assert.deepEqual(forbidden,[]);fs.writeFileSync(path.join(evidence,'result.json'),JSON.stringify({results,batchPosts,sourceCalls:0,forbidden},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    await viewport(1440, 900);
+    const results = [],
+      button = (text) =>
+        "[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===" +
+        JSON.stringify(text) +
+        ')';
+    const paste = async (text) => {
+      await click(
+        "document.querySelector('textarea[aria-label=批量订阅内容]')",
+      );
+      await send('Input.insertText', { text });
+      await pause(150);
+    };
+    const text =
+      '分享 https://xhslink.com/a/synthetic-one?xsec_token=synthetic-private\nhttps://xhslink.com/a/synthetic-two\n重复 https://xhslink.com/a/synthetic-one?xsec_token=synthetic-private';
+    const openBatch = async () => {
+      const visible =
+        '(()=>{const e=' +
+        button('批量订阅') +
+        ';return !!e&&e.getBoundingClientRect().width>0})()';
+      if (!(await ev(visible)))
+        await click(
+          "document.querySelector('button[aria-label=更多订阅操作]')",
+        );
+      await wait(visible, 'batch menu visible');
+      await click(button('批量订阅'));
+    };
+    assert.equal(batchPosts.length, 0);
+    await openBatch();
+    await wait("Boolean(document.querySelector('textarea'))", 'batch entry');
+    assert.equal(batchPosts.length, 0, 'opening never submits');
+    await paste(text);
+    assert(
+      await ev(
+        "document.querySelector('[role=dialog]:has(textarea)').textContent.includes('初步识别 3 条链接，完全相同重复 1 条')",
+      ),
+    );
+    await ev(
+      "(()=>{const e=document.querySelector('select[aria-label=批量订阅文件夹]');e.value='fixture-folder';e.dispatchEvent(new Event('change',{bubbles:true}));})()",
+    );
+    await click(button('开始批量订阅'));
+    await wait(
+      "Boolean(document.querySelector('[aria-label=批量订阅回执]'))",
+      'batch receipt',
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'startSubscriptionBatch').length,
+      1,
+    );
+    assert.equal(batchPosts[0].groupId, 'fixture-folder');
+    assert.match(batchPosts[0].clientRequestId, /^[0-9a-f-]{36}$/i);
+    assert(
+      await ev(
+        "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('重复博主')",
+      ),
+    );
+    assert(
+      await ev(
+        "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('来源已暂停')",
+      ),
+    );
+    results.push({ name: 'preview-submit-receipt-risk', status: 'passed' });
+    for (const width of [320, 390, 768, 1440]) {
+      await viewport(width, 800);
+      const g = await ev(
+        "(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),r=d.getBoundingClientRect(),c=d.querySelector('button[aria-label=Close]'),cr=c.getBoundingClientRect(),hit=document.elementFromPoint(cr.x+cr.width/2,cr.y+cr.height/2);return {x:r.x,right:r.right,y:r.y,bottom:r.bottom,width:innerWidth,height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1,close:hit===c||c.contains(hit),scrolls:[...d.querySelectorAll('*')].filter(e=>e.tagName!=='TEXTAREA'&&getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length};})()",
+      );
+      assert(
+        g.x >= 8 &&
+          g.right <= g.width - 8 &&
+          g.y >= 8 &&
+          g.bottom <= g.height - 8 &&
+          !g.overflow &&
+          g.close &&
+          g.scrolls <= 1,
+        JSON.stringify(g),
+      );
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(evidence, 'batch-' + width + '.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
+      results.push({
+        name: 'receipt-layout',
+        width,
+        status: 'passed',
+        geometry: g,
+      });
+    }
+    await click(button('关闭'));
+    await wait(
+      "!document.querySelector('[role=dialog]:has(textarea)')",
+      'closed',
+    );
+    await openBatch();
+    await wait(
+      "Boolean(document.querySelector('[aria-label=批量订阅回执]'))",
+      'restored local receipt',
+    );
+    assert.equal(await ev("document.querySelector('textarea').value"), '');
+    assert.equal(batchPosts.length, 1);
+    assert(await ev(button('继续未完成项') + '.disabled'));
+    await paste(text);
+    await click(button('继续未完成项'));
+    await wait(
+      "Boolean([...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='取消批次'))",
+      'running cancel',
+    );
+    await click(button('取消批次'));
+    await wait(
+      "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('已取消')",
+      'cancel receipt',
+    );
+    await click(button('继续未完成项'));
+    await wait(
+      "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('结果未确认')",
+      'uncertain item',
+    );
+    assert.equal(
+      await ev(
+        "[...document.querySelectorAll('button')].some(e=>e.textContent.trim()==='继续未完成项')",
+      ),
+      false,
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'resumeSubscriptionBatch').length,
+      2,
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'cancelSubscriptionBatch').length,
+      1,
+    );
+    assert(
+      await ev(
+        "Object.keys(sessionStorage).filter(k=>k.startsWith('wewe.xhs.subscriptionBatch')).every(k=>!sessionStorage.getItem(k).includes('http')&&!sessionStorage.getItem(k).includes('synthetic-private'))",
+      ),
+    );
+    results.push({
+      name: 'close-reopen-local-read-explicit-resume-cancel-unknown',
+      status: 'passed',
+    });
+    assert.equal(
+      apiReads.filter((x) =>
+        /prepareOriginalLink|resolveSubscription|collectComments|refreshMetrics/.test(
+          x.name,
+        ),
+      ).length,
+      0,
+    );
+    assert.deepEqual(forbidden, []);
+    fs.writeFileSync(
+      path.join(evidence, 'result.json'),
+      JSON.stringify(
+        { results, batchPosts, sourceCalls: 0, forbidden },
+        null,
+        2,
+      ),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

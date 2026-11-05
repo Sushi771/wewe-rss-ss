@@ -107,7 +107,9 @@ function inspectConnection(
 ) {
   // A current schema/receipt must not let malformed or unrecognized persisted
   // task documents reach recovery code or clear an existing source stop.
-  require('./task-document-preflight.cjs').assertTaskDocumentsInConnection(connection);
+  require('./task-document-preflight.cjs').assertTaskDocumentsInConnection(
+    connection,
+  );
   if (!startupGate) {
     assert.deepEqual(
       connection

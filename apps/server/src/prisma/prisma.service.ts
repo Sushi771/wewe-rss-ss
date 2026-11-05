@@ -17,6 +17,7 @@ import {
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit {
   private readonly recoveryOwner = new AsyncLocalStorage<boolean>();
+  private readonly updateModeControl = new AsyncLocalStorage<boolean>();
   private recovery: Promise<void> | undefined;
   private writerLease: { check(): void } | undefined;
 
@@ -133,6 +134,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
     }) as typeof this.$transaction;
     this.$use(async (params, next) => {
       this.writerLease?.check();
+      if (this.updateModeControl.getStore()) return next(params);
       // Only the fixed reconnect probe may use the client during recovery.
       if (this.recoveryOwner.getStore()) return next(params);
       if (databaseRecoveryStatus() !== 'ready')
@@ -163,5 +165,26 @@ export class PrismaService extends PrismaClient implements OnModuleInit {
   }
   async onModuleInit() {
     await this.$connect();
+    const update = (globalThis as any)[
+      Symbol.for('wewe.installed-startup-gate.v1')
+    ];
+    if (update && !update.writesAllowed()) {
+      await this.updateModeControl.run(true, () =>
+        this.$executeRawUnsafe('PRAGMA query_only=ON'),
+      );
+      void update
+        .waitUntilPermitted()
+        .then(async (permitted: boolean) => {
+          if (!permitted) return;
+          this.writerLease?.check();
+          await this.updateModeControl.run(true, () =>
+            this.$executeRawUnsafe('PRAGMA query_only=OFF'),
+          );
+          update.markDatabaseWritable();
+        })
+        .catch(() => {
+          console.error('[UPDATE_DATABASE_WRITER_ENABLE_FAILED]');
+        });
+    }
   }
 }

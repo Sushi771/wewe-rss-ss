@@ -78,22 +78,51 @@ test('shared transport logger excludes signed-link resolution and session fields
   }
   assert.equal(permitLog({ direction: 'up', path: 'article.list' }), true);
 });
-test('missing basic action submits only selected notes to the guarded entry',async()=>{
-  const f=fixture();
+test('missing basic action submits only selected notes to the guarded entry', async () => {
+  const f = fixture();
   try {
-    await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
-    await f.button('仅补所选基础缺项').props.onPress();await tick();
-    assert.deepEqual(f.calls.find(([name])=>name==='refreshMissingBasic'),['refreshMissingBasic',{id:'creator-a',noteIds:['pending']}]);
-    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,0);
-  } finally {f.dispose();}
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.render();
+    await f.button('仅补所选基础缺项').props.onPress();
+    await tick();
+    assert.deepEqual(
+      f.calls.find(([name]) => name === 'refreshMissingBasic'),
+      ['refreshMissingBasic', { id: 'creator-a', noteIds: ['pending'] }],
+    );
+    assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 0);
+  } finally {
+    f.dispose();
+  }
 });
-test('media summary distinguishes a missing manifest and a stopped request',async()=>{
-  const active={...status('running','list'),taskId:'media-task',creatorId:'creator-a',mediaSummary:{manifestNotes:0,declaredImages:0,recordedSavedImages:0,pendingImages:0,needsReviewNotes:1,blockedNotes:1,needsDetailRefreshNotes:0}};
-  const f=fixture({recentTasks:[active],taskStatus:active});try{
-    await f.start(true);await tick();
-    const visible=f.render().filter(value=>typeof value==='string').join(' ');
-    assert.match(visible,/图片清单待核对/);assert.match(visible,/请求结果待核对，已停止/);
-  }finally{f.dispose();}
+test('media summary distinguishes a missing manifest and a stopped request', async () => {
+  const active = {
+    ...status('running', 'list'),
+    taskId: 'media-task',
+    creatorId: 'creator-a',
+    mediaSummary: {
+      manifestNotes: 0,
+      declaredImages: 0,
+      recordedSavedImages: 0,
+      pendingImages: 0,
+      needsReviewNotes: 1,
+      blockedNotes: 1,
+      needsDetailRefreshNotes: 0,
+    },
+  };
+  const f = fixture({ recentTasks: [active], taskStatus: active });
+  try {
+    await f.start(true);
+    await tick();
+    const visible = f
+      .render()
+      .filter((value) => typeof value === 'string')
+      .join(' ');
+    assert.match(visible, /图片清单待核对/);
+    assert.match(visible, /请求结果待核对，已停止/);
+  } finally {
+    f.dispose();
+  }
 });
 const status = (state = 'running', kind = 'download') => ({
   kind,
@@ -152,7 +181,9 @@ function fixture(options = {}) {
       }
     },
   };
-  let groupData = { items: (options.groups || [{ id: 'group-a', name: '合成分组', order: 0 }]) };
+  let groupData = {
+    items: options.groups || [{ id: 'group-a', name: '合成分组', order: 0 }],
+  };
   const creators = {
     items: [
       {
@@ -254,9 +285,17 @@ function fixture(options = {}) {
               creatorId: 'creator-a',
               created: !existing,
               subscribed: true,
-              ...(!existing ? { collection: { taskId: 'list-task', creatorId: 'creator-a' } } : {}),
+              ...(!existing
+                ? {
+                    collection: { taskId: 'list-task', creatorId: 'creator-a' },
+                  }
+                : {}),
             };
-          if (name === 'refresh' || name === 'refreshFull' || name === 'refreshMissingBasic') {
+          if (
+            name === 'refresh' ||
+            name === 'refreshFull' ||
+            name === 'refreshMissingBasic'
+          ) {
             taskStatus = status('running', 'list');
             return { taskId: 'list-task', creatorId: input.id };
           }
@@ -310,10 +349,14 @@ function fixture(options = {}) {
             invalidate: async () => {
               calls.push(['invalidate', name]);
               if (options.stallInvalidation) return new Promise(() => {});
-              if (options.failInvalidation) throw Error('synthetic refresh failed');
+              if (options.failInvalidation)
+                throw Error('synthetic refresh failed');
             },
             cancel: async () => {},
-            setData: (_key, update) => { if (name === 'groups') groupData = update(groupData); if (name === 'list') Object.assign(creators, update(creators)); },
+            setData: (_key, update) => {
+              if (name === 'groups') groupData = update(groupData);
+              if (name === 'list') Object.assign(creators, update(creators));
+            },
           },
         ],
       ),
@@ -353,7 +396,10 @@ function fixture(options = {}) {
     capability: { useQuery: () => query({ canRefresh: true }) },
     list: { useQuery: () => query(creators) },
     groups: {
-      useQuery: () => ({ ...query(groupData), refetch: async () => ({ data: groupData }) }),
+      useQuery: () => ({
+        ...query(groupData),
+        refetch: async () => ({ data: groupData }),
+      }),
     },
     notes: {
       useQuery: (input) => {
@@ -430,8 +476,16 @@ function fixture(options = {}) {
       useMutation: () => ({
         mutateAsync: async (input) => {
           calls.push([name, input]);
-          if (name === 'moveCreators') return {ids:input.ids,groupId:input.groupId,moved:input.ids.length};
-          if (name === 'reorderGroups') { if (options.reorderError) throw Error('synthetic reorder failed'); return { ids: input.ids }; }
+          if (name === 'moveCreators')
+            return {
+              ids: input.ids,
+              groupId: input.groupId,
+              moved: input.ids.length,
+            };
+          if (name === 'reorderGroups') {
+            if (options.reorderError) throw Error('synthetic reorder failed');
+            return { ids: input.ids };
+          }
           return name === 'export'
             ? {
                 base64: '',
@@ -523,7 +577,9 @@ function fixture(options = {}) {
       trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
     },
     '@web/components/SubscriptionPrimitives': primitives,
-    sonner: { toast: { warning: message => calls.push(['warning', message]) } },
+    sonner: {
+      toast: { warning: (message) => calls.push(['warning', message]) },
+    },
     '@web/components/ManagementFolders': 'ManagementFolders',
     '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
@@ -557,14 +613,31 @@ function fixture(options = {}) {
   }).default;
   const previousFetch = global.fetch;
   let cacheMode = 'normal';
-  const directoryCalls=[];
+  const directoryCalls = [];
   global.fetch = async (url, request) => {
     if (/\/directory(?:-confirm)?\?/.test(url)) directoryCalls.push(url);
     if (url.endsWith('/xiaohongshu/cache-export')) {
       const payload = JSON.parse(request.body);
       calls.push(['cacheExport', payload]);
       if (cacheMode === 'lost') throw Error('transport lost');
-      if(['audit-status','audit-cancel','audit-code'].includes(cacheMode))return {ok:true,json:async()=>({results:payload.items.map(item=>cacheMode==='audit-code'?{id:item.id,error:'XHS_CACHED_SAVE_FAILED'}:{id:item.id,saved:{alreadySaved:false,status:cacheMode==='audit-status'?'failed':'new'}}),cancelled:cacheMode==='audit-cancel'?'false':false})};
+      if (['audit-status', 'audit-cancel', 'audit-code'].includes(cacheMode))
+        return {
+          ok: true,
+          json: async () => ({
+            results: payload.items.map((item) =>
+              cacheMode === 'audit-code'
+                ? { id: item.id, error: 'XHS_CACHED_SAVE_FAILED' }
+                : {
+                    id: item.id,
+                    saved: {
+                      alreadySaved: false,
+                      status: cacheMode === 'audit-status' ? 'failed' : 'new',
+                    },
+                  },
+            ),
+            cancelled: cacheMode === 'audit-cancel' ? 'false' : false,
+          }),
+        };
 
       if (cacheMode === 'bad')
         return {
@@ -593,7 +666,15 @@ function fixture(options = {}) {
         }),
       };
     }
-    if (url.endsWith('/directory-confirm?target=xiaohongshu')) return {ok:true,json:async()=>({directory:'synthetic-only',askEveryTime:true,pickToken:'synthetic-grant'})};
+    if (url.endsWith('/directory-confirm?target=xiaohongshu'))
+      return {
+        ok: true,
+        json: async () => ({
+          directory: 'synthetic-only',
+          askEveryTime: true,
+          pickToken: 'synthetic-grant',
+        }),
+      };
     return {
       ok: true,
       json: async () =>
@@ -668,10 +749,51 @@ function fixture(options = {}) {
         render();
       }
     },
-    async openZip() { await button('导出笔记').props.onPress(); find('select', '导出方式').props.onChange({target:{value:'zip'}}); render(); },
-    async startExport(twice=false) { const n=render().find(x=>x.type==='Button' && all(x.props.children).join('').startsWith('开始导出')); assert.ok(n, 'export confirmation button'); n.props.onPress(); if(twice)n.props.onPress(); for(let i=0;i<8;i++)await tick(); },
-    async openLocalExport(twice=false) { await button('导出笔记').props.onPress(); render(); await this.startExport(twice); await tick(); },
-    async confirmDirectory(accept=true) { await tick(); render(); if(accept)button('确认保存').props.onPress(); else {const footer=render().find(n=>n.type==='ModalFooter'&&all(n.props.children).some(x=>x?.type==='Button'&&all(x.props.children).join('')==='确认保存'));assert.ok(footer);const cancelExport=all(footer.props.children).find(x=>x?.type==='Button'&&all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();} },
+    async openZip() {
+      await button('导出笔记').props.onPress();
+      find('select', '导出方式').props.onChange({ target: { value: 'zip' } });
+      render();
+    },
+    async startExport(twice = false) {
+      const n = render().find(
+        (x) =>
+          x.type === 'Button' &&
+          all(x.props.children).join('').startsWith('开始导出'),
+      );
+      assert.ok(n, 'export confirmation button');
+      n.props.onPress();
+      if (twice) n.props.onPress();
+      for (let i = 0; i < 8; i++) await tick();
+    },
+    async openLocalExport(twice = false) {
+      await button('导出笔记').props.onPress();
+      render();
+      await this.startExport(twice);
+      await tick();
+    },
+    async confirmDirectory(accept = true) {
+      await tick();
+      render();
+      if (accept) button('确认保存').props.onPress();
+      else {
+        const footer = render().find(
+          (n) =>
+            n.type === 'ModalFooter' &&
+            all(n.props.children).some(
+              (x) =>
+                x?.type === 'Button' &&
+                all(x.props.children).join('') === '确认保存',
+            ),
+        );
+        assert.ok(footer);
+        const cancelExport = all(footer.props.children).find(
+          (x) =>
+            x?.type === 'Button' && all(x.props.children).join('') === '取消',
+        );
+        assert.ok(cancelExport);
+        cancelExport.props.onPress();
+      }
+    },
     dispose() {
       slots.forEach((slot) => slot?.cleanup?.());
       global.fetch = previousFetch;
@@ -722,7 +844,10 @@ test('note/profile resolution requires confirmation, preserves grouping, and ref
         f.calls.find(([name]) => name === 'subscribe'),
         ['subscribe', { resolutionId: 'resolution-a', groupId: 'group-a' }],
       );
-      assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 0);
+      assert.equal(
+        f.calls.filter(([name]) => name === 'refreshFull').length,
+        0,
+      );
       assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 0);
     } finally {
       f.dispose();
@@ -815,25 +940,56 @@ test('date and title filters reset selection; pending image notes selectable, un
 });
 
 test('cancelling the native directory picker retains settings and submits no work', async () => {
-  const f=fixture();
+  const f = fixture();
   try {
-    await f.start(); f.settings({cancelledPicker:true});
+    await f.start();
+    f.settings({ cancelledPicker: true });
     await f.button('选择目录').props.onPress();
-    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory?')).length,1);
-    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport','refreshFull'].includes(name)).length,0);
-    assert(f.render().filter(x=>typeof x==='string').join(' ').includes('已取消目录选择'));
-  } finally { f.dispose(); }
+    assert.equal(
+      f.directoryCalls.filter((url) => url.includes('/directory?')).length,
+      1,
+    );
+    assert.equal(
+      f.calls.filter(([name]) =>
+        ['downloadNotes', 'cacheExport', 'refreshFull'].includes(name),
+      ).length,
+      0,
+    );
+    assert(
+      f
+        .render()
+        .filter((x) => typeof x === 'string')
+        .join(' ')
+        .includes('已取消目录选择'),
+    );
+  } finally {
+    f.dispose();
+  }
 });
 
 test('cancelling the archived save confirmation submits no work', async () => {
-  const f=fixture();
+  const f = fixture();
   try {
-    await f.start(); f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true); f.render();
-    const pending=f.button('保存已选归档到本地').props.onPress();
-    await f.confirmDirectory(false); await pending;
-    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport'].includes(name)).length,0);
-    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory-confirm?')).length,0);
-  } finally { f.dispose(); }
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const pending = f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory(false);
+    await pending;
+    assert.equal(
+      f.calls.filter(([name]) =>
+        ['downloadNotes', 'cacheExport'].includes(name),
+      ).length,
+      0,
+    );
+    assert.equal(
+      f.directoryCalls.filter((url) => url.includes('/directory-confirm?'))
+        .length,
+      0,
+    );
+  } finally {
+    f.dispose();
+  }
 });
 
 test('export confirmation cancellation submits nothing; repeated export and cancel clicks start one operation', async () => {
@@ -842,8 +998,28 @@ test('export confirmation cancellation submits nothing; repeated export and canc
     await f.start();
     f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
     await f.button('导出笔记').props.onPress();
-    const footer=f.render().find(n=>n.type==='ModalFooter'&&f.all(n.props.children).some(x=>x?.type==='Button'&&f.all(x.props.children).join('').startsWith('开始导出')));
-    assert.ok(footer);const cancelExport=f.all(footer.props.children).find(x=>x?.type==='Button'&&f.all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();
+    const footer = f
+      .render()
+      .find(
+        (n) =>
+          n.type === 'ModalFooter' &&
+          f
+            .all(n.props.children)
+            .some(
+              (x) =>
+                x?.type === 'Button' &&
+                f.all(x.props.children).join('').startsWith('开始导出'),
+            ),
+      );
+    assert.ok(footer);
+    const cancelExport = f
+      .all(footer.props.children)
+      .find(
+        (x) =>
+          x?.type === 'Button' && f.all(x.props.children).join('') === '取消',
+      );
+    assert.ok(cancelExport);
+    cancelExport.props.onPress();
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
     await f.openLocalExport(true);
     f.render();
@@ -876,15 +1052,23 @@ test('export confirmation cancellation submits nothing; repeated export and canc
 });
 
 test('subscription and cache update never request a save directory', async () => {
-  const f=fixture();
+  const f = fixture();
   try {
-    await f.start(); await f.resolve(); await f.button('确认订阅').props.onPress();
-    assert.equal(f.directoryCalls.length,0);
-    f.render(); await tick(); f.setTask(status('completed','list')); await tick(); f.render();
+    await f.start();
+    await f.resolve();
+    await f.button('确认订阅').props.onPress();
+    assert.equal(f.directoryCalls.length, 0);
+    f.render();
+    await tick();
+    f.setTask(status('completed', 'list'));
+    await tick();
+    f.render();
     await f.button('更新本号').props.onPress();
-    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,1);
-    assert.equal(f.directoryCalls.length,0);
-  } finally { f.dispose(); }
+    assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 1);
+    assert.equal(f.directoryCalls.length, 0);
+  } finally {
+    f.dispose();
+  }
 });
 
 test('list refresh has distinct progress; status outages never resubmit work; partial completion unlocks controls', async () => {
@@ -903,11 +1087,7 @@ test('list refresh has distinct progress; status outages never resubmit work; pa
     await tick();
     assert.equal(f.button('更新本号').props.isDisabled, false);
     assert.ok(
-      f
-        .render()
-        .some(
-          (n) => typeof n === 'string' && n.includes('部分完成'),
-        ),
+      f.render().some((n) => typeof n === 'string' && n.includes('部分完成')),
     );
   } finally {
     f.dispose();
@@ -1124,7 +1304,10 @@ test('resuming waits for executor release, uses original task identity and newly
     f.setTask({ ...status('cancelled'), resumable: true });
     await tick();
     const resume = f.button('继续未完成任务');
-    const resumes = Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    const resumes = Promise.all([
+      resume.props.onPress(),
+      resume.props.onPress(),
+    ]);
     await f.confirmDirectory();
     await resumes;
     assert.deepEqual(
@@ -1350,7 +1533,10 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
     await f.button('取消任务').props.onPress();
     await tick();
     f.render();
-    assert.equal(f.find('Checkbox', '选择笔记 苹果图文').props.isSelected, true);
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
+      true,
+    );
     assert.equal(
       f.calls.filter(([name]) => name === 'downloadNotes').length,
       2,
@@ -1362,28 +1548,77 @@ test('mixed-author downloads run serially, stop queued authors on cancellation, 
 });
 
 test('an exited unknown task unlocks review entry but a settling writer keeps it locked', async () => {
-  for (const settling of [false,true]) {
-    const task={...status('blocked'),taskId:'synthetic-unknown',creatorId:'creator-a',resumable:false,settling,code:'XHS_DETAIL_OUTCOME_UNKNOWN'};
-    const f=fixture({recentTasks:[task],taskStatus:task});
+  for (const settling of [false, true]) {
+    const task = {
+      ...status('blocked'),
+      taskId: 'synthetic-unknown',
+      creatorId: 'creator-a',
+      resumable: false,
+      settling,
+      code: 'XHS_DETAIL_OUTCOME_UNKNOWN',
+    };
+    const f = fixture({ recentTasks: [task], taskStatus: task });
     try {
-      await f.start(true); await tick();
-      f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
-      assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
-      assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
-    } finally { f.dispose(); }
+      await f.start(true);
+      await tick();
+      f.settings({
+        connection: {
+          liveEnabled: true,
+          connected: false,
+          stored: true,
+          verified: false,
+        },
+      });
+      assert.equal(
+        f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,
+        settling,
+      );
+      assert.equal(
+        f.calls.some(([name]) => name === 'resumeTask'),
+        false,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });
 test('completed and uncertain tasks keep the session entry locked while their writer settles', async () => {
-  for (const state of [{state:'completed'},{state:'blocked',code:'XHS_TASK_RECEIPT_UNCERTAIN'}]) {
-    for (const settling of [true,false]) {
-      const task={...status(state.state),...state,taskId:'synthetic-terminal',creatorId:'creator-a',resumable:false,settling};
-      const f=fixture({recentTasks:[task],taskStatus:task});
+  for (const state of [
+    { state: 'completed' },
+    { state: 'blocked', code: 'XHS_TASK_RECEIPT_UNCERTAIN' },
+  ]) {
+    for (const settling of [true, false]) {
+      const task = {
+        ...status(state.state),
+        ...state,
+        taskId: 'synthetic-terminal',
+        creatorId: 'creator-a',
+        resumable: false,
+        settling,
+      };
+      const f = fixture({ recentTasks: [task], taskStatus: task });
       try {
-        await f.start(true);await tick();
-        f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
-        assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
-        assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
-      } finally {f.dispose();}
+        await f.start(true);
+        await tick();
+        f.settings({
+          connection: {
+            liveEnabled: true,
+            connected: false,
+            stored: true,
+            verified: false,
+          },
+        });
+        assert.equal(
+          f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,
+          settling,
+        );
+        assert.equal(
+          f.calls.some(([name]) => name === 'resumeTask'),
+          false,
+        );
+      } finally {
+        f.dispose();
+      }
     }
   }
 });
@@ -1798,7 +2033,9 @@ test('archived-only action freezes one cache scope and never calls source-capabl
     await f.start();
     f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
     f.render();
-    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    const savePending = f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory();
+    await savePending;
     assert.deepEqual(f.calls.find(([n]) => n === 'cacheExport')[1], {
       items: [{ id: 'saved', creatorId: 'creator-a' }],
       pickToken: 'synthetic-grant',
@@ -1815,7 +2052,9 @@ test('a lost cache-only receipt is not replayed or routed to a source download',
     f.settings({ cacheMode: 'lost' });
     f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
     f.render();
-    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    const savePending = f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory();
+    await savePending;
     assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
     assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
   } finally {
@@ -1847,60 +2086,174 @@ test('cache-only stop aborts its single scope request; malformed receipts cannot
   }
 });
 
-test('AUDIT: malformed saved status and cancellation type cannot claim cache completion',async()=>{
- for(const mode of ['audit-status','audit-cancel']){
-  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
-   const visible=f.render().filter(n=>typeof n==='string').join(' ');
-   assert.match(visible,/回执未确认|回执不完整/);assert.equal(f.calls.filter(([n])=>n==='cacheExport').length,1);
-  }finally{f.dispose()}
- }
+test('AUDIT: malformed saved status and cancellation type cannot claim cache completion', async () => {
+  for (const mode of ['audit-status', 'audit-cancel']) {
+    const f = fixture();
+    try {
+      await f.start();
+      f.settings({ cacheMode: mode });
+      f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+      f.render();
+      const savePending = f.button('保存已选归档到本地').props.onPress();
+      await f.confirmDirectory();
+      await savePending;
+      const visible = f
+        .render()
+        .filter((n) => typeof n === 'string')
+        .join(' ');
+      assert.match(visible, /回执未确认|回执不完整/);
+      assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+    } finally {
+      f.dispose();
+    }
+  }
 });
-test('AUDIT: failed cache receipt displays a user explanation without backend codes',async()=>{
- const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
-  const visible=f.render().filter(n=>typeof n==='string').join(' ');assert.doesNotMatch(visible,/XHS_CACHED_SAVE_FAILED/);assert.match(visible,/失败 1/);
- }finally{f.dispose()}
-});
-
-
-test('xhs folder reorder sends confirmed order, keeps membership, and leaves cache unchanged on failure',async()=>{
- const groups=[{id:'a',name:'A',order:0},{id:'b',name:'B',order:1},{id:'c',name:'C',order:2}];
- const f=fixture({groups});try { await f.start();
-   await f.find('ManagementFolders').props.onReorder(['c','a','b'],['a','b','c']);
-   assert.deepEqual(f.calls.find(([name])=>name==='reorderGroups'),['reorderGroups',{ids:['c','a','b'],expectedIds:['a','b','c']}]);
-   assert.deepEqual(f.find('ManagementFolders').props.folders.map(x=>x.id),['c','a','b']);
-   assert.equal(f.calls.filter(([name])=>name==='moveCreators').length,0);
- } finally {f.dispose();}
- const bad=fixture({groups,reorderError:true});try {await bad.start();
-   await assert.rejects(bad.find('ManagementFolders').props.onReorder(['b','a','c'],['a','b','c']),/synthetic reorder failed/);
-   assert.deepEqual(bad.find('ManagementFolders').props.folders.map(x=>x.id),['a','b','c']);
- } finally {bad.dispose();}
-});
-
-
-test('folder member picker receives unfiltered creators and confirmed move releases without waiting for invalidation',async()=>{
- const f=fixture({stallInvalidation:true});try {await f.start(); const folders=f.find('ManagementFolders');
- assert.deepEqual(folders.props.members.map(x=>x.id),['creator-a']);
- let done=false;void folders.props.onMove(['creator-a'],'group-a').then(()=>done=true);await tick();
- assert.equal(done,true);assert.deepEqual(f.calls.find(([n])=>n==='moveCreators'),['moveCreators',{ids:['creator-a'],groupId:'group-a'}]);
- assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
- }finally{f.dispose()}
-});
-
-
-test('failed refresh after a confirmed creator move warns without undoing membership',async()=>{
- const f=fixture({failInvalidation:true});try {await f.start();await f.find('ManagementFolders').props.onMove(['creator-a'],'group-a');await tick();
- assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
- assert.match(f.calls.find(([name])=>name==='warning')[1],/分类已保存，列表刷新失败/);
- }finally{f.dispose()}
+test('AUDIT: failed cache receipt displays a user explanation without backend codes', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({ cacheMode: 'audit-code' });
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const savePending = f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory();
+    await savePending;
+    const visible = f
+      .render()
+      .filter((n) => typeof n === 'string')
+      .join(' ');
+    assert.doesNotMatch(visible, /XHS_CACHED_SAVE_FAILED/);
+    assert.match(visible, /失败 1/);
+  } finally {
+    f.dispose();
+  }
 });
 
-
-test('selected note media action opens existing diagnostics with exact selection',async()=>{
- const f=fixture();try{await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
- assert.deepEqual(f.find('XhsWholeCreator').props.selectedNoteIds,['pending']);
- assert.ok(f.button('补所选图片'));assert.equal(f.calls.some(([name])=>/Media/.test(name)),false);
- }finally{f.dispose()}
+test('xhs folder reorder sends confirmed order, keeps membership, and leaves cache unchanged on failure', async () => {
+  const groups = [
+    { id: 'a', name: 'A', order: 0 },
+    { id: 'b', name: 'B', order: 1 },
+    { id: 'c', name: 'C', order: 2 },
+  ];
+  const f = fixture({ groups });
+  try {
+    await f.start();
+    await f
+      .find('ManagementFolders')
+      .props.onReorder(['c', 'a', 'b'], ['a', 'b', 'c']);
+    assert.deepEqual(
+      f.calls.find(([name]) => name === 'reorderGroups'),
+      ['reorderGroups', { ids: ['c', 'a', 'b'], expectedIds: ['a', 'b', 'c'] }],
+    );
+    assert.deepEqual(
+      f.find('ManagementFolders').props.folders.map((x) => x.id),
+      ['c', 'a', 'b'],
+    );
+    assert.equal(f.calls.filter(([name]) => name === 'moveCreators').length, 0);
+  } finally {
+    f.dispose();
+  }
+  const bad = fixture({ groups, reorderError: true });
+  try {
+    await bad.start();
+    await assert.rejects(
+      bad
+        .find('ManagementFolders')
+        .props.onReorder(['b', 'a', 'c'], ['a', 'b', 'c']),
+      /synthetic reorder failed/,
+    );
+    assert.deepEqual(
+      bad.find('ManagementFolders').props.folders.map((x) => x.id),
+      ['a', 'b', 'c'],
+    );
+  } finally {
+    bad.dispose();
+  }
 });
 
+test('folder member picker receives unfiltered creators and confirmed move releases without waiting for invalidation', async () => {
+  const f = fixture({ stallInvalidation: true });
+  try {
+    await f.start();
+    const folders = f.find('ManagementFolders');
+    assert.deepEqual(
+      folders.props.members.map((x) => x.id),
+      ['creator-a'],
+    );
+    let done = false;
+    void folders.props
+      .onMove(['creator-a'], 'group-a')
+      .then(() => (done = true));
+    await tick();
+    assert.equal(done, true);
+    assert.deepEqual(
+      f.calls.find(([n]) => n === 'moveCreators'),
+      ['moveCreators', { ids: ['creator-a'], groupId: 'group-a' }],
+    );
+    assert.equal(
+      f.find('ManagementFolders').props.members[0].groupId,
+      'group-a',
+    );
+  } finally {
+    f.dispose();
+  }
+});
 
-test('saved comments entry opens only a local view of the selected note', async()=>{const f=fixture();try{await f.start();const button=f.render().find(n=>n.type==='button'&&n.props.children==='查看评论');assert.ok(button);button.props.onClick();const view=f.find('XhsSavedComments');assert.equal(view.props.creatorId,'creator-a');assert.ok(view.props.noteId);assert.equal(f.calls.some(([name])=>name==='collectComments'),false)}finally{f.dispose()}});
+test('failed refresh after a confirmed creator move warns without undoing membership', async () => {
+  const f = fixture({ failInvalidation: true });
+  try {
+    await f.start();
+    await f.find('ManagementFolders').props.onMove(['creator-a'], 'group-a');
+    await tick();
+    assert.equal(
+      f.find('ManagementFolders').props.members[0].groupId,
+      'group-a',
+    );
+    assert.match(
+      f.calls.find(([name]) => name === 'warning')[1],
+      /分类已保存，列表刷新失败/,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('selected note media action opens existing diagnostics with exact selection', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.render();
+    assert.deepEqual(f.find('XhsWholeCreator').props.selectedNoteIds, [
+      'pending',
+    ]);
+    assert.ok(f.button('补所选图片'));
+    assert.equal(
+      f.calls.some(([name]) => /Media/.test(name)),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('saved comments entry opens only a local view of the selected note', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    const button = f
+      .render()
+      .find((n) => n.type === 'button' && n.props.children === '查看评论');
+    assert.ok(button);
+    button.props.onClick();
+    const view = f.find('XhsSavedComments');
+    assert.equal(view.props.creatorId, 'creator-a');
+    assert.ok(view.props.noteId);
+    assert.equal(
+      f.calls.some(([name]) => name === 'collectComments'),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});

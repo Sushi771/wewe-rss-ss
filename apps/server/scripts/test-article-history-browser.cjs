@@ -17,18 +17,42 @@ const valid = '9222\n/devtools/browser/1234-abcd';
 const child = () => ({ exitCode: null, signalCode: null });
 
 test('startup probe stores fixed browser identity and profile write result without paths', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'history-private-profile-'));
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'history-private-profile-'),
+  );
   try {
-    const browser=path.join(root,'chrome.exe');fs.writeFileSync(browser,'synthetic');
-    const data=startupProbe(browser,root);
-    assert.equal(data.browserKind,'chrome');assert.equal(data.browserSizeBytes,9);
-    assert.match(data.browserSha256,/^[a-f0-9]{64}$/);
-    assert.equal(data.profileWrite,'ok');assert.equal(fs.existsSync(path.join(root,'.synthetic-write-probe')),false);
-    assert.equal(JSON.stringify(data).includes(root),false);
-    const trace=createBrowserTrace({enabled:true,directory:root});trace.record('startup-probe',{...data,path:root});trace.finish('failure');
-    const record=JSON.parse(fs.readFileSync(path.join(root,fs.readdirSync(root).find(n=>n.endsWith('.json'))),'utf8'));
-    assert.equal(record.events.find(e=>e.event==='startup-probe').profileWrite,'ok');assert.equal(JSON.stringify(record).includes(root),false);
-  } finally {fs.rmSync(root,{recursive:true,force:true});}
+    const browser = path.join(root, 'chrome.exe');
+    fs.writeFileSync(browser, 'synthetic');
+    const data = startupProbe(browser, root);
+    assert.equal(data.browserKind, 'chrome');
+    assert.equal(data.browserSizeBytes, 9);
+    assert.match(data.browserSha256, /^[a-f0-9]{64}$/);
+    assert.equal(data.profileWrite, 'ok');
+    assert.equal(
+      fs.existsSync(path.join(root, '.synthetic-write-probe')),
+      false,
+    );
+    assert.equal(JSON.stringify(data).includes(root), false);
+    const trace = createBrowserTrace({ enabled: true, directory: root });
+    trace.record('startup-probe', { ...data, path: root });
+    trace.finish('failure');
+    const record = JSON.parse(
+      fs.readFileSync(
+        path.join(
+          root,
+          fs.readdirSync(root).find((n) => n.endsWith('.json')),
+        ),
+        'utf8',
+      ),
+    );
+    assert.equal(
+      record.events.find((e) => e.event === 'startup-probe').profileWrite,
+      'ok',
+    );
+    assert.equal(JSON.stringify(record).includes(root), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('synthetic diagnostics bound stderr/events and never retain private strings', () => {

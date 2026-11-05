@@ -480,11 +480,21 @@ const server = http.createServer((req, res) => {
       ],
       { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
     );
-    let errors = '', spawnError = null;
+    let errors = '',
+      spawnError = null;
     child.stderr.on('data', (x) => (errors = (errors + x).slice(-8192)));
-    child.on('error', (error) => { spawnError = error.code || 'UNKNOWN'; });
-    const ready = await waitForBrowser({ child, profile, stderr: () => errors, spawnError: () => spawnError });
-    console.info(JSON.stringify({ event: 'overlay-browser-ready', ...ready.diagnostics }));
+    child.on('error', (error) => {
+      spawnError = error.code || 'UNKNOWN';
+    });
+    const ready = await waitForBrowser({
+      child,
+      profile,
+      stderr: () => errors,
+      spawnError: () => spawnError,
+    });
+    console.info(
+      JSON.stringify({ event: 'overlay-browser-ready', ...ready.diagnostics }),
+    );
     ws = new WebSocket(ready.page.webSocketDebuggerUrl);
     await new Promise((r) => ws.addEventListener('open', r, { once: true }));
     let id = 0;
@@ -562,7 +572,9 @@ const server = http.createServer((req, res) => {
       const trace = { stablePopover, beforePress: hit };
       if (stablePopover) {
         pointerClicks.push(trace);
-        await ev(`(()=>{const pin=window.__overlayClickPin;pin.events=[];pin.observe=event=>{if(pin.events.length>=12)return;const r=pin.e.getBoundingClientRect();pin.events.push({type:event.type,same:pin.e===event.target||pin.e.contains(event.target),x:event.clientX,y:event.clientY,centerX:r.x+r.width/2,centerY:r.y+r.height/2});};for(const type of ['pointerdown','pointerup','click'])document.addEventListener(type,pin.observe,true)})()`);
+        await ev(
+          `(()=>{const pin=window.__overlayClickPin;pin.events=[];pin.observe=event=>{if(pin.events.length>=12)return;const r=pin.e.getBoundingClientRect();pin.events.push({type:event.type,same:pin.e===event.target||pin.e.contains(event.target),x:event.clientX,y:event.clientY,centerX:r.x+r.width/2,centerY:r.y+r.height/2});};for(const type of ['pointerdown','pointerup','click'])document.addEventListener(type,pin.observe,true)})()`,
+        );
       }
       await send('Input.dispatchMouseEvent', {
         type: 'mousePressed',
@@ -571,7 +583,9 @@ const server = http.createServer((req, res) => {
         clickCount: 1,
       });
       if (stablePopover) {
-        trace.beforeRelease = await ev(`(()=>{const pin=window.__overlayClickPin,e=${expression},r=e?.getBoundingClientRect(),hit=document.elementFromPoint(${r.x},${r.y});return {same:!!pin&&e===pin.e&&e?.closest('.feed-reading-more')===pin.p,hit:!!e&&(e===hit||e.contains(hit)),centerX:r&&r.x+r.width/2,centerY:r&&r.y+r.height/2,events:pin?.events}})()`);
+        trace.beforeRelease = await ev(
+          `(()=>{const pin=window.__overlayClickPin,e=${expression},r=e?.getBoundingClientRect(),hit=document.elementFromPoint(${r.x},${r.y});return {same:!!pin&&e===pin.e&&e?.closest('.feed-reading-more')===pin.p,hit:!!e&&(e===hit||e.contains(hit)),centerX:r&&r.x+r.width/2,centerY:r&&r.y+r.height/2,events:pin?.events}})()`,
+        );
         assert(
           trace.beforeRelease.same &&
             trace.beforeRelease.hit &&
@@ -588,7 +602,9 @@ const server = http.createServer((req, res) => {
         clickCount: 1,
       });
       if (stablePopover)
-        trace.events = await ev(`(()=>{const pin=window.__overlayClickPin;for(const type of ['pointerdown','pointerup','click'])document.removeEventListener(type,pin.observe,true);delete window.__overlayClickPin;return pin.events})()`);
+        trace.events = await ev(
+          `(()=>{const pin=window.__overlayClickPin;for(const type of ['pointerdown','pointerup','click'])document.removeEventListener(type,pin.observe,true);delete window.__overlayClickPin;return pin.events})()`,
+        );
       await pause(300);
     };
     const key = async (name, code) => {
@@ -882,7 +898,10 @@ const server = http.createServer((req, res) => {
       await navigate();
       await more();
       await click(button('导入已有文件'), true);
-      await wait("Boolean(document.querySelector('.app-dialog input'))", 'import input mounted');
+      await wait(
+        "Boolean(document.querySelector('.app-dialog input'))",
+        'import input mounted',
+      );
       await click("document.querySelector('.app-dialog input')");
       await send('Input.insertText', { text: 'C:/synthetic-only' });
       await click(button('预览'));
@@ -985,7 +1004,24 @@ const server = http.createServer((req, res) => {
         await modalMatrix(state);
         scenario = 'normal';
       });
-    await run('xhs-comments-removed',async()=>{await navigate('/dash/xiaohongshu');assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);assert.equal(apiReads.filter(r=>r.name==='xiaohongshu.engagement'||r.name==='xiaohongshu.collectComments').length,0);cases.push({name:'xhs-comments-removed',status:'passed'});});
+    await run('xhs-comments-removed', async () => {
+      await navigate('/dash/xiaohongshu');
+      assert.equal(
+        await ev(
+          "document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length",
+        ),
+        0,
+      );
+      assert.equal(
+        apiReads.filter(
+          (r) =>
+            r.name === 'xiaohongshu.engagement' ||
+            r.name === 'xiaohongshu.collectComments',
+        ).length,
+        0,
+      );
+      cases.push({ name: 'xhs-comments-removed', status: 'passed' });
+    });
     await run('xhs-export', async () => {
       await navigate('/dash/xiaohongshu');
       await click(button('导出笔记'));
@@ -1124,7 +1160,10 @@ const server = http.createServer((req, res) => {
       await navigate();
       await more();
       await click(button('导入已有文件'), true);
-      await wait("Boolean(document.querySelector('.app-dialog input'))", 'import input mounted');
+      await wait(
+        "Boolean(document.querySelector('.app-dialog input'))",
+        'import input mounted',
+      );
       await click("document.querySelector('.app-dialog input')");
       await send('Input.insertText', { text: 'C:/synthetic-only' });
       await click(button('预览'));
@@ -1209,7 +1248,7 @@ const server = http.createServer((req, res) => {
           forbidden,
           bodyCalls: 0,
           apiReads,
-      pointerClicks,
+          pointerClicks,
           source: 'compiled Vite app with local synthetic HTTP API',
         },
         null,

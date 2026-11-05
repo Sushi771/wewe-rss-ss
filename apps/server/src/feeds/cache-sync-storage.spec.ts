@@ -2,6 +2,7 @@ import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as sourceGateModule from '../collection/wechat2rss-source-gate';
 import * as providerRegistry from '../collection/provider-registry';
 import * as localCache from '../collection/local-cache-reader';
 import { Wechat2RssSubscriptionBatches } from '../collection/wechat2rss-subscription-batches';
@@ -19,6 +20,7 @@ jest.mock('../collection/sqlite-backup', () => ({
 }));
 describe('cache delta through original SQLite merge', () => {
   let root: string, prisma: PrismaClient, trpc: TrpcService;
+  let sourceGateSpy: jest.SpyInstance;
   let articleReads = 0;
   const mpId = 'MP_WXS_1234567890';
   const url = 'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA==&mid=9&idx=1';
@@ -70,6 +72,10 @@ describe('cache delta through original SQLite merge', () => {
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);
     }
+    // Use the real persistent gate on this fixture's owned SQLite connection.
+    sourceGateSpy = jest
+      .spyOn(sourceGateModule, 'defaultWechat2RssSourceGate')
+      .mockReturnValue(new sourceGateModule.Wechat2RssSourceGate(prisma));
     await prisma.feed.create({
       data: {
         id: mpId,
@@ -90,6 +96,7 @@ describe('cache delta through original SQLite merge', () => {
   });
   afterAll(async () => {
     trpc?.onModuleDestroy();
+    sourceGateSpy?.mockRestore();
     await prisma?.$disconnect();
     for (const [name, value] of Object.entries(oldEnv)) {
       const key = {
@@ -601,7 +608,10 @@ describe('cache delta through original SQLite merge', () => {
     const request = jest
       .spyOn(global, 'fetch')
       .mockImplementation(async (url) => {
-        if (String(url).endsWith('c.jpg')) throw Error('OFFLINE_SINGLE_IMAGE');
+        // A completed 404 is retryable; a transport exception is an unknown
+        // outcome and must keep the persistent source gate closed.
+        if (String(url).endsWith('c.jpg'))
+          return new Response(null, { status: 404 });
         return new Response(png, { headers: { 'Content-Type': 'image/png' } });
       });
     try {

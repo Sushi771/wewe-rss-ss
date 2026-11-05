@@ -39,6 +39,7 @@ function fixture(
     historicalFeedOrder = false,
     localColumn = 'TEXT',
     maximumMigration = null,
+    excludedMigrations = [],
   } = {},
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-startup-sqlite-'));
@@ -60,6 +61,7 @@ function fixture(
     }))
       if (
         entry.isDirectory() &&
+        !excludedMigrations.includes(entry.name) &&
         (!maximumMigration || entry.name <= maximumMigration)
       )
         fs.cpSync(
@@ -451,6 +453,12 @@ function rollbackFixture(
   const f = fixture(t, {
     current: true,
     maximumMigration: searchMigration,
+    // These backdated migrations were added after the approved 20-migration base.
+    // A date cutoff alone must not redefine that immutable rollback inventory.
+    excludedMigrations: [
+      '20261013000000_article_failure_events',
+      '20261014000000_wechat2rss_source_gate',
+    ],
     ...historical,
   });
   fs.writeFileSync(
@@ -537,6 +545,24 @@ for (const [name, sql] of [
       /migration|schema|drift/i,
     );
   });
+test('rollback rejects a backdated migration added to the approved base in both inspectors', (t) => {
+  const f = rollbackFixture(t);
+  const name = '20261013000000_article_failure_events';
+  fs.cpSync(
+    path.resolve(__dirname, '../../apps/server/prisma/migrations', name),
+    path.join(f.migrations, name),
+    { recursive: true },
+  );
+  assert.throws(
+    () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+    /Rollback base migrations changed/,
+  );
+  assert.throws(
+    () => pythonInspect(f.database, f.migrations),
+    /Rollback migrations changed/,
+  );
+});
+
 test('rollback cannot widen the optional extension to an unreviewed base or SQL', (t) => {
   const f = rollbackFixture(t);
   fs.appendFileSync(

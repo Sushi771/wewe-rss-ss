@@ -17,12 +17,21 @@ const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
-test('legacy writer additions cannot hide changed original admission or restart gates',()=>{
- const seams=require('./fixtures/legacy-writer-seams.json');
- for(const [file,entries]of Object.entries(seams))for(const seam of entries){
-   const source=read(file);assert.equal(source.split(seam.after).length,2);
-   assert.throws(()=>restoreLegacyWriter(file,source.replace(seam.after,'/* changed legacy writer gate */')),/exact candidate legacy writer seam/);
- }
+test('legacy writer additions cannot hide changed original admission or restart gates', () => {
+  const seams = require('./fixtures/legacy-writer-seams.json');
+  for (const [file, entries] of Object.entries(seams))
+    for (const seam of entries) {
+      const source = read(file);
+      assert.equal(source.split(seam.after).length, 2);
+      assert.throws(
+        () =>
+          restoreLegacyWriter(
+            file,
+            source.replace(seam.after, '/* changed legacy writer gate */'),
+          ),
+        /exact candidate legacy writer seam/,
+      );
+    }
 });
 function tokens(text) {
   const scanner = ts.createScanner(
@@ -38,43 +47,121 @@ function tokens(text) {
 }
 
 test('platform directory seams retain every prior controller and source statement', () => {
- // The reviewed avatar change reads avatar_url and adds avatarUrl to creator items.
- const originals={'apps/server/src/article-download.controller.ts':'4923fa9409ce762b28863e97788de0912dcb7060','apps/server/src/article-export-source.ts':'c2e7642b52e4a3a15d684eec219e87e3ff260ade','apps/server/src/collection/xiaohongshu.service.ts':'bb68cf3617dab43ff292575ab2e2061e40dc612a'};
- for(const [file,expected] of Object.entries(originals)){
-  const restored=restorePlatformDirectory(file,read(file));
-  assert.equal(crypto.createHash('sha1').update('blob '+Buffer.byteLength(restored)+'\0').update(restored).digest('hex'),expected);
- }
+  // The reviewed avatar change reads avatar_url and adds avatarUrl to creator items.
+  const originals = {
+    'apps/server/src/article-download.controller.ts':
+      '4923fa9409ce762b28863e97788de0912dcb7060',
+    'apps/server/src/article-export-source.ts':
+      'c2e7642b52e4a3a15d684eec219e87e3ff260ade',
+    'apps/server/src/collection/xiaohongshu.service.ts':
+      'bb68cf3617dab43ff292575ab2e2061e40dc612a',
+  };
+  for (const [file, expected] of Object.entries(originals)) {
+    const restored = restorePlatformDirectory(file, read(file));
+    assert.equal(
+      crypto
+        .createHash('sha1')
+        .update('blob ' + Buffer.byteLength(restored) + '\0')
+        .update(restored)
+        .digest('hex'),
+      expected,
+    );
+  }
 });
 
-test('platform directory seams refuse changes to any reviewed addition',()=>{
- const seams=require('./fixtures/xhs-platform-directory-seams.json');
- for(const [file,entries] of Object.entries(seams))for(const seam of entries)
-  assert.throws(()=>restorePlatformDirectory(file,read(file).replace(seam.after,seam.after+'/* changed */').replace(seam.after,'/* removed */')),/exact reviewed platform directory seam/);
+test('platform directory seams refuse changes to any reviewed addition', () => {
+  const seams = require('./fixtures/xhs-platform-directory-seams.json');
+  for (const [file, entries] of Object.entries(seams))
+    for (const seam of entries)
+      assert.throws(
+        () =>
+          restorePlatformDirectory(
+            file,
+            read(file)
+              .replace(seam.after, seam.after + '/* changed */')
+              .replace(seam.after, '/* removed */'),
+          ),
+        /exact reviewed platform directory seam/,
+      );
 });
 
 test('reviewed recovery seam retains the exact existing router source', () => {
-  const restored = restorePreReviewedRecoveryRouter(ts, read('apps/server/src/trpc/trpc.router.ts'));
-  const blob = crypto.createHash('sha1').update('blob '+Buffer.byteLength(restored)+'\0').update(restored).digest('hex');
-  assert.equal(blob, '782fbcd89c949bd06063488594e05b316d61008d', 'exact pre-recovery router from the reviewed baseline');
+  const restored = restorePreReviewedRecoveryRouter(
+    ts,
+    read('apps/server/src/trpc/trpc.router.ts'),
+  );
+  const blob = crypto
+    .createHash('sha1')
+    .update('blob ' + Buffer.byteLength(restored) + '\0')
+    .update(restored)
+    .digest('hex');
+  assert.equal(
+    blob,
+    '782fbcd89c949bd06063488594e05b316d61008d',
+    'exact pre-recovery router from the reviewed baseline',
+  );
 });
 
 test('reviewed recovery seam rejects missing routes and changed writable authentication', () => {
   const source = read('apps/server/src/trpc/trpc.router.ts');
-  for (const name of ['prepareWholeCreatorReviewedAttempt', 'executeWholeCreatorReviewedAttempt', 'reviewWholeCreatorUnknown', 'prepareXhsHistoryHandoff', 'confirmXhsHistoryHandoff']) {
-    const declaration = name+': this.trpcService.protectedProcedure';
+  for (const name of [
+    'prepareWholeCreatorReviewedAttempt',
+    'executeWholeCreatorReviewedAttempt',
+    'reviewWholeCreatorUnknown',
+    'prepareXhsHistoryHandoff',
+    'confirmXhsHistoryHandoff',
+  ]) {
+    const declaration = name + ': this.trpcService.protectedProcedure';
     assert.equal(source.split(declaration).length, 2);
-    assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(declaration, name+': this.trpcService.publicProcedure')), /exact reviewed recovery route/);
-    assert.throws(() => restorePreReviewedRecoveryRouter(ts, source.replace(name+':', 'unreviewedReplacement:')), /all reviewed recovery routes/);
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace(
+            declaration,
+            name + ': this.trpcService.publicProcedure',
+          ),
+        ),
+      /exact reviewed recovery route/,
+    );
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace(name + ':', 'unreviewedReplacement:'),
+        ),
+      /all reviewed recovery routes/,
+    );
   }
 });
 test('new selected recovery routes and group ordering retain their protected declarations', () => {
-  const source=read('apps/server/src/trpc/trpc.router.ts');
-  for(const name of ['reorderGroups','resumeWholeCreatorMedia','resumeWholeCreatorMissingBasic']) {
-    const fixture=require('./fixtures/xhs-cache-router-seams.json').find(entry=>entry.name===name);
-    assert.ok(fixture && fixture.before===null && fixture.after.includes('this.trpcService.protectedProcedure'));
-    const changed=fixture.after.replace('this.trpcService.protectedProcedure','this.trpcService.publicProcedure');
-    assert.notEqual(changed,fixture.after);
-    assert.throws(()=>restorePreReviewedRecoveryRouter(ts,source.replace(fixture.after,changed)),/exact cache collection route/);
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  for (const name of [
+    'reorderGroups',
+    'resumeWholeCreatorMedia',
+    'resumeWholeCreatorMissingBasic',
+  ]) {
+    const fixture = require('./fixtures/xhs-cache-router-seams.json').find(
+      (entry) => entry.name === name,
+    );
+    assert.ok(
+      fixture &&
+        fixture.before === null &&
+        fixture.after.includes('this.trpcService.protectedProcedure'),
+    );
+    const changed = fixture.after.replace(
+      'this.trpcService.protectedProcedure',
+      'this.trpcService.publicProcedure',
+    );
+    assert.notEqual(changed, fixture.after);
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace(fixture.after, changed),
+        ),
+      /exact cache collection route/,
+    );
   }
 });
 test('deployment baseline keeps existing routes and safety/startup/reader/title policies', () => {
@@ -92,7 +179,12 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
   const file = 'apps/server/src/trpc/trpc.router.ts';
   // Assert deletion, then reconstruct only the exact removed reader seam.
   // All old router/wholeCreator/engagement pins remain authoritative.
-  const pinnedRouterSource = restoreXhsReaderRoute(ts, restorePreOriginalLinkRouter(restorePreReviewedRecoveryRouter(ts, read(file))));
+  const pinnedRouterSource = restoreXhsReaderRoute(
+    ts,
+    restorePreOriginalLinkRouter(
+      restorePreReviewedRecoveryRouter(ts, read(file)),
+    ),
+  );
   const ast = ts.createSourceFile(
     file,
     pinnedRouterSource,
@@ -191,15 +283,20 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     // Reader-only files were intentionally removed; keep every download/cache
     // baseline pin below and require these exact retired components to stay absent.
     const removedReaders = {
-      'apps/web/src/components/ArticleReader.tsx': '5427dcc31fac30a42f7daaa09dcbf3e842013d8a65a29ec94c30750ceca1c071',
-      'apps/web/src/utils/article-reader-find.ts': 'f46a6144c8dac9cce7cbb1f3835e1606b5be8b8bd8d192ac336fd73c8eac1b79',
+      'apps/web/src/components/ArticleReader.tsx':
+        '5427dcc31fac30a42f7daaa09dcbf3e842013d8a65a29ec94c30750ceca1c071',
+      'apps/web/src/utils/article-reader-find.ts':
+        'f46a6144c8dac9cce7cbb1f3835e1606b5be8b8bd8d192ac336fd73c8eac1b79',
     };
     if (file in removedReaders) {
       assert.equal(expected, removedReaders[file], 'exact retired reader pin');
       assert.equal(fs.existsSync(file), false, file + ' must remain removed');
       continue;
     }
-    let source = restoreLegacyWriter(file,restorePlatformDirectory(file, read(file)));
+    let source = restoreLegacyWriter(
+      file,
+      restorePlatformDirectory(file, read(file)),
+    );
     if (file === 'apps/server/src/article-download.controller.ts') {
       const additions = [
         [
@@ -236,18 +333,41 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
     }
     let requiredHash = expected;
     if (file === 'scripts/local-release/restart.cjs') {
-      assert.equal(expected, 'd958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc', 'exact pre-preserving restart baseline');
+      assert.equal(
+        expected,
+        'd958e4f2be1bb1f3f031f809669dde57057ffa6c6c7b2cce993862b4c466a4cc',
+        'exact pre-preserving restart baseline',
+      );
       // Reviewed schema proof retention and closed-copy restart inspection.
-      requiredHash = '4ff5d4deb9dc621f6b91ee55309fd1e7674e650f4dcc6c53fc40caea0d7061ea';
-      const restartAst = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+      requiredHash =
+        '4ff5d4deb9dc621f6b91ee55309fd1e7674e650f4dcc6c53fc40caea0d7061ea';
+      const restartAst = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+      );
       const calls = [];
       const visit = (node) => {
-        if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) calls.push(node.expression.name.text);
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression)
+        )
+          calls.push(node.expression.name.text);
         ts.forEachChild(node, visit);
       };
       visit(restartAst);
-      for (const [name, count] of [['validateSameSchema', 1], ['validateActiveBinding', 1], ['bindPreservingChild', 1], ['confirmPreservingProcessExit', 2]])
-        assert.equal(calls.filter((value) => value === name).length, count, 'reviewed preserving restart ' + name);
+      for (const [name, count] of [
+        ['validateSameSchema', 1],
+        ['validateActiveBinding', 1],
+        ['bindPreservingChild', 1],
+        ['confirmPreservingProcessExit', 2],
+      ])
+        assert.equal(
+          calls.filter((value) => value === name).length,
+          count,
+          'reviewed preserving restart ' + name,
+        );
     }
     if (file === 'apps/server/src/prisma/prisma.service.ts') {
       // Keep the deployed baseline pin authoritative. Only this independently
@@ -259,16 +379,38 @@ test('deployment baseline keeps existing routes and safety/startup/reader/title 
       );
       requiredHash =
         '6b71dbdced274a391826ccd6844eff781fd5e01a1dfa9fc765ab46eb2a1a7ab4';
-      const recoveryAst = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+      const recoveryAst = ts.createSourceFile(
+        file,
+        source,
+        ts.ScriptTarget.Latest,
+        true,
+      );
       const service = recoveryAst.statements.find(ts.isClassDeclaration);
       const recovery = service.members.filter(
-        (member) => member.name?.getText(recoveryAst) === 'recoverFailedMediaTransaction',
+        (member) =>
+          member.name?.getText(recoveryAst) === 'recoverFailedMediaTransaction',
       );
       assert.equal(recovery.length, 1, 'one reviewed recovery owner');
-      assert.equal(recovery[0].parameters.length, 0, 'recovery cannot receive a replay callback');
-      assert.ok(recovery[0].body.getText(recoveryAst).includes('await this.$disconnect();'));
-      assert.ok(recovery[0].body.getText(recoveryAst).includes('await this.$connect();'));
-      assert.ok(recovery[0].body.getText(recoveryAst).includes("setDatabaseRecovery('failed')"));
+      assert.equal(
+        recovery[0].parameters.length,
+        0,
+        'recovery cannot receive a replay callback',
+      );
+      assert.ok(
+        recovery[0].body
+          .getText(recoveryAst)
+          .includes('await this.$disconnect();'),
+      );
+      assert.ok(
+        recovery[0].body
+          .getText(recoveryAst)
+          .includes('await this.$connect();'),
+      );
+      assert.ok(
+        recovery[0].body
+          .getText(recoveryAst)
+          .includes("setDatabaseRecovery('failed')"),
+      );
     }
     assert.equal(hash(source), requiredHash, file);
   }

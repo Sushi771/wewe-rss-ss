@@ -27,14 +27,27 @@ function load(file, imports = {}) {
 }
 const helpers = load('apps/web/src/utils/xiaohongshu-subscription.ts');
 test('terminal unknown is not settling after its worker exits; active writer remains fenced', () => {
-  const task={state:'blocked',resumable:false,code:'XHS_DETAIL_OUTCOME_UNKNOWN'};
-  assert.equal(helpers.taskSettling({...task,settling:false}),false);
-  assert.equal(helpers.taskSettling({...task,settling:true}),true);
-  assert.equal(helpers.mayResumeTask({...task,settling:false}),false);
-  assert.equal(helpers.taskSettling(task),true); // Old servers remain conservative.
-  for (const state of [{state:'completed'},{state:'blocked',code:'XHS_TASK_RECEIPT_UNCERTAIN'}]) {
-    assert.equal(helpers.taskSettling({...task,...state,settling:true}),true);
-    assert.equal(helpers.taskSettling({...task,...state,settling:false}),false);
+  const task = {
+    state: 'blocked',
+    resumable: false,
+    code: 'XHS_DETAIL_OUTCOME_UNKNOWN',
+  };
+  assert.equal(helpers.taskSettling({ ...task, settling: false }), false);
+  assert.equal(helpers.taskSettling({ ...task, settling: true }), true);
+  assert.equal(helpers.mayResumeTask({ ...task, settling: false }), false);
+  assert.equal(helpers.taskSettling(task), true); // Old servers remain conservative.
+  for (const state of [
+    { state: 'completed' },
+    { state: 'blocked', code: 'XHS_TASK_RECEIPT_UNCERTAIN' },
+  ]) {
+    assert.equal(
+      helpers.taskSettling({ ...task, ...state, settling: true }),
+      true,
+    );
+    assert.equal(
+      helpers.taskSettling({ ...task, ...state, settling: false }),
+      false,
+    );
   }
 });
 const jsx = (type, props) =>

@@ -2,7 +2,14 @@ name: XHS subscription offline
 
 on:
   push:
-    branches: [codex/xhs-subscription-integration, codex/xhs-depth-integration, feat/xhs-engagement, codex/xhs-receipt-link, codex/xhs-unified-integration]
+    branches:
+      [
+        codex/xhs-subscription-integration,
+        codex/xhs-depth-integration,
+        feat/xhs-engagement,
+        codex/xhs-receipt-link,
+        codex/xhs-unified-integration,
+      ]
   pull_request:
     branches: [fix/desktop-docker-cold-start, codex/xhs-depth-integration]
 

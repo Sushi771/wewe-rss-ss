@@ -2,6 +2,7 @@ import { projectWriterGate } from './collection/project-writer-boundary';
 import { NestFactory } from '@nestjs/core';
 import { TrpcRouter } from '@server/trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
+import { PrismaService } from './prisma/prisma.service';
 import { json, urlencoded } from 'express';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfigurationType } from './configuration';
@@ -56,6 +57,27 @@ async function bootstrap() {
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  app.use(async (req, res, next) => {
+    if (req.path !== '/_local/update-health') return next();
+    const update = (globalThis as any)[
+      Symbol.for('wewe.installed-startup-gate.v1')
+    ];
+    if (!update) return next();
+    if (
+      req.method !== 'GET' ||
+      !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
+        req.socket.remoteAddress || '',
+      )
+    )
+      return res.status(403).end();
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      await app.get(PrismaService).feed.count();
+      return res.json(update.health(true));
+    } catch {
+      return res.status(503).json({ ready: false });
+    }
+  });
   app.use(recoveryHoldHttp);
   app.use(startupAuditHttpGuard);
   mountBrowserTaskTransport(app, { host, port }, browserOptIn);
@@ -93,7 +115,21 @@ async function bootstrap() {
   // Review planning stays independent of startup/backup capacity write gates.
   let stopRetention: () => void = () => undefined;
   try {
-    stopRetention = startSqliteRetentionMaintenance();
+    const update = (globalThis as any)[
+      Symbol.for('wewe.installed-startup-gate.v1')
+    ];
+    if (!update || update.writesAllowed())
+      stopRetention = startSqliteRetentionMaintenance();
+    else
+      void update
+        .waitUntilEnabled()
+        .then((enabled: boolean) => {
+          if (enabled && !closed)
+            stopRetention = startSqliteRetentionMaintenance();
+        })
+        .catch(() => {
+          console.warn('[UPDATE_RETENTION_START_DEFERRED]');
+        });
   } catch {
     console.warn('[SQLITE_RETENTION_CONFIGURATION_REQUIRES_REVIEW]');
   }

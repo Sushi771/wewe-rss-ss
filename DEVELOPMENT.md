@@ -70,5 +70,4 @@ separate acceptance requirement.
 
 同目录完整文章在媒体准备前跳过，缺图按回执补齐并保留原正文；界面区分新增、跳过、补齐、失败。全周期操作使用“导出当前筛选全部”，ZIP独立区分整号与当前筛选快照。产品行为、回执保护、取消边界与离线验收见[导出说明](docs/INCREMENTAL_ARTICLE_EXPORT.md)。
 
-
 2026-10-25 小红书统一候选未部署，生产保持 f8fbb3c。目录 Markdown+image/video 直接保存为主；ZIP为兼容入口。实现、schema、回滚及批准后小批量验收见 docs/xiaohongshu/TECHNICAL.md；已发生的真实归档及未知历史持久异常不得用新合成测试重写。

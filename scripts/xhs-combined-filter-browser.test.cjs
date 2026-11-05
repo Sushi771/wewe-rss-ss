@@ -238,7 +238,16 @@ function data(name, input) {
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
-          metrics: {values:{likes:i<2?null:i===2?0:i,collects:i%7,shares:i%9,comments:i%11},collectedAt:1,evidence:'source-only'},
+          metrics: {
+            values: {
+              likes: i < 2 ? null : i === 2 ? 0 : i,
+              collects: i % 7,
+              shares: i % 9,
+              comments: i % 11,
+            },
+            collectedAt: 1,
+            evidence: 'source-only',
+          },
           status: 'complete',
         })),
       };
@@ -587,33 +596,224 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});
-    await wait("document.querySelectorAll('.content-article-row').length===20",'initial notes');
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial notes',
+    );
 
-    await viewport(1440,900);
-    const results=[];
-    const button=text=>"[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==="+JSON.stringify(text)+")";
-    const select=async(label,value)=>{await ev("(()=>{const e=document.querySelector('select[aria-label=\""+label+"\"]');e.value="+JSON.stringify(value)+";e.dispatchEvent(new Event('change',{bubbles:true}));})()");await pause(100);};
-    const input=async(label,value)=>{await click("document.querySelector('input[aria-label=\""+label+"\"]')");await send('Input.dispatchKeyEvent',{type:'keyDown',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'a',code:'KeyA',windowsVirtualKeyCode:65,modifiers:2});await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Backspace',code:'Backspace',windowsVirtualKeyCode:8});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Backspace',code:'Backspace',windowsVirtualKeyCode:8});if(value)await send('Input.insertText',{text:value});await pause(100);};
-    const count=async expected=>{await wait("document.querySelector('.xhs-list-caption').textContent.includes('当前范围 "+expected+" 条目录')",'matched total '+expected);assert.equal(await ev("document.querySelectorAll('.content-article-row').length"),Math.min(expected,20));};
-    await count(120);await click("document.querySelector('.xhs-combined-filter summary')");await click(button('添加条件'));
-    assert(await ev("document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')"));
-    await input('条件 1 数值','100');await count(20);
-    await click(button('添加条件'));await select('条件 2 指标','collects');await select('条件 2 比较方式','<=');await input('条件 2 数值','2');await count(8);
-    await click("document.querySelector('[role=columnheader] button[aria-label^=点赞排序]')");assert.equal(await ev("document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()"),'119');
-    await select('条件匹配方式','or');await count(64);assert.equal(await ev("document.querySelector('[role=columnheader] button[aria-label^=点赞排序]').closest('[role=columnheader]').getAttribute('aria-sort')"),'descending');
-    results.push({name:'and-or-global-filter-before-sort',status:'passed'});
-    await click("document.querySelector('button[aria-label=\"删除条件 2\"]')");await select('条件 1 比较方式','between');await input('条件 1 下限','0');await input('条件 1 上限','0');await count(1);assert.equal(await ev("document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()"),'0');
-    await input('条件 1 下限','-1');assert(await ev("document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')"));await count(0);
-    await input('条件 1 下限','10');await input('条件 1 上限','2');assert(await ev("document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('下限不能大于上限')"));
-    await click(button('清空条件'));await count(120);assert.equal(await ev("document.querySelector('select[aria-label=条件匹配方式]').value"),'and');
-    results.push({name:'zero-unknown-invalid-range-clear',status:'passed'});
-    await send('Emulation.setFocusEmulationEnabled',{enabled:true});await ev(button('添加条件')+'.focus()');await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Enter',code:'Enter',windowsVirtualKeyCode:13,text:'\r'});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Enter',code:'Enter',windowsVirtualKeyCode:13});await pause(100);assert.equal(await ev("document.querySelectorAll('.xhs-condition-row').length"),1);
-    await input('条件 1 数值','100');await click(button('添加条件'));await select('条件 2 指标','collects');await select('条件 2 比较方式','<');await input('条件 2 数值','3');await count(8);
-    for(const width of [320,390,768,1440,2048]){await viewport(width,900);const geometry=await ev("({overflow:document.documentElement.scrollWidth>innerWidth+1,inputs:[...document.querySelectorAll('.xhs-condition-row input,.xhs-condition-row select,.xhs-condition-row button')].map(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.x>=0&&r.right<=innerWidth})})");assert(!geometry.overflow&&geometry.inputs.every(Boolean),JSON.stringify(geometry));const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'combined-'+width+'.png'),Buffer.from(shot.data,'base64'));results.push({name:'keyboard-and-layout',width,status:'passed',geometry});}
-    await viewport(768,440);await click("document.querySelector('input[aria-label=\"条件 2 数值\"]')");results.push({name:'short-window-input-hit',status:'passed'});
-    await viewport(390,900);await click("document.querySelector('.xhs-combined-filter summary')");assert.equal(await ev("document.querySelector('.xhs-combined-filter').open"),false);const compact=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'combined-collapsed-390.png'),Buffer.from(compact.data,'base64'));results.push({name:'collapsed-mobile-results',status:'passed'});
-    assert.equal(apiReads.filter(r=>/engagement|comments|prepareOriginalLink|refreshMetrics|resolveSubscription/.test(r.name)).length,0);assert.deepEqual(forbidden,[]);fs.writeFileSync(path.join(evidence,'result.json'),JSON.stringify({results,forbidden,sourceCalls:0},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    await viewport(1440, 900);
+    const results = [];
+    const button = (text) =>
+      "[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===" +
+      JSON.stringify(text) +
+      ')';
+    const select = async (label, value) => {
+      await ev(
+        '(()=>{const e=document.querySelector(\'select[aria-label="' +
+          label +
+          '"]\');e.value=' +
+          JSON.stringify(value) +
+          ";e.dispatchEvent(new Event('change',{bubbles:true}));})()",
+      );
+      await pause(100);
+    };
+    const input = async (label, value) => {
+      await click(
+        'document.querySelector(\'input[aria-label="' + label + '"]\')',
+      );
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'a',
+        code: 'KeyA',
+        windowsVirtualKeyCode: 65,
+        modifiers: 2,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'a',
+        code: 'KeyA',
+        windowsVirtualKeyCode: 65,
+        modifiers: 2,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'Backspace',
+        code: 'Backspace',
+        windowsVirtualKeyCode: 8,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Backspace',
+        code: 'Backspace',
+        windowsVirtualKeyCode: 8,
+      });
+      if (value) await send('Input.insertText', { text: value });
+      await pause(100);
+    };
+    const count = async (expected) => {
+      await wait(
+        "document.querySelector('.xhs-list-caption').textContent.includes('当前范围 " +
+          expected +
+          " 条目录')",
+        'matched total ' + expected,
+      );
+      assert.equal(
+        await ev("document.querySelectorAll('.content-article-row').length"),
+        Math.min(expected, 20),
+      );
+    };
+    await count(120);
+    await click("document.querySelector('.xhs-combined-filter summary')");
+    await click(button('添加条件'));
+    assert(
+      await ev(
+        "document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')",
+      ),
+    );
+    await input('条件 1 数值', '100');
+    await count(20);
+    await click(button('添加条件'));
+    await select('条件 2 指标', 'collects');
+    await select('条件 2 比较方式', '<=');
+    await input('条件 2 数值', '2');
+    await count(8);
+    await click(
+      "document.querySelector('[role=columnheader] button[aria-label^=点赞排序]')",
+    );
+    assert.equal(
+      await ev(
+        "document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()",
+      ),
+      '119',
+    );
+    await select('条件匹配方式', 'or');
+    await count(64);
+    assert.equal(
+      await ev(
+        "document.querySelector('[role=columnheader] button[aria-label^=点赞排序]').closest('[role=columnheader]').getAttribute('aria-sort')",
+      ),
+      'descending',
+    );
+    results.push({
+      name: 'and-or-global-filter-before-sort',
+      status: 'passed',
+    });
+    await click('document.querySelector(\'button[aria-label="删除条件 2"]\')');
+    await select('条件 1 比较方式', 'between');
+    await input('条件 1 下限', '0');
+    await input('条件 1 上限', '0');
+    await count(1);
+    assert.equal(
+      await ev(
+        "document.querySelector('.content-article-row [data-metric=likes]').textContent.trim()",
+      ),
+      '0',
+    );
+    await input('条件 1 下限', '-1');
+    assert(
+      await ev(
+        "document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('非负数')",
+      ),
+    );
+    await count(0);
+    await input('条件 1 下限', '10');
+    await input('条件 1 上限', '2');
+    assert(
+      await ev(
+        "document.querySelector('.xhs-combined-filter [role=alert]').textContent.includes('下限不能大于上限')",
+      ),
+    );
+    await click(button('清空条件'));
+    await count(120);
+    assert.equal(
+      await ev(
+        "document.querySelector('select[aria-label=条件匹配方式]').value",
+      ),
+      'and',
+    );
+    results.push({
+      name: 'zero-unknown-invalid-range-clear',
+      status: 'passed',
+    });
+    await send('Emulation.setFocusEmulationEnabled', { enabled: true });
+    await ev(button('添加条件') + '.focus()');
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      text: '\r',
+    });
+    await send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    });
+    await pause(100);
+    assert.equal(
+      await ev("document.querySelectorAll('.xhs-condition-row').length"),
+      1,
+    );
+    await input('条件 1 数值', '100');
+    await click(button('添加条件'));
+    await select('条件 2 指标', 'collects');
+    await select('条件 2 比较方式', '<');
+    await input('条件 2 数值', '3');
+    await count(8);
+    for (const width of [320, 390, 768, 1440, 2048]) {
+      await viewport(width, 900);
+      const geometry = await ev(
+        "({overflow:document.documentElement.scrollWidth>innerWidth+1,inputs:[...document.querySelectorAll('.xhs-condition-row input,.xhs-condition-row select,.xhs-condition-row button')].map(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.x>=0&&r.right<=innerWidth})})",
+      );
+      assert(
+        !geometry.overflow && geometry.inputs.every(Boolean),
+        JSON.stringify(geometry),
+      );
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(evidence, 'combined-' + width + '.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
+      results.push({
+        name: 'keyboard-and-layout',
+        width,
+        status: 'passed',
+        geometry,
+      });
+    }
+    await viewport(768, 440);
+    await click('document.querySelector(\'input[aria-label="条件 2 数值"]\')');
+    results.push({ name: 'short-window-input-hit', status: 'passed' });
+    await viewport(390, 900);
+    await click("document.querySelector('.xhs-combined-filter summary')");
+    assert.equal(
+      await ev("document.querySelector('.xhs-combined-filter').open"),
+      false,
+    );
+    const compact = await send('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(
+      path.join(evidence, 'combined-collapsed-390.png'),
+      Buffer.from(compact.data, 'base64'),
+    );
+    results.push({ name: 'collapsed-mobile-results', status: 'passed' });
+    assert.equal(
+      apiReads.filter((r) =>
+        /engagement|comments|prepareOriginalLink|refreshMetrics|resolveSubscription/.test(
+          r.name,
+        ),
+      ).length,
+      0,
+    );
+    assert.deepEqual(forbidden, []);
+    fs.writeFileSync(
+      path.join(evidence, 'result.json'),
+      JSON.stringify({ results, forbidden, sourceCalls: 0 }, null, 2),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

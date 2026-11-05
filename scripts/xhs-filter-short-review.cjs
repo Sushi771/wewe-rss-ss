@@ -204,7 +204,9 @@ function data(name, input) {
           creatorName: '合成博主',
           kind: 'image-text',
           status: 'complete',
-          metrics: { values: { likes: 0, collects: null, shares: null, comments: null } },
+          metrics: {
+            values: { likes: 0, collects: null, shares: null, comments: null },
+          },
         })),
       };
     case 'xiaohongshu.engagement':
@@ -471,13 +473,157 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});await wait('Boolean(document.querySelector(".content-article-row"))','rows');await click('document.querySelector(".xhs-combined-filter summary")');const add='[...document.querySelectorAll(".xhs-combined-filter button")].find(e=>e.textContent.includes("添加条件"))';await click(add);
-    const fill=async()=>ev('(()=>{for(const e of document.querySelectorAll(".xhs-combined-filter input")){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(e,"0");e.dispatchEvent(new Event("input",{bubbles:true}));}})()');await fill();await wait('Boolean(document.querySelector(".content-article-row"))','filtered rows');
-    const results=[];for(const [width,height,zoom]of [[390,900,1.25],[320,900,1.25],[390,540,1.25],[390,540,1],[320,540,1.25],[390,480,1.25],[640,540,1.25],[768,540,1.25],[1024,540,1.25],[1440,540,1.25]]){await viewport(width,height,zoom);let g=await geometry();assert.equal(g.documentHeight,g.height,'single viewport '+JSON.stringify(g));assert(!g.overflow);assert(g.region.height>=79);await ev('document.querySelector(".feed-article-scroll").scrollIntoView({block:"nearest"})');const visibleList=await ev('(()=>{const r=document.querySelector(".feed-article-scroll").getBoundingClientRect();return Math.min(innerHeight,r.bottom)-Math.max(0,r.top)})()');assert(visibleList>=79,'list visible after pane scroll '+visibleList);const titleVisible=await ev('(()=>{const e=document.querySelector(".content-article-row [data-original-note-id]");e.focus();e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===e||e.contains(h)})()');assert(titleVisible,'article title reachable below sort header');results.push({name:'one-condition-bounded-layout',titleVisible,width,height,zoom,g,visibleList});}
-    await viewport(390,540,1.25);for(let n=1;n<8;n++){await click(add);await fill();}assert.equal(await ev('document.querySelectorAll(".xhs-condition-row").length'),8);await wait('Boolean(document.querySelector(".content-article-row"))','eight-condition rows');
-    const controls=await ev('(()=>{const root=document.querySelector(".xhs-combined-filter"),els=[...root.querySelectorAll("select,input,button")].filter(e=>!e.disabled);return els.map((e,index)=>({index,label:e.getAttribute("aria-label")||e.textContent.trim()}))})()');for(const c of controls){const hit=await ev('(()=>{const e=[...document.querySelectorAll(".xhs-combined-filter select,.xhs-combined-filter input,.xhs-combined-filter button")].filter(e=>!e.disabled)['+c.index+'];e.focus();e.scrollIntoView({block:"nearest"});const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {focused:document.activeElement===e,hit:e===hit||e.contains(hit),label:e.getAttribute("aria-label")||e.textContent.trim()}})()');assert(hit.focused&&hit.hit,JSON.stringify(hit));}
-    await ev('document.querySelector(".xhs-combined-filter select").focus()');for(let n=0;n<12;n++){await send('Input.dispatchKeyEvent',{type:'keyDown',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await send('Input.dispatchKeyEvent',{type:'keyUp',key:'Tab',code:'Tab',windowsVirtualKeyCode:9});await pause(25);const hit=await ev('(()=>{const e=document.activeElement,r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {inside:!!e.closest(".xhs-combined-filter"),hit:h===e||e.contains(h),label:e.getAttribute("aria-label")}})()');assert(hit.inside&&hit.hit,JSON.stringify(hit));}
-    await ev('document.querySelector(".feed-article-scroll").scrollIntoView({block:"nearest"})');const g=await geometry();assert.equal(g.documentHeight,g.height);assert(g.region.height>=79);assert(!g.overflow);const bar=await ev('(()=>{const e=document.querySelector(".xhs-filter-bar");return {height:e.clientHeight,scroll:e.scrollHeight,top:e.scrollTop}})()');assert(bar.scroll>bar.height);const titleHit=await ev('(()=>{const e=document.querySelector(".content-article-row [data-original-note-id]");e.focus();e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {hit:h===e||e.contains(h),focused:document.activeElement===e,top:r.top,bottom:r.bottom,headerPosition:getComputedStyle(document.querySelector(".xhs-note-head")).position,documentHeight:document.documentElement.scrollHeight,height:innerHeight}})()');assert(titleHit.hit&&titleHit.focused&&titleHit.documentHeight===titleHit.height,JSON.stringify(titleHit));results.push({name:'short-window-title-visible-below-sort-header',titleHit});results.push({name:'eight-conditions-all-controls-and-tab-reachable',controls:controls.length,g,bar});const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'eight-conditions-390-125.png'),Buffer.from(shot.data,'base64'));assert.deepEqual(forbidden,[]);fs.writeFileSync(path.join(evidence,'target-result.json'),JSON.stringify({results,sourceCalls:0,forbidden},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      'Boolean(document.querySelector(".content-article-row"))',
+      'rows',
+    );
+    await click('document.querySelector(".xhs-combined-filter summary")');
+    const add =
+      '[...document.querySelectorAll(".xhs-combined-filter button")].find(e=>e.textContent.includes("添加条件"))';
+    await click(add);
+    const fill = async () =>
+      ev(
+        '(()=>{for(const e of document.querySelectorAll(".xhs-combined-filter input")){Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set.call(e,"0");e.dispatchEvent(new Event("input",{bubbles:true}));}})()',
+      );
+    await fill();
+    await wait(
+      'Boolean(document.querySelector(".content-article-row"))',
+      'filtered rows',
+    );
+    const results = [];
+    for (const [width, height, zoom] of [
+      [390, 900, 1.25],
+      [320, 900, 1.25],
+      [390, 540, 1.25],
+      [390, 540, 1],
+      [320, 540, 1.25],
+      [390, 480, 1.25],
+      [640, 540, 1.25],
+      [768, 540, 1.25],
+      [1024, 540, 1.25],
+      [1440, 540, 1.25],
+    ]) {
+      await viewport(width, height, zoom);
+      let g = await geometry();
+      assert.equal(
+        g.documentHeight,
+        g.height,
+        'single viewport ' + JSON.stringify(g),
+      );
+      assert(!g.overflow);
+      assert(g.region.height >= 79);
+      await ev(
+        'document.querySelector(".feed-article-scroll").scrollIntoView({block:"nearest"})',
+      );
+      const visibleList = await ev(
+        '(()=>{const r=document.querySelector(".feed-article-scroll").getBoundingClientRect();return Math.min(innerHeight,r.bottom)-Math.max(0,r.top)})()',
+      );
+      assert(
+        visibleList >= 79,
+        'list visible after pane scroll ' + visibleList,
+      );
+      const titleVisible = await ev(
+        '(()=>{const e=document.querySelector(".content-article-row [data-original-note-id]");e.focus();e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return h===e||e.contains(h)})()',
+      );
+      assert(titleVisible, 'article title reachable below sort header');
+      results.push({
+        name: 'one-condition-bounded-layout',
+        titleVisible,
+        width,
+        height,
+        zoom,
+        g,
+        visibleList,
+      });
+    }
+    await viewport(390, 540, 1.25);
+    for (let n = 1; n < 8; n++) {
+      await click(add);
+      await fill();
+    }
+    assert.equal(
+      await ev('document.querySelectorAll(".xhs-condition-row").length'),
+      8,
+    );
+    await wait(
+      'Boolean(document.querySelector(".content-article-row"))',
+      'eight-condition rows',
+    );
+    const controls = await ev(
+      '(()=>{const root=document.querySelector(".xhs-combined-filter"),els=[...root.querySelectorAll("select,input,button")].filter(e=>!e.disabled);return els.map((e,index)=>({index,label:e.getAttribute("aria-label")||e.textContent.trim()}))})()',
+    );
+    for (const c of controls) {
+      const hit = await ev(
+        '(()=>{const e=[...document.querySelectorAll(".xhs-combined-filter select,.xhs-combined-filter input,.xhs-combined-filter button")].filter(e=>!e.disabled)[' +
+          c.index +
+          '];e.focus();e.scrollIntoView({block:"nearest"});const r=e.getBoundingClientRect(),hit=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {focused:document.activeElement===e,hit:e===hit||e.contains(hit),label:e.getAttribute("aria-label")||e.textContent.trim()}})()',
+      );
+      assert(hit.focused && hit.hit, JSON.stringify(hit));
+    }
+    await ev('document.querySelector(".xhs-combined-filter select").focus()');
+    for (let n = 0; n < 12; n++) {
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyDown',
+        key: 'Tab',
+        code: 'Tab',
+        windowsVirtualKeyCode: 9,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key: 'Tab',
+        code: 'Tab',
+        windowsVirtualKeyCode: 9,
+      });
+      await pause(25);
+      const hit = await ev(
+        '(()=>{const e=document.activeElement,r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {inside:!!e.closest(".xhs-combined-filter"),hit:h===e||e.contains(h),label:e.getAttribute("aria-label")}})()',
+      );
+      assert(hit.inside && hit.hit, JSON.stringify(hit));
+    }
+    await ev(
+      'document.querySelector(".feed-article-scroll").scrollIntoView({block:"nearest"})',
+    );
+    const g = await geometry();
+    assert.equal(g.documentHeight, g.height);
+    assert(g.region.height >= 79);
+    assert(!g.overflow);
+    const bar = await ev(
+      '(()=>{const e=document.querySelector(".xhs-filter-bar");return {height:e.clientHeight,scroll:e.scrollHeight,top:e.scrollTop}})()',
+    );
+    assert(bar.scroll > bar.height);
+    const titleHit = await ev(
+      '(()=>{const e=document.querySelector(".content-article-row [data-original-note-id]");e.focus();e.scrollIntoView({block:"center"});const r=e.getBoundingClientRect(),h=document.elementFromPoint(r.x+r.width/2,r.y+r.height/2);return {hit:h===e||e.contains(h),focused:document.activeElement===e,top:r.top,bottom:r.bottom,headerPosition:getComputedStyle(document.querySelector(".xhs-note-head")).position,documentHeight:document.documentElement.scrollHeight,height:innerHeight}})()',
+    );
+    assert(
+      titleHit.hit &&
+        titleHit.focused &&
+        titleHit.documentHeight === titleHit.height,
+      JSON.stringify(titleHit),
+    );
+    results.push({
+      name: 'short-window-title-visible-below-sort-header',
+      titleHit,
+    });
+    results.push({
+      name: 'eight-conditions-all-controls-and-tab-reachable',
+      controls: controls.length,
+      g,
+      bar,
+    });
+    const shot = await send('Page.captureScreenshot', { format: 'png' });
+    fs.writeFileSync(
+      path.join(evidence, 'eight-conditions-390-125.png'),
+      Buffer.from(shot.data, 'base64'),
+    );
+    assert.deepEqual(forbidden, []);
+    fs.writeFileSync(
+      path.join(evidence, 'target-result.json'),
+      JSON.stringify({ results, sourceCalls: 0, forbidden }, null, 2),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

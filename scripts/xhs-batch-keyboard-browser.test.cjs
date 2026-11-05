@@ -9,7 +9,24 @@ const root = path.resolve(__dirname, '..'),
     path.join(require('os').tmpdir(), 'wewe-xhs-batch-'),
   );
 fs.mkdirSync(evidence, { recursive: true });
-const apiReads = []; const batchPosts=[]; let batchReceipt=null,resumeCount=0; const initialItems=()=>Array.from({length:20},(_,index)=>({index,fingerprint:'synthetic-'+index,state:index===0?'subscribed':index===2?'duplicate':index===1?'needs_context':'queued',...(index===1?{code:'XHS_SOURCE_VERIFICATION_BLOCKED'}:{})}));
+const apiReads = [];
+const batchPosts = [];
+let batchReceipt = null,
+  resumeCount = 0;
+const initialItems = () =>
+  Array.from({ length: 20 }, (_, index) => ({
+    index,
+    fingerprint: 'synthetic-' + index,
+    state:
+      index === 0
+        ? 'subscribed'
+        : index === 2
+          ? 'duplicate'
+          : index === 1
+            ? 'needs_context'
+            : 'queued',
+    ...(index === 1 ? { code: 'XHS_SOURCE_VERIFICATION_BLOCKED' } : {}),
+  }));
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const image =
   'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="%23007aff"/></svg>';
@@ -214,8 +231,17 @@ function data(name, input) {
         contentHtml:
           '<h1>示例正文</h1><p>这是一段仅用于界面验收的示例文字。阅读正文时可以查找关键词。</p><p>第二段示例文字，保持正常阅读间距。</p><img alt="本地示例图片" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">',
       };
-    case 'xiaohongshu.subscriptionBatch': return batchReceipt;
-    case 'xiaohongshu.sourceRequestBudget':return {budgetId:'synthetic-budget',limit:50,used:2,remaining:48,nextAt:0,intervalMs:5000};
+    case 'xiaohongshu.subscriptionBatch':
+      return batchReceipt;
+    case 'xiaohongshu.sourceRequestBudget':
+      return {
+        budgetId: 'synthetic-budget',
+        limit: 50,
+        used: 2,
+        remaining: 48,
+        nextAt: 0,
+        intervalMs: 5000,
+      };
     case 'xiaohongshu.capability':
       return { canRefresh: false };
     case 'xiaohongshu.connectionStatus':
@@ -240,7 +266,16 @@ function data(name, input) {
           creatorId: 'creator-one',
           creatorName: '合成博主',
           kind: 'image-text',
-          metrics: {values:{likes:i<2?null:i,collects:i%7,shares:i%9,comments:i%11},collectedAt:1,evidence:'source-only'},
+          metrics: {
+            values: {
+              likes: i < 2 ? null : i,
+              collects: i % 7,
+              shares: i % 9,
+              comments: i % 11,
+            },
+            collectedAt: 1,
+            evidence: 'source-only',
+          },
           status: 'complete',
         })),
       };
@@ -340,13 +375,67 @@ const server = http.createServer((req, res) => {
       }),
     );
   }
-  if(req.method==='POST'&&/^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(u.pathname)){
-    let raw='';req.on('data',chunk=>raw+=chunk);req.on('end',()=>{const parsed=JSON.parse(raw),input=parsed[0]??parsed,route=u.pathname.split('.').at(-1);batchPosts.push({route,clientRequestId:input.clientRequestId,batchId:input.batchId,groupId:input.groupId,textLength:input.text?.length});
-      if(route==='startSubscriptionBatch')batchReceipt={batchId:'synthetic-batch',state:'paused',items:initialItems()};
-      if(route==='resumeSubscriptionBatch'){resumeCount++;batchReceipt={...batchReceipt,state:resumeCount===1?'running':'paused',items:batchReceipt.items.map(item=>item.index===1?{...item,state:resumeCount===1?'resolving':'unknown',code:resumeCount===1?undefined:'XHS_TASK_RECEIPT_UNCERTAIN'}:item)};}
-      if(route==='cancelSubscriptionBatch')batchReceipt={...batchReceipt,state:'cancelled',items:batchReceipt.items.map(item=>['queued','resolving'].includes(item.state)?{...item,state:'needs_context'}:item)};
-      const response=batchReceipt;setTimeout(()=>res.end(JSON.stringify({result:{data:response}})),route==='startSubscriptionBatch'?900:150);
-    });return;
+  if (
+    req.method === 'POST' &&
+    /^\/trpc\/xiaohongshu\.(startSubscriptionBatch|resumeSubscriptionBatch|cancelSubscriptionBatch)$/.test(
+      u.pathname,
+    )
+  ) {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    req.on('end', () => {
+      const parsed = JSON.parse(raw),
+        input = parsed[0] ?? parsed,
+        route = u.pathname.split('.').at(-1);
+      batchPosts.push({
+        route,
+        clientRequestId: input.clientRequestId,
+        batchId: input.batchId,
+        groupId: input.groupId,
+        textLength: input.text?.length,
+      });
+      if (route === 'startSubscriptionBatch')
+        batchReceipt = {
+          batchId: 'synthetic-batch',
+          state: 'paused',
+          items: initialItems(),
+        };
+      if (route === 'resumeSubscriptionBatch') {
+        resumeCount++;
+        batchReceipt = {
+          ...batchReceipt,
+          state: resumeCount === 1 ? 'running' : 'paused',
+          items: batchReceipt.items.map((item) =>
+            item.index === 1
+              ? {
+                  ...item,
+                  state: resumeCount === 1 ? 'resolving' : 'unknown',
+                  code:
+                    resumeCount === 1
+                      ? undefined
+                      : 'XHS_TASK_RECEIPT_UNCERTAIN',
+                }
+              : item,
+          ),
+        };
+      }
+      if (route === 'cancelSubscriptionBatch')
+        batchReceipt = {
+          ...batchReceipt,
+          state: 'cancelled',
+          items: batchReceipt.items.map((item) =>
+            ['queued', 'resolving'].includes(item.state)
+              ? { ...item, state: 'needs_context' }
+              : item,
+          ),
+        };
+      const response = batchReceipt;
+      setTimeout(
+        () => res.end(JSON.stringify({ result: { data: response } })),
+        route === 'startSubscriptionBatch' ? 900 : 150,
+      );
+    });
+    return;
   }
   if (req.method !== 'GET') {
     forbidden.push(req.url);
@@ -597,28 +686,249 @@ const server = http.createServer((req, res) => {
         checked:document.querySelectorAll('.content-article-row input:checked').length};
     })()`);
 
-    await send('Page.navigate',{url:origin+'/dash/xiaohongshu'});
-    await wait("document.querySelectorAll('.content-article-row').length===20",'initial notes');
+    await send('Page.navigate', { url: origin + '/dash/xiaohongshu' });
+    await wait(
+      "document.querySelectorAll('.content-article-row').length===20",
+      'initial notes',
+    );
 
-
-    const results=[],button=text=>"[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==="+JSON.stringify(text)+")";
-    const pressKey=async(key,code,keyCode,modifiers=0)=>{await send('Input.dispatchKeyEvent',{type:'rawKeyDown',key,code,windowsVirtualKeyCode:keyCode,nativeVirtualKeyCode:keyCode,modifiers});await send('Input.dispatchKeyEvent',{type:'keyUp',key,code,windowsVirtualKeyCode:keyCode,nativeVirtualKeyCode:keyCode,modifiers});await pause(50);};
-    const focus=async expression=>{assert(await ev('(()=>{const e='+expression+';if(!e||e.disabled)return false;e.focus();return document.activeElement===e})()'));};
-    const paste=async text=>{await focus("document.querySelector('textarea')");await send('Input.insertText',{text});await pause(100);};
-    const checkFocus=()=>ev("(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),a=document.activeElement;return {inside:d.contains(a),tag:a.tagName,label:a.getAttribute('aria-label')||a.textContent?.trim().slice(0,50)}})()");
-    await viewport(1024,700);await focus("document.querySelector('button[aria-label=更多订阅操作]')");await pressKey('Enter','Enter',13);await wait('Boolean('+button('批量订阅')+')','batch menu');await focus(button('批量订阅'));await pressKey('Enter','Enter',13);await wait("Boolean(document.querySelector('[role=dialog] textarea'))",'keyboard opens dialog');await pause(150);
-    const tabStops=[];for(let n=0;n<18;n++){await pressKey('Tab','Tab',9);const f=await checkFocus();assert(f.inside,JSON.stringify(f));tabStops.push(f);}
-    for(const tag of ['TEXTAREA','SELECT','BUTTON'])assert(tabStops.some(x=>x.tag===tag),'keyboard reaches '+tag);
-    await pressKey('Tab','Tab',9,8);assert((await checkFocus()).inside,'shift tab remains trapped');results.push({name:'tab-shift-tab-focus-trap',status:'passed',tabStops});
-    await paste('分享 https://xhslink.com/a/synthetic-keyboard');await focus(button('开始批量订阅'));await pressKey('Enter','Enter',13);await pressKey('Enter','Enter',13);await wait("document.querySelector('[role=dialog]:has(textarea)').textContent.includes('正在提交')",'submit pending');assert.equal(batchPosts.filter(x=>x.route==='startSubscriptionBatch').length,1);
-    await pressKey('Escape','Escape',27);await wait("!document.querySelector('[role=dialog]:has(textarea)')",'escape closes pending submission');await pause(1100);assert.equal(await ev("Boolean(document.querySelector('[role=dialog]:has(textarea)'))"),false,'late receipt cannot reopen');assert(['批量订阅','更多'].includes(await ev("document.activeElement.textContent.trim()")),'escape restores a visible batch trigger');assert.equal(batchPosts.length,1);results.push({name:'enter-once-escape-late-receipt-focus-restore',status:'passed'});
-    if(!await ev('Boolean('+button('批量订阅')+')')){await focus("document.querySelector('button[aria-label=更多订阅操作]')");await pressKey(' ','Space',32);await wait('Boolean('+button('批量订阅')+')','reopen batch menu');await focus(button('批量订阅'));}
-    await pressKey(' ','Space',32);await wait("Boolean(document.querySelector('[aria-label=批量订阅回执]'))",'space reopens receipt');assert.equal(await ev("document.querySelector('textarea').value"),'');assert(await ev(button('继续未完成项')+'.disabled'),'context required after reopen');assert.equal(batchPosts.length,1);
-    await paste('https://xhslink.com/a/synthetic-keyboard');await focus(button('继续未完成项'));await pressKey(' ','Space',32);await pressKey(' ','Space',32);await wait("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('正在处理')",'space resumes');assert.equal(batchPosts.filter(x=>x.route==='resumeSubscriptionBatch').length,1);assert(await ev("document.querySelector('textarea').disabled"));
-    await focus(button('取消批次'));await pressKey('Enter','Enter',13);await pressKey('Enter','Enter',13);await wait("document.querySelector('[aria-label=批量订阅回执]').textContent.includes('已取消')",'enter cancels');assert.equal(batchPosts.filter(x=>x.route==='cancelSubscriptionBatch').length,1);results.push({name:'space-explicit-context-resume-enter-cancel-once',status:'passed'});
-    for(const [width,height] of [[390,360],[667,320],[320,320]]){await viewport(width,height);await pause(100);const geometry=await ev("(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),r=d.getBoundingClientRect(),buttons=[...d.querySelectorAll('button')].filter(e=>!e.disabled&&e.tabIndex>=0&&e.checkVisibility()&&e.getBoundingClientRect().height),visible=e=>{e.focus();e.scrollIntoView({block:'nearest'});const a=e.getBoundingClientRect(),hit=document.elementFromPoint(a.x+a.width/2,a.y+a.height/2);return {label:e.getAttribute('aria-label')||e.textContent.trim(),x:a.x,y:a.y,right:a.right,bottom:a.bottom,hit:hit===e||e.contains(hit),focused:document.activeElement===e}};return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,overflow:document.documentElement.scrollWidth>innerWidth+1,buttons:buttons.map(visible),scrolls:[...d.querySelectorAll('*')].filter(e=>e.tagName!=='TEXTAREA'&&getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length}})()");assert(geometry.x>=8&&geometry.y>=8&&geometry.right<=width-8&&geometry.bottom<=height-8&&!geometry.overflow&&geometry.scrolls===1,JSON.stringify(geometry));for(const b of geometry.buttons)assert(b.x>=0&&b.y>=0&&b.right<=width&&b.bottom<=height&&b.hit&&b.focused,JSON.stringify(b));
-    await focus("document.querySelector('textarea')");await pressKey('Tab','Tab',9);assert((await checkFocus()).inside);const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(evidence,'short-'+width+'x'+height+'.png'),Buffer.from(shot.data,'base64'));results.push({name:'short-window-controls-scroll-hit',width,height,status:'passed',geometry});}
-    await pressKey('Escape','Escape',27);await wait("!document.querySelector('[role=dialog]:has(textarea)')",'short window escape closes');assert.deepEqual(forbidden,[]);assert.equal(apiReads.filter(x=>/prepareOriginalLink|resolveSubscription|collectComments|refreshMetrics/.test(x.name)).length,0);fs.writeFileSync(path.join(evidence,'result.json'),JSON.stringify({testedAssets:fs.readdirSync(path.join(base,'assets')).map(file=>({file,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(base,'assets',file))).digest('hex')})),results,batchPosts,sourceCalls:0,forbidden},null,2));console.log(JSON.stringify({evidence,passed:results.length,failed:0}));
+    const results = [],
+      button = (text) =>
+        "[...document.querySelectorAll('button')].find(e=>e.textContent.trim()===" +
+        JSON.stringify(text) +
+        ')';
+    const pressKey = async (key, code, keyCode, modifiers = 0) => {
+      await send('Input.dispatchKeyEvent', {
+        type: 'rawKeyDown',
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+        modifiers,
+      });
+      await send('Input.dispatchKeyEvent', {
+        type: 'keyUp',
+        key,
+        code,
+        windowsVirtualKeyCode: keyCode,
+        nativeVirtualKeyCode: keyCode,
+        modifiers,
+      });
+      await pause(50);
+    };
+    const focus = async (expression) => {
+      assert(
+        await ev(
+          '(()=>{const e=' +
+            expression +
+            ';if(!e||e.disabled)return false;e.focus();return document.activeElement===e})()',
+        ),
+      );
+    };
+    const paste = async (text) => {
+      await focus("document.querySelector('textarea')");
+      await send('Input.insertText', { text });
+      await pause(100);
+    };
+    const checkFocus = () =>
+      ev(
+        "(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),a=document.activeElement;return {inside:d.contains(a),tag:a.tagName,label:a.getAttribute('aria-label')||a.textContent?.trim().slice(0,50)}})()",
+      );
+    await viewport(1024, 700);
+    await focus("document.querySelector('button[aria-label=更多订阅操作]')");
+    await pressKey('Enter', 'Enter', 13);
+    await wait('Boolean(' + button('批量订阅') + ')', 'batch menu');
+    await focus(button('批量订阅'));
+    await pressKey('Enter', 'Enter', 13);
+    await wait(
+      "Boolean(document.querySelector('[role=dialog] textarea'))",
+      'keyboard opens dialog',
+    );
+    await pause(150);
+    const tabStops = [];
+    for (let n = 0; n < 18; n++) {
+      await pressKey('Tab', 'Tab', 9);
+      const f = await checkFocus();
+      assert(f.inside, JSON.stringify(f));
+      tabStops.push(f);
+    }
+    for (const tag of ['TEXTAREA', 'SELECT', 'BUTTON'])
+      assert(
+        tabStops.some((x) => x.tag === tag),
+        'keyboard reaches ' + tag,
+      );
+    await pressKey('Tab', 'Tab', 9, 8);
+    assert((await checkFocus()).inside, 'shift tab remains trapped');
+    results.push({
+      name: 'tab-shift-tab-focus-trap',
+      status: 'passed',
+      tabStops,
+    });
+    await paste('分享 https://xhslink.com/a/synthetic-keyboard');
+    await focus(button('开始批量订阅'));
+    await pressKey('Enter', 'Enter', 13);
+    await pressKey('Enter', 'Enter', 13);
+    await wait(
+      "document.querySelector('[role=dialog]:has(textarea)').textContent.includes('正在提交')",
+      'submit pending',
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'startSubscriptionBatch').length,
+      1,
+    );
+    await pressKey('Escape', 'Escape', 27);
+    await wait(
+      "!document.querySelector('[role=dialog]:has(textarea)')",
+      'escape closes pending submission',
+    );
+    await pause(1100);
+    assert.equal(
+      await ev(
+        "Boolean(document.querySelector('[role=dialog]:has(textarea)'))",
+      ),
+      false,
+      'late receipt cannot reopen',
+    );
+    assert(
+      ['批量订阅', '更多'].includes(
+        await ev('document.activeElement.textContent.trim()'),
+      ),
+      'escape restores a visible batch trigger',
+    );
+    assert.equal(batchPosts.length, 1);
+    results.push({
+      name: 'enter-once-escape-late-receipt-focus-restore',
+      status: 'passed',
+    });
+    if (!(await ev('Boolean(' + button('批量订阅') + ')'))) {
+      await focus("document.querySelector('button[aria-label=更多订阅操作]')");
+      await pressKey(' ', 'Space', 32);
+      await wait('Boolean(' + button('批量订阅') + ')', 'reopen batch menu');
+      await focus(button('批量订阅'));
+    }
+    await pressKey(' ', 'Space', 32);
+    await wait(
+      "Boolean(document.querySelector('[aria-label=批量订阅回执]'))",
+      'space reopens receipt',
+    );
+    assert.equal(await ev("document.querySelector('textarea').value"), '');
+    assert(
+      await ev(button('继续未完成项') + '.disabled'),
+      'context required after reopen',
+    );
+    assert.equal(batchPosts.length, 1);
+    await paste('https://xhslink.com/a/synthetic-keyboard');
+    await focus(button('继续未完成项'));
+    await pressKey(' ', 'Space', 32);
+    await pressKey(' ', 'Space', 32);
+    await wait(
+      "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('正在处理')",
+      'space resumes',
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'resumeSubscriptionBatch').length,
+      1,
+    );
+    assert(await ev("document.querySelector('textarea').disabled"));
+    await focus(button('取消批次'));
+    await pressKey('Enter', 'Enter', 13);
+    await pressKey('Enter', 'Enter', 13);
+    await wait(
+      "document.querySelector('[aria-label=批量订阅回执]').textContent.includes('已取消')",
+      'enter cancels',
+    );
+    assert.equal(
+      batchPosts.filter((x) => x.route === 'cancelSubscriptionBatch').length,
+      1,
+    );
+    results.push({
+      name: 'space-explicit-context-resume-enter-cancel-once',
+      status: 'passed',
+    });
+    for (const [width, height] of [
+      [390, 360],
+      [667, 320],
+      [320, 320],
+    ]) {
+      await viewport(width, height);
+      await pause(100);
+      const geometry = await ev(
+        "(()=>{const d=document.querySelector('[role=dialog]:has(textarea)'),r=d.getBoundingClientRect(),buttons=[...d.querySelectorAll('button')].filter(e=>!e.disabled&&e.tabIndex>=0&&e.checkVisibility()&&e.getBoundingClientRect().height),visible=e=>{e.focus();e.scrollIntoView({block:'nearest'});const a=e.getBoundingClientRect(),hit=document.elementFromPoint(a.x+a.width/2,a.y+a.height/2);return {label:e.getAttribute('aria-label')||e.textContent.trim(),x:a.x,y:a.y,right:a.right,bottom:a.bottom,hit:hit===e||e.contains(hit),focused:document.activeElement===e}};return {x:r.x,y:r.y,right:r.right,bottom:r.bottom,overflow:document.documentElement.scrollWidth>innerWidth+1,buttons:buttons.map(visible),scrolls:[...d.querySelectorAll('*')].filter(e=>e.tagName!=='TEXTAREA'&&getComputedStyle(e).overflowY==='auto'&&e.scrollHeight>e.clientHeight+1).length}})()",
+      );
+      assert(
+        geometry.x >= 8 &&
+          geometry.y >= 8 &&
+          geometry.right <= width - 8 &&
+          geometry.bottom <= height - 8 &&
+          !geometry.overflow &&
+          geometry.scrolls === 1,
+        JSON.stringify(geometry),
+      );
+      for (const b of geometry.buttons)
+        assert(
+          b.x >= 0 &&
+            b.y >= 0 &&
+            b.right <= width &&
+            b.bottom <= height &&
+            b.hit &&
+            b.focused,
+          JSON.stringify(b),
+        );
+      await focus("document.querySelector('textarea')");
+      await pressKey('Tab', 'Tab', 9);
+      assert((await checkFocus()).inside);
+      const shot = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(
+        path.join(evidence, 'short-' + width + 'x' + height + '.png'),
+        Buffer.from(shot.data, 'base64'),
+      );
+      results.push({
+        name: 'short-window-controls-scroll-hit',
+        width,
+        height,
+        status: 'passed',
+        geometry,
+      });
+    }
+    await pressKey('Escape', 'Escape', 27);
+    await wait(
+      "!document.querySelector('[role=dialog]:has(textarea)')",
+      'short window escape closes',
+    );
+    assert.deepEqual(forbidden, []);
+    assert.equal(
+      apiReads.filter((x) =>
+        /prepareOriginalLink|resolveSubscription|collectComments|refreshMetrics/.test(
+          x.name,
+        ),
+      ).length,
+      0,
+    );
+    fs.writeFileSync(
+      path.join(evidence, 'result.json'),
+      JSON.stringify(
+        {
+          testedAssets: fs
+            .readdirSync(path.join(base, 'assets'))
+            .map((file) => ({
+              file,
+              sha256: require('node:crypto')
+                .createHash('sha256')
+                .update(fs.readFileSync(path.join(base, 'assets', file)))
+                .digest('hex'),
+            })),
+          results,
+          batchPosts,
+          sourceCalls: 0,
+          forbidden,
+        },
+        null,
+        2,
+      ),
+    );
+    console.log(
+      JSON.stringify({ evidence, passed: results.length, failed: 0 }),
+    );
   } finally {
     if (ws?.readyState === WebSocket.OPEN)
       ws.send(JSON.stringify({ id: 999999, method: 'Browser.close' }));

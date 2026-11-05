@@ -20,70 +20,161 @@ const root = path.resolve(__dirname, '../..');
 const schemaGate = require('./switch-prewrite.cjs');
 // Shared by the real CLI migration location and the synthetic-only harness.
 // No process/activation operation belongs to this phase.
-async function performMigrationPhase(request, migrate, beforeFinalRevalidation) {
-  let attempted = false, outcome = 'not_attempted', schemaBefore, schemaAfter, taskDocumentPreflight;
+async function performMigrationPhase(
+  request,
+  migrate,
+  beforeFinalRevalidation,
+) {
+  let attempted = false,
+    outcome = 'not_attempted',
+    schemaBefore,
+    schemaAfter,
+    taskDocumentPreflight;
   try {
-    schemaBefore = schemaGate.inspectSwitchDatabase({ ...request, stage: 'before-migration' });
+    schemaBefore = schemaGate.inspectSwitchDatabase({
+      ...request,
+      stage: 'before-migration',
+    });
     const documents = require('./task-document-preflight.cjs');
-    taskDocumentPreflight = documents.assertTaskDocumentsForMigration(request.database);
+    taskDocumentPreflight = documents.assertTaskDocumentsForMigration(
+      request.database,
+    );
     if (beforeFinalRevalidation) await beforeFinalRevalidation(schemaBefore);
-    documents.assertTaskDocumentPreflightUnchanged(request.database, taskDocumentPreflight);
-    schemaBefore = schemaGate.assertSwitchDatabaseUnchanged({ ...request, stage: 'before-migration' }, schemaBefore);
+    documents.assertTaskDocumentPreflightUnchanged(
+      request.database,
+      taskDocumentPreflight,
+    );
+    schemaBefore = schemaGate.assertSwitchDatabaseUnchanged(
+      { ...request, stage: 'before-migration' },
+      schemaBefore,
+    );
     // The last synchronous revalidation covers schema, receipts, task bytes and
     // DB/WAL/journal identities. It does not replace all-writer quiescence.
     attempted = true;
     const result = await migrate();
     outcome = 'verification_failed';
-    schemaAfter = schemaGate.inspectSwitchDatabase({ ...request, stage: 'after-migration' });
+    schemaAfter = schemaGate.inspectSwitchDatabase({
+      ...request,
+      stage: 'after-migration',
+    });
     schemaGate.assertSwitchTransition(schemaBefore, schemaAfter);
     outcome = 'confirmed';
-    return { migrationAttempted: true, migrationOutcome: outcome, schemaBefore, schemaAfter, taskDocumentPreflight, result };
+    return {
+      migrationAttempted: true,
+      migrationOutcome: outcome,
+      schemaBefore,
+      schemaAfter,
+      taskDocumentPreflight,
+      result,
+    };
   } catch (error) {
     error.migrationAttempted = attempted;
-    error.migrationOutcome = attempted && outcome === 'not_attempted' ? 'unknown' : outcome;
+    error.migrationOutcome =
+      attempted && outcome === 'not_attempted' ? 'unknown' : outcome;
     error.databaseRestored = false;
     error.manualRecoveryRequired = true;
-    error.schemaPrewrite = { schemaBefore: schemaBefore || null, schemaAfter: schemaAfter || null, taskDocumentPreflight: taskDocumentPreflight || null };
+    error.schemaPrewrite = {
+      schemaBefore: schemaBefore || null,
+      schemaAfter: schemaAfter || null,
+      taskDocumentPreflight: taskDocumentPreflight || null,
+    };
     throw error;
   }
 }
 function createSyntheticSwitchMigrationHarness(request) {
   const scope = request.scope;
-  const binding = Object.freeze({ database: request.database, operationId: request.operationId,
-    roles: JSON.parse(JSON.stringify(request.roles)) });
+  const binding = Object.freeze({
+    database: request.database,
+    operationId: request.operationId,
+    roles: JSON.parse(JSON.stringify(request.roles)),
+  });
   schemaGate.assertSyntheticPrewriteScope(scope, binding.database);
   return async function run(effects) {
     schemaGate.assertSyntheticPrewriteScope(scope, binding.database);
-    if (!effects || typeof effects.migrate !== 'function' || (effects.activate !== undefined && typeof effects.activate !== 'function') ||
-        (effects.beforeFinalRevalidation !== undefined && typeof effects.beforeFinalRevalidation !== 'function')) throw Error('SWITCH_SYNTHETIC_EFFECTS_INVALID');
-    const phase = await performMigrationPhase(binding, effects.migrate, effects.beforeFinalRevalidation);
-    schemaGate.assertSwitchDatabaseUnchanged({ ...binding, stage: 'after-migration' }, phase.schemaAfter);
+    if (
+      !effects ||
+      typeof effects.migrate !== 'function' ||
+      (effects.activate !== undefined &&
+        typeof effects.activate !== 'function') ||
+      (effects.beforeFinalRevalidation !== undefined &&
+        typeof effects.beforeFinalRevalidation !== 'function')
+    )
+      throw Error('SWITCH_SYNTHETIC_EFFECTS_INVALID');
+    const phase = await performMigrationPhase(
+      binding,
+      effects.migrate,
+      effects.beforeFinalRevalidation,
+    );
+    schemaGate.assertSwitchDatabaseUnchanged(
+      { ...binding, stage: 'after-migration' },
+      phase.schemaAfter,
+    );
     if (effects.activate) {
-      try { await effects.activate(phase.schemaAfter); }
-      catch (error) { error.migrationAttempted = true; error.activationAttempted = true; error.activationOutcome = 'unknown'; error.databaseRestored = false; error.manualRecoveryRequired = true; throw error; }
+      try {
+        await effects.activate(phase.schemaAfter);
+      } catch (error) {
+        error.migrationAttempted = true;
+        error.activationAttempted = true;
+        error.activationOutcome = 'unknown';
+        error.databaseRestored = false;
+        error.manualRecoveryRequired = true;
+        throw error;
+      }
     }
-    return { ...phase, activationAttempted: Boolean(effects.activate), activationOutcome: effects.activate ? 'confirmed' : 'not_attempted', syntheticFixtureOnly: true };
+    return {
+      ...phase,
+      activationAttempted: Boolean(effects.activate),
+      activationOutcome: effects.activate ? 'confirmed' : 'not_attempted',
+      syntheticFixtureOnly: true,
+    };
   };
 }
 function verifiedSwitchRoles(release, rollback, rehearsal) {
   const container = path.dirname(release);
-  assert.equal(path.dirname(rollback), container, 'RELEASE_ROLE_CONTAINER_CHANGED');
+  assert.equal(
+    path.dirname(rollback),
+    container,
+    'RELEASE_ROLE_CONTAINER_CHANGED',
+  );
   const pointer = path.join(container, 'active.json');
   let currentRoot = rollback;
   if (fs.existsSync(pointer)) {
     const s = fs.lstatSync(pointer);
-    assert(s.isFile() && !s.isSymbolicLink() && s.size < 65536, 'RELEASE_CURRENT_POINTER_INVALID');
+    assert(
+      s.isFile() && !s.isSymbolicLink() && s.size < 65536,
+      'RELEASE_CURRENT_POINTER_INVALID',
+    );
     const active = JSON.parse(fs.readFileSync(pointer, 'utf8'));
-    assert(active.format === 1 && /^[A-Za-z0-9][A-Za-z0-9T.Z-]{0,159}$/.test(active.id || ''), 'RELEASE_CURRENT_POINTER_INVALID');
+    assert(
+      active.format === 1 &&
+        /^[A-Za-z0-9][A-Za-z0-9T.Z-]{0,159}$/.test(active.id || ''),
+      'RELEASE_CURRENT_POINTER_INVALID',
+    );
     currentRoot = fs.realpathSync(path.join(container, active.id));
-    assert.equal(path.dirname(currentRoot), container, 'RELEASE_ROLE_CONTAINER_CHANGED');
+    assert.equal(
+      path.dirname(currentRoot),
+      container,
+      'RELEASE_ROLE_CONTAINER_CHANGED',
+    );
   } else assert.equal(rehearsal, true, 'RELEASE_CURRENT_POINTER_REQUIRED');
   const roles = {};
-  for (const [name, folder] of Object.entries({ current: currentRoot, candidate: release, rollback })) {
+  for (const [name, folder] of Object.entries({
+    current: currentRoot,
+    candidate: release,
+    rollback,
+  })) {
     const manifestSha256 = fileHash(path.join(folder, 'release.json'));
     const manifest = verifyRelease(folder);
-    assert.equal(fileHash(path.join(folder, 'release.json')), manifestSha256, 'RELEASE_ROLE_CHANGED_DURING_VERIFICATION');
-    assert.equal(manifest.id, path.basename(folder), 'RELEASE_ROLE_PATH_INVALID');
+    assert.equal(
+      fileHash(path.join(folder, 'release.json')),
+      manifestSha256,
+      'RELEASE_ROLE_CHANGED_DURING_VERIFICATION',
+    );
+    assert.equal(
+      manifest.id,
+      path.basename(folder),
+      'RELEASE_ROLE_PATH_INVALID',
+    );
     roles[name] = { folder, manifest, manifestSha256 };
   }
   validateRoles(roles);
@@ -270,11 +361,19 @@ async function stopOwned(child, identity) {
   require('./lib.cjs').hostEffects.assertRuntime();
   require('./lib.cjs').hostEffects.assertWritable();
   if (!child) return;
-  if(identity){
-    if(identity.pid!==child.pid)throw Error('OWNED_PROCESS_IDENTITY_CHANGED');
-    if(child.exitCode!==null||typeof child.signalCode==='string')return {...identity,stopped:true};
-    try{return processIdentity('OwnedStop',child.pid,identity.port,identity);}
-    catch(error){await new Promise(setImmediate);if(child.exitCode!==null||typeof child.signalCode==='string')return {...identity,stopped:true};throw error;}
+  if (identity) {
+    if (identity.pid !== child.pid)
+      throw Error('OWNED_PROCESS_IDENTITY_CHANGED');
+    if (child.exitCode !== null || typeof child.signalCode === 'string')
+      return { ...identity, stopped: true };
+    try {
+      return processIdentity('OwnedStop', child.pid, identity.port, identity);
+    } catch (error) {
+      await new Promise(setImmediate);
+      if (child.exitCode !== null || typeof child.signalCode === 'string')
+        return { ...identity, stopped: true };
+      throw error;
+    }
   }
   if (child.exitCode !== null) return;
   const closed = once(child, 'close');
@@ -282,16 +381,39 @@ async function stopOwned(child, identity) {
   await closed;
 }
 
-function observeProjectWriters(roots,port){
-  if(!Array.isArray(roots)||!roots.length||roots.length>16||roots.some(pid=>!Number.isSafeInteger(pid)||pid<1))throw Error('LEGACY_MAINTENANCE_PROJECT_ROOTS_UNPROVEN');
-  const started=performance.now(),active=new Map();let queries=0;
-  for(const pid of new Set(roots)){
-    const fact=processIdentity('Tree',pid,port);queries++;
-    if(fact.complete!==true||!Array.isArray(fact.active)||!Array.isArray(fact.portOwners))throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
-    for(const row of fact.active)active.set(row.pid,row);
-    for(const row of fact.portOwners)active.set(Number(row.OwningProcess),{pid:Number(row.OwningProcess),listener:true});
+function observeProjectWriters(roots, port) {
+  if (
+    !Array.isArray(roots) ||
+    !roots.length ||
+    roots.length > 16 ||
+    roots.some((pid) => !Number.isSafeInteger(pid) || pid < 1)
+  )
+    throw Error('LEGACY_MAINTENANCE_PROJECT_ROOTS_UNPROVEN');
+  const started = performance.now(),
+    active = new Map();
+  let queries = 0;
+  for (const pid of new Set(roots)) {
+    const fact = processIdentity('Tree', pid, port);
+    queries++;
+    if (
+      fact.complete !== true ||
+      !Array.isArray(fact.active) ||
+      !Array.isArray(fact.portOwners)
+    )
+      throw Error('LEGACY_MAINTENANCE_PROJECT_WRITER_UNPROVEN');
+    for (const row of fact.active) active.set(row.pid, row);
+    for (const row of fact.portOwners)
+      active.set(Number(row.OwningProcess), {
+        pid: Number(row.OwningProcess),
+        listener: true,
+      });
   }
-  return {complete:true,active:[...active.values()],queries,durationMs:performance.now()-started};
+  return {
+    complete: true,
+    active: [...active.values()],
+    queries,
+    durationMs: performance.now() - started,
+  };
 }
 
 function loadProductionEnvironment() {
@@ -359,8 +481,15 @@ async function controlledSwitchInner(options) {
     loadProductionEnvironment();
   }
   const pauseFile = path.join(root, 'tools/wechat-desktop-collector/.paused');
-  const helperRequired = Object.values(roles).some(r => r.manifest.desktopHelperIncluded);
-  if (helperRequired) assert.equal(fs.readFileSync(pauseFile, 'utf8').trim(), 'USER_PAUSED', '用户暂停状态不符');
+  const helperRequired = Object.values(roles).some(
+    (r) => r.manifest.desktopHelperIncluded,
+  );
+  if (helperRequired)
+    assert.equal(
+      fs.readFileSync(pauseFile, 'utf8').trim(),
+      'USER_PAUSED',
+      '用户暂停状态不符',
+    );
   const pauseHash = helperRequired ? fileHash(pauseFile) : null;
   const artifacts = rehearsal
     ? require('./test-artifacts.cjs').begin({
@@ -446,7 +575,12 @@ async function controlledSwitchInner(options) {
     const schemaOperationId = require('node:crypto').randomUUID();
     let sourceSchemaPreflight;
     try {
-      sourceSchemaPreflight = schemaGate.inspectSwitchDatabase({ database: source, roles, operationId: schemaOperationId, stage: 'before-migration' });
+      sourceSchemaPreflight = schemaGate.inspectSwitchDatabase({
+        database: source,
+        roles,
+        operationId: schemaOperationId,
+        stage: 'before-migration',
+      });
     } catch (error) {
       error.migrationAttempted = false;
       error.databaseRestored = false;
@@ -597,21 +731,24 @@ async function controlledSwitchInner(options) {
         ...env,
         DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
       };
-      migrationSchemaPhase = await performMigrationPhase({ database, roles, operationId: schemaOperationId }, () => {
-        const output = run(
-          node,
-          [
-            path.join(server, 'node_modules/prisma/build/index.js'),
-            'migrate',
-            'deploy',
-            '--schema',
-            path.join(server, 'prisma/schema.prisma'),
-          ],
-          { cwd: server, env: migrateEnv },
-        );
-        fs.writeFileSync(path.join(audit, 'migrate.log'), output);
-        return output;
-      });
+      migrationSchemaPhase = await performMigrationPhase(
+        { database, roles, operationId: schemaOperationId },
+        () => {
+          const output = run(
+            node,
+            [
+              path.join(server, 'node_modules/prisma/build/index.js'),
+              'migrate',
+              'deploy',
+              '--schema',
+              path.join(server, 'prisma/schema.prisma'),
+            ],
+            { cwd: server, env: migrateEnv },
+          );
+          fs.writeFileSync(path.join(audit, 'migrate.log'), output);
+          return output;
+        },
+      );
       migrationAttempted = migrationSchemaPhase.migrationAttempted;
       taskDocumentPreflight = migrationSchemaPhase.taskDocumentPreflight;
       inspection(database, [
@@ -623,7 +760,15 @@ async function controlledSwitchInner(options) {
       ]);
       migrated = true;
       if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
-      schemaGate.assertSwitchDatabaseUnchanged({ database, roles, operationId: schemaOperationId, stage: 'after-migration' }, migrationSchemaPhase.schemaAfter);
+      schemaGate.assertSwitchDatabaseUnchanged(
+        {
+          database,
+          roles,
+          operationId: schemaOperationId,
+          stage: 'after-migration',
+        },
+        migrationSchemaPhase.schemaAfter,
+      );
       newChild = start(release, 'new');
       await waitReady(port, newChild);
       const newIdentity = processIdentity('Snapshot', newChild.pid, port);
@@ -637,7 +782,8 @@ async function controlledSwitchInner(options) {
         finalBackup: finalBackup.backup,
         migrated,
         migrationAttempted,
-        migrationSchemaPhase, sourceSchemaPreflight,
+        migrationSchemaPhase,
+        sourceSchemaPreflight,
         taskDocumentPreflight,
         oldStopped: true,
         stopAttempted,
@@ -650,28 +796,56 @@ async function controlledSwitchInner(options) {
       if (!rehearsal) newChild.unref();
       return summary;
     } catch (error) {
-      migrationAttempted = migrationAttempted || error.migrationAttempted === true;
-      if (!taskDocumentPreflight && error.schemaPrewrite?.taskDocumentPreflight) taskDocumentPreflight = error.schemaPrewrite.taskDocumentPreflight;
-      try { await stopOwned(newChild); } catch (stopError) { newChildStopError = stopError.message; }
+      migrationAttempted =
+        migrationAttempted || error.migrationAttempted === true;
+      if (!taskDocumentPreflight && error.schemaPrewrite?.taskDocumentPreflight)
+        taskDocumentPreflight = error.schemaPrewrite.taskDocumentPreflight;
+      try {
+        await stopOwned(newChild);
+      } catch (stopError) {
+        newChildStopError = stopError.message;
+      }
       // The production/rehearsal adapters intentionally grant no restoration.
       // The same recovery state machine is exercised separately with an explicit
       // synthetic-fixture lease; never call start(legacy) on this uncertain DB.
       const recovery = await recoverSwitchFailure({
-        mode: rehearsal ? 'rehearsal' : 'production', database,
-        migrationAttempted, migrated,
+        mode: rehearsal ? 'rehearsal' : 'production',
+        database,
+        migrationAttempted,
+        migrated,
       });
       const summary = {
-        passed: false, mode: rehearsal ? 'rehearsal' : 'production', audit, database,
-        migrationAttempted, migrated, taskDocumentPreflight,
-        migrationSchemaPhase: migrationSchemaPhase || error.schemaPrewrite || null, sourceSchemaPreflight,
-        migrationOutcome: error.migrationOutcome || migrationSchemaPhase?.migrationOutcome || 'not_attempted',
+        passed: false,
+        mode: rehearsal ? 'rehearsal' : 'production',
+        audit,
+        database,
+        migrationAttempted,
+        migrated,
+        taskDocumentPreflight,
+        migrationSchemaPhase:
+          migrationSchemaPhase || error.schemaPrewrite || null,
+        sourceSchemaPreflight,
+        migrationOutcome:
+          error.migrationOutcome ||
+          migrationSchemaPhase?.migrationOutcome ||
+          'not_attempted',
         oldStopped: stopped ? true : stopAttempted ? null : false,
-        stopAttempted, stopOutcome, rollbackUsed: false, databaseRestored: false,
-        manualRecoveryRequired: true, oldApplicationRestarted: false,
-        restartAttempted: recovery.restartAttempted, restartOutcome: recovery.restartOutcome,
-        failure: error.message, failureCode: error.code || null,
-        ...(error.manualReviewRequired ? {manualReviewRequired:true,diagnostics:error.diagnostics} : {}),
-        newChildStopError, protectedSnapshot: finalBackup || null, recovery,
+        stopAttempted,
+        stopOutcome,
+        rollbackUsed: false,
+        databaseRestored: false,
+        manualRecoveryRequired: true,
+        oldApplicationRestarted: false,
+        restartAttempted: recovery.restartAttempted,
+        restartOutcome: recovery.restartOutcome,
+        failure: error.message,
+        failureCode: error.code || null,
+        ...(error.manualReviewRequired
+          ? { manualReviewRequired: true, diagnostics: error.diagnostics }
+          : {}),
+        newChildStopError,
+        protectedSnapshot: finalBackup || null,
+        recovery,
         sourceObservation: rehearsal ? sourceObservation() : null,
       };
       if (helperRequired) assert.equal(fileHash(pauseFile), pauseHash);
@@ -686,7 +860,11 @@ async function controlledSwitchInner(options) {
         for (const child of [oldChild, newChild]) {
           // An attempted identity-bound stop or uncertain child stop is not
           // repeated blindly during cleanup. Leave the audit for manual review.
-          if ((child === oldChild && stopAttempted) || (child === newChild && newChildStopError)) continue;
+          if (
+            (child === oldChild && stopAttempted) ||
+            (child === newChild && newChildStopError)
+          )
+            continue;
           await stopOwned(child);
         }
       }

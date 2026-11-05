@@ -21,7 +21,7 @@ function fixture(t) {
   return root;
 }
 
-test('all fourteen helpers and nine wrappers rebuild identically from LF or CRLF source', (t) => {
+test('all runtime helpers, wrappers and updater files rebuild identically from LF or CRLF source', (t) => {
   const root = fixture(t);
   const results = [];
   for (const [kind, eol] of [
@@ -42,6 +42,13 @@ test('all fourteen helpers and nine wrappers rebuild identically from LF or CRLF
           `// fixture ${name}${eol}// second line${eol}`,
         );
       }
+    fs.mkdirSync(path.join(source, 'scripts/local-release/updater/nested'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(source, 'scripts/local-release/updater/nested/update.cjs'),
+      `// updater${eol}`,
+    );
     results.push(copyRuntimeClosure(source, release));
     assert.equal(
       fs.readdirSync(path.join(release, 'server/scripts')).length,
@@ -69,7 +76,50 @@ test('all fourteen helpers and nine wrappers rebuild identically from LF or CRLF
     assert.throws(() => verifyRelease(release));
   }
   assert.deepEqual(results[0], results[1]);
-  assert.equal(Object.keys(results[0]).length, 23);
+  assert.equal(
+    Object.keys(results[0]).length,
+    SERVER_HELPERS.length + RUNTIME_WRAPPERS.length + 1,
+  );
+});
+
+test('actual runtime closure includes startup gate and every required updater file', (t) => {
+  const root = fixture(t);
+  const source = path.resolve(__dirname, '../..');
+  const release = path.join(root, 'release');
+  fs.mkdirSync(release);
+  const copied = copyRuntimeClosure(source, release);
+  const { walk, hash, fileHash } = require('./lib.cjs');
+  const expected = [];
+  walk(path.join(source, 'scripts/local-release/updater'), (relative, kind) => {
+    if (kind === 'file')
+      expected.push('updater/' + relative.replace(/\\/g, '/'));
+  });
+  assert(expected.length > 0);
+  assert.deepEqual(
+    Object.keys(copied)
+      .filter((name) => name.startsWith('updater/'))
+      .sort(),
+    expected.sort(),
+  );
+  for (const name of ['installed-startup-gate.cjs', ...expected]) {
+    const entry = copied[name];
+    assert(entry, name);
+    const original = new TextDecoder('utf-8', { fatal: true })
+      .decode(fs.readFileSync(path.join(source, entry.source)))
+      .replace(/\r\n/g, '\n');
+    assert.equal(fileHash(path.join(release, name)), hash(original), name);
+    assert.equal(entry.sha256, hash(original), name);
+  }
+});
+
+test('a missing required updater source fails instead of producing an incomplete package', (t) => {
+  const root = fixture(t);
+  const source = path.join(root, 'source');
+  const release = path.join(root, 'release');
+  fs.mkdirSync(source);
+  fs.mkdirSync(release);
+  assert.throws(() => copyRuntimeClosure(source, release), /ENOENT.*updater/s);
+  assert.deepEqual(fs.readdirSync(release), []);
 });
 
 test('a missing history helper cannot produce a successful five-helper package', (t) => {
@@ -77,6 +127,9 @@ test('a missing history helper cannot produce a successful five-helper package',
   const source = path.join(root, 'source');
   const release = path.join(root, 'release');
   fs.mkdirSync(release);
+  fs.mkdirSync(path.join(source, 'scripts/local-release/updater'), {
+    recursive: true,
+  });
   fs.mkdirSync(path.join(source, 'apps/server/scripts'), { recursive: true });
   for (const name of SERVER_HELPERS.filter(
     (name) => name !== 'article_history.py',
@@ -85,7 +138,10 @@ test('a missing history helper cannot produce a successful five-helper package',
       path.join(source, 'apps/server/scripts', name),
       '# synthetic\n',
     );
-  assert.throws(() => copyRuntimeClosure(source, release), /ENOENT/);
+  assert.throws(
+    () => copyRuntimeClosure(source, release),
+    /ENOENT.*article_history\.py/s,
+  );
   assert(!fs.existsSync(path.join(release, 'release.json')));
 });
 

@@ -204,7 +204,9 @@ function data(name, input) {
           creatorName: '合成博主',
           kind: 'image-text',
           status: 'complete',
-          metrics: { values: { likes: 0, collects: null, shares: null, comments: null } },
+          metrics: {
+            values: { likes: 0, collects: null, shares: null, comments: null },
+          },
         })),
       };
     case 'xiaohongshu.engagement':
@@ -479,9 +481,16 @@ const server = http.createServer((req, res) => {
       );
       if (source === 'xiaohongshu') {
         await click('document.querySelector(".xhs-combined-filter summary")');
-        await click('[...document.querySelectorAll(".xhs-combined-filter button")].find(e=>e.textContent.includes("\u6dfb\u52a0\u6761\u4ef6"))');
-        await ev(`(()=>{const e=document.querySelector('input[aria-label="\u6761\u4ef6 1 \u6570\u503c"]');const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(e,'0');e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
-        await wait('Boolean(document.querySelector(".content-article-row"))', 'filtered XHS rows');
+        await click(
+          '[...document.querySelectorAll(".xhs-combined-filter button")].find(e=>e.textContent.includes("\u6dfb\u52a0\u6761\u4ef6"))',
+        );
+        await ev(
+          `(()=>{const e=document.querySelector('input[aria-label="\u6761\u4ef6 1 \u6570\u503c"]');const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(e,'0');e.dispatchEvent(new Event('input',{bubbles:true}));})()`,
+        );
+        await wait(
+          'Boolean(document.querySelector(".content-article-row"))',
+          'filtered XHS rows',
+        );
       }
       for (const width of [390, 640, 790, 1024, 1440, 1660])
         for (const height of [540, 900])
@@ -534,7 +543,11 @@ const server = http.createServer((req, res) => {
             }
           }
       if (source === 'xiaohongshu') {
-        assert(await ev(`(()=>{const root=document.querySelector('.xhs-combined-filter');return ['select[aria-label="\u6761\u4ef6 1 \u6307\u6807"]','select[aria-label="\u6761\u4ef6 1 \u6bd4\u8f83\u65b9\u5f0f"]','input[aria-label="\u6761\u4ef6 1 \u6570\u503c"]'].every(s=>root.querySelector(s)?.getBoundingClientRect().width>0)})()`));
+        assert(
+          await ev(
+            `(()=>{const root=document.querySelector('.xhs-combined-filter');return ['select[aria-label="\u6761\u4ef6 1 \u6307\u6807"]','select[aria-label="\u6761\u4ef6 1 \u6bd4\u8f83\u65b9\u5f0f"]','input[aria-label="\u6761\u4ef6 1 \u6570\u503c"]'].every(s=>root.querySelector(s)?.getBoundingClientRect().width>0)})()`,
+          ),
+        );
         await click('document.querySelector(".xhs-combined-filter summary")');
       }
       await viewport(790, 900);
@@ -593,11 +606,40 @@ const server = http.createServer((req, res) => {
       console.log(
         'PASS ' + source + ' selection; START data/original-link check',
       );
-      if(source==='xiaohongshu'){
-        assert.equal(await ev("document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length"),0);
-        assert.equal(await ev("document.querySelectorAll('.content-article-row [data-original-note-id]').length"),40);
-        for(const width of [390,1660,640,790]){await viewport(width,540,1.25);assert.equal((await geometry()).checked,2);assert(!(await geometry()).overflow);const headers=await ev("[...document.querySelectorAll('[role=columnheader] button')].filter(e=>e.getBoundingClientRect().width>0).map(e=>e.textContent.trim().split(' ')[0])");assert.deepEqual(headers.filter(x=>x!=='发布时间'),['点赞','收藏','分享','评论']);if(width===1660)assert(headers.includes('发布时间'));}
-        assert.equal(apiReads.filter(r=>r.name==='xiaohongshu.engagement'||r.name==='xiaohongshu.collectComments').length,0);
+      if (source === 'xiaohongshu') {
+        assert.equal(
+          await ev(
+            "document.querySelectorAll('.xhs-note-data-action,.xhs-data-dialog').length",
+          ),
+          0,
+        );
+        assert.equal(
+          await ev(
+            "document.querySelectorAll('.content-article-row [data-original-note-id]').length",
+          ),
+          40,
+        );
+        for (const width of [390, 1660, 640, 790]) {
+          await viewport(width, 540, 1.25);
+          assert.equal((await geometry()).checked, 2);
+          assert(!(await geometry()).overflow);
+          const headers = await ev(
+            "[...document.querySelectorAll('[role=columnheader] button')].filter(e=>e.getBoundingClientRect().width>0).map(e=>e.textContent.trim().split(' ')[0])",
+          );
+          assert.deepEqual(
+            headers.filter((x) => x !== '发布时间'),
+            ['点赞', '收藏', '分享', '评论'],
+          );
+          if (width === 1660) assert(headers.includes('发布时间'));
+        }
+        assert.equal(
+          apiReads.filter(
+            (r) =>
+              r.name === 'xiaohongshu.engagement' ||
+              r.name === 'xiaohongshu.collectComments',
+          ).length,
+          0,
+        );
       } else {
         const links = await ev(
           "[...document.querySelectorAll('.content-article-row .compact-title')].map(a=>({href:a.getAttribute('href'),target:a.target,rel:a.rel,disabled:a.getAttribute('aria-disabled'),label:a.textContent}))",

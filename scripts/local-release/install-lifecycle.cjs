@@ -152,15 +152,32 @@ function installPair(root, plan, options = {}) {
   require('./release-scope.cjs').assertWritableSession(['install']);
   options.scope?.assertWritable?.(['install']);
   root = canonical(root);
-  let selectedPolicy = options.scope?.policy || require('./release-scope.cjs').session()?.policy;
-  if (!selectedPolicy && process.env.WEWE_RELEASE_SCOPE_FILE && /^[a-f0-9]{64}$/.test(process.env.WEWE_RELEASE_SCOPE_SHA256 || '')) {
-    const file = canonical(process.env.WEWE_RELEASE_SCOPE_FILE), s = fs.lstatSync(file);
-    if (!s.isFile() || s.isSymbolicLink() || s.size > 1024 * 1024 || fileHash(file) !== process.env.WEWE_RELEASE_SCOPE_SHA256)
+  let selectedPolicy =
+    options.scope?.policy || require('./release-scope.cjs').session()?.policy;
+  if (
+    !selectedPolicy &&
+    process.env.WEWE_RELEASE_SCOPE_FILE &&
+    /^[a-f0-9]{64}$/.test(process.env.WEWE_RELEASE_SCOPE_SHA256 || '')
+  ) {
+    const file = canonical(process.env.WEWE_RELEASE_SCOPE_FILE),
+      s = fs.lstatSync(file);
+    if (
+      !s.isFile() ||
+      s.isSymbolicLink() ||
+      s.size > 1024 * 1024 ||
+      fileHash(file) !== process.env.WEWE_RELEASE_SCOPE_SHA256
+    )
       throw new Error('RELEASE_FROZEN_PLAN_MISMATCH');
     selectedPolicy = JSON.parse(fs.readFileSync(file, 'utf8'));
   }
-  const retainOnly = selectedPolicy && require('./preserving-contract.cjs').preservingEffectScope(selectedPolicy);
-  if (retainOnly && (selectedPolicy.preservingUpdate.operation !== 'install' || retainOnly.container !== root))
+  const retainOnly =
+    selectedPolicy &&
+    require('./preserving-contract.cjs').preservingEffectScope(selectedPolicy);
+  if (
+    retainOnly &&
+    (selectedPolicy.preservingUpdate.operation !== 'install' ||
+      retainOnly.container !== root)
+  )
     throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
   const maxBytes = options.maxBytes ?? DEFAULTS.bytes,
     minFree = options.minFree ?? DEFAULTS.free;
@@ -239,10 +256,21 @@ function installPair(root, plan, options = {}) {
     if (ids.length > DEFAULTS.packages)
       throw new Error('RELEASE_PACKAGE_LIMIT_EXCEEDED');
     const prior = retainOnly ? undefined : loadState(stateFile),
-      found = retainOnly ? fs.readdirSync(root, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name).sort() : artifacts(root);
+      found = retainOnly
+        ? fs
+            .readdirSync(root, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name)
+            .sort()
+        : artifacts(root);
     let legacy;
     if (retainOnly) {
-      if (retainOnly.lifecycleSha256 === null ? exists(stateFile) : !exists(stateFile) || fileHash(stateFile) !== retainOnly.lifecycleSha256)
+      if (
+        retainOnly.lifecycleSha256 === null
+          ? exists(stateFile)
+          : !exists(stateFile) ||
+            fileHash(stateFile) !== retainOnly.lifecycleSha256
+      )
         throw new Error('RELEASE_PRESERVING_LIFECYCLE_CHANGED');
       // Observed names are retained, unmanaged history, not a new global adoption.
       legacy = found.filter((value) => !ids.includes(value));
@@ -309,107 +337,148 @@ function installPair(root, plan, options = {}) {
         runtimeCopies: missing.length,
       });
     const installOwned = () => {
-    if (retainOnly && !equal(require('./preserving-contract.cjs').preservingEffectScope(shared.policy), retainOnly))
-      throw new Error('RELEASE_FROZEN_PLAN_MISMATCH');
-    let schemaProofs;
-    const preserving = shared.policy?.preservingUpdate;
-    if (preserving) {
-      if (preserving.operation !== 'install' || preserving.active.pointer !== pointer ||
-          preserving.active.pointerSha256 !== pointerSha || preserving.active.currentId !== current.manifest.id ||
+      if (
+        retainOnly &&
+        !equal(
+          require('./preserving-contract.cjs').preservingEffectScope(
+            shared.policy,
+          ),
+          retainOnly,
+        )
+      )
+        throw new Error('RELEASE_FROZEN_PLAN_MISMATCH');
+      let schemaProofs;
+      const preserving = shared.policy?.preservingUpdate;
+      if (preserving) {
+        if (
+          preserving.operation !== 'install' ||
+          preserving.active.pointer !== pointer ||
+          preserving.active.pointerSha256 !== pointerSha ||
+          preserving.active.currentId !== current.manifest.id ||
           preserving.active.candidateId !== candidate.manifest.id ||
           preserving.active.currentManifestSha256 !== current.manifestSha ||
-          preserving.active.candidateManifestSha256 !== candidate.manifestSha)
-        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
-      schemaProofs = Object.fromEntries([['candidate', candidate], ['rollback', rollback]].map(([name, target]) =>
-        [name, require('./preserving-contract.cjs').validateSameSchema(current.manifest, target.manifest, {
-          oldRoot: current.folder, candidateRoot: target.folder,
-          oldManifestSha256: current.manifestSha, candidateManifestSha256: target.manifestSha,
-        })]));
-    }
-    shared.check();
-    assertOwner();
-    if (fileHash(pointer) !== pointerSha)
-      throw new Error('RELEASE_CURRENT_CHANGED');
-    // Persist exact managed intent before copying: a killed install cannot turn
-    // partial output into a new unbounded legacy baseline on the next attempt.
-    if (!retainOnly) store(stateFile, {
-      format: 1,
-      legacyIds: legacy,
-      managedIds: ids,
-      roles,
-      maxPackages: 3,
-      maxBytes: DEFAULTS.bytes,
-    });
-    for (const { target, source } of missing) {
-      shared.check();
-      shared.registerOutput(target);
-      assertOwner();
-      if (exists(target)) throw new Error('RELEASE_TARGET_APPEARED');
-      fs.mkdirSync(target);
-      owned.push({ target, identity: fs.lstatSync(target, { bigint: true }) });
-      shared.createdOutput(target);
-      fs.cpSync(source.folder, target, {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-        filter: (file) => !fs.lstatSync(file).isSymbolicLink(),
-      });
-      for (const [name, relative] of Object.entries(
-        source.manifest.links || {},
-      )) {
-        const link = path.resolve(target, name),
-          destination = path.resolve(target, relative);
-        if (!inside(target, link) || !inside(target, destination))
-          throw new Error('RELEASE_LINK_ESCAPE');
-        fs.mkdirSync(path.dirname(link), { recursive: true });
-        fs.symlinkSync(
-          destination,
-          link,
-          process.platform === 'win32' ? 'junction' : 'dir',
+          preserving.active.candidateManifestSha256 !== candidate.manifestSha
+        )
+          throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+        schemaProofs = Object.fromEntries(
+          [
+            ['candidate', candidate],
+            ['rollback', rollback],
+          ].map(([name, target]) => [
+            name,
+            require('./preserving-contract.cjs').validateSameSchema(
+              current.manifest,
+              target.manifest,
+              {
+                oldRoot: current.folder,
+                candidateRoot: target.folder,
+                oldManifestSha256: current.manifestSha,
+                candidateManifestSha256: target.manifestSha,
+              },
+            ),
+          ]),
         );
       }
-      if (role(target, block).manifestSha !== source.manifestSha)
-        throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
-    }
-    assertOwner();
-    shared.check();
-    if (fileHash(pointer) !== pointerSha)
-      throw new Error('RELEASE_CURRENT_CHANGED');
-    let finalBytes = 0;
-    for (const value of ids) {
-      const final = role(path.join(root, value), block);
-      if (final.manifestSha !== sources.get(value).manifestSha)
-        throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
-      finalBytes += final.bytes;
-    }
-    if (!retainOnly &&
-      artifacts(root).some(
-        (value) => !ids.includes(value) && !legacy.includes(value),
+      shared.check();
+      assertOwner();
+      if (fileHash(pointer) !== pointerSha)
+        throw new Error('RELEASE_CURRENT_CHANGED');
+      // Persist exact managed intent before copying: a killed install cannot turn
+      // partial output into a new unbounded legacy baseline on the next attempt.
+      if (!retainOnly)
+        store(stateFile, {
+          format: 1,
+          legacyIds: legacy,
+          managedIds: ids,
+          roles,
+          maxPackages: 3,
+          maxBytes: DEFAULTS.bytes,
+        });
+      for (const { target, source } of missing) {
+        shared.check();
+        shared.registerOutput(target);
+        assertOwner();
+        if (exists(target)) throw new Error('RELEASE_TARGET_APPEARED');
+        fs.mkdirSync(target);
+        owned.push({
+          target,
+          identity: fs.lstatSync(target, { bigint: true }),
+        });
+        shared.createdOutput(target);
+        fs.cpSync(source.folder, target, {
+          recursive: true,
+          force: false,
+          errorOnExist: true,
+          filter: (file) => !fs.lstatSync(file).isSymbolicLink(),
+        });
+        for (const [name, relative] of Object.entries(
+          source.manifest.links || {},
+        )) {
+          const link = path.resolve(target, name),
+            destination = path.resolve(target, relative);
+          if (!inside(target, link) || !inside(target, destination))
+            throw new Error('RELEASE_LINK_ESCAPE');
+          fs.mkdirSync(path.dirname(link), { recursive: true });
+          fs.symlinkSync(
+            destination,
+            link,
+            process.platform === 'win32' ? 'junction' : 'dir',
+          );
+        }
+        if (role(target, block).manifestSha !== source.manifestSha)
+          throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
+      }
+      assertOwner();
+      shared.check();
+      if (fileHash(pointer) !== pointerSha)
+        throw new Error('RELEASE_CURRENT_CHANGED');
+      let finalBytes = 0;
+      for (const value of ids) {
+        const final = role(path.join(root, value), block);
+        if (final.manifestSha !== sources.get(value).manifestSha)
+          throw new Error('RELEASE_INSTALLED_PROOF_CHANGED');
+        finalBytes += final.bytes;
+      }
+      if (
+        !retainOnly &&
+        artifacts(root).some(
+          (value) => !ids.includes(value) && !legacy.includes(value),
+        )
       )
-    )
-      throw new Error('RELEASE_UNKNOWN_OUTPUT_REQUIRES_REVIEW');
-    const finalDisk = fs.statfsSync(root, { bigint: true });
-    if (
-      finalBytes > maxBytes ||
-      finalDisk.bavail * finalDisk.bsize < BigInt(minFree)
-    )
-      throw new Error('RELEASE_FINAL_BUDGET_EXCEEDED');
-    complete = true;
-    return {
-      roles,
-      managedIds: ids,
-      managedBytes: finalBytes,
-      legacyHeldIds: legacy.filter((value) => exists(path.join(root, value))),
-      installedIds: missing.map((row) => row.source.manifest.id),
-      reusedIds: ids.filter(
-        (value) => !missing.some((row) => row.source.manifest.id === value),
-      ),
-      historicalDeletionPerformed: false,
-      ...(retainOnly ? { historyObservation: { kind: 'immediate-directory-names-only', count: legacy.length, contentVerified: false, adopted: false } } : {}),
-      ...(schemaProofs ? { schemaProofs } : {}),
+        throw new Error('RELEASE_UNKNOWN_OUTPUT_REQUIRES_REVIEW');
+      const finalDisk = fs.statfsSync(root, { bigint: true });
+      if (
+        finalBytes > maxBytes ||
+        finalDisk.bavail * finalDisk.bsize < BigInt(minFree)
+      )
+        throw new Error('RELEASE_FINAL_BUDGET_EXCEEDED');
+      complete = true;
+      return {
+        roles,
+        managedIds: ids,
+        managedBytes: finalBytes,
+        legacyHeldIds: legacy.filter((value) => exists(path.join(root, value))),
+        installedIds: missing.map((row) => row.source.manifest.id),
+        reusedIds: ids.filter(
+          (value) => !missing.some((row) => row.source.manifest.id === value),
+        ),
+        historicalDeletionPerformed: false,
+        ...(retainOnly
+          ? {
+              historyObservation: {
+                kind: 'immediate-directory-names-only',
+                count: legacy.length,
+                contentVerified: false,
+                adopted: false,
+              },
+            }
+          : {}),
+        ...(schemaProofs ? { schemaProofs } : {}),
+      };
     };
-    };
-    return shared.policy?.preservingUpdate ? require('./lib.cjs').hostEffects.context.run(shared, installOwned) : installOwned();
+    return shared.policy?.preservingUpdate
+      ? require('./lib.cjs').hostEffects.context.run(shared, installOwned)
+      : installOwned();
   } finally {
     try {
       assertOwner();

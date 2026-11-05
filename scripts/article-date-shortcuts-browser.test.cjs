@@ -33,19 +33,38 @@ const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 test('navigation acknowledgement waits for fixture readiness without inspecting a loading document', async () => {
   // Exercise the exact pre-ready sequence below, including failure handling.
   const source = fs.readFileSync(__filename, 'utf8');
-  const start = source.lastIndexOf("      const navigation = await send('Page.navigate'");
+  const start = source.lastIndexOf(
+    "      const navigation = await send('Page.navigate'",
+  );
   const end = source.indexOf('      await ready();', start);
   assert(start >= 0 && end > start);
   const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-  const run = new AsyncFunction('send', 'evaluate', 'ready', 'assert', 'fixtureUrl', source.slice(start, end) + '      await ready();');
+  const run = new AsyncFunction(
+    'send',
+    'evaluate',
+    'ready',
+    'assert',
+    'fixtureUrl',
+    source.slice(start, end) + '      await ready();',
+  );
   for (const errorText of [undefined, 'SYNTHETIC_NAVIGATION_FAILURE']) {
-    let diagnosticReads = 0, readinessWaits = 0;
-    const operation = run(async () => ({ errorText }), async () => {
-      diagnosticReads++;
-      const loadingDocument = { documentElement: null };
-      return loadingDocument.documentElement.outerHTML;
-    }, async () => { readinessWaits++; }, assert, 'http://synthetic.invalid');
-    if (errorText) await assert.rejects(operation, /SYNTHETIC_NAVIGATION_FAILURE/);
+    let diagnosticReads = 0,
+      readinessWaits = 0;
+    const operation = run(
+      async () => ({ errorText }),
+      async () => {
+        diagnosticReads++;
+        const loadingDocument = { documentElement: null };
+        return loadingDocument.documentElement.outerHTML;
+      },
+      async () => {
+        readinessWaits++;
+      },
+      assert,
+      'http://synthetic.invalid',
+    );
+    if (errorText)
+      await assert.rejects(operation, /SYNTHETIC_NAVIGATION_FAILURE/);
     else await operation;
     assert.equal(diagnosticReads, 0);
     assert.equal(readinessWaits, errorText ? 0 : 1);
@@ -328,7 +347,10 @@ createRoot(document.getElementById('root')).render(<App/>);
       await send('Runtime.enable');
       await pause(1000);
       const navigation = await send('Page.navigate', { url: fixtureUrl });
-      assert(!navigation.errorText, navigation.errorText || 'Page.navigate failed');
+      assert(
+        !navigation.errorText,
+        navigation.errorText || 'Page.navigate failed',
+      );
       await ready();
       await evaluate(
         "document.querySelector('.content-date-filter').open=true",

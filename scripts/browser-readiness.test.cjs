@@ -49,15 +49,24 @@ test('an empty published port file cannot send a request to port 80', async () =
   try {
     fs.writeFileSync(path.join(dir, 'DevToolsActivePort'), '');
     const urls = [];
-    const result = await waitForBrowser(fixture({
-      profile: dir,
-      portReader: () => debugPort(dir, ''),
-      pause: async () => { fs.writeFileSync(path.join(dir, 'DevToolsActivePort'), '9222\n'); },
-      fetchImpl: async url => { urls.push(url); return { ok: true, json: async () => [page] }; },
-    }));
+    const result = await waitForBrowser(
+      fixture({
+        profile: dir,
+        portReader: () => debugPort(dir, ''),
+        pause: async () => {
+          fs.writeFileSync(path.join(dir, 'DevToolsActivePort'), '9222\n');
+        },
+        fetchImpl: async (url) => {
+          urls.push(url);
+          return { ok: true, json: async () => [page] };
+        },
+      }),
+    );
     assert.equal(result.page.webSocketDebuggerUrl, page.webSocketDebuggerUrl);
     assert.deepEqual(urls, ['http://127.0.0.1:9222/json/list']);
-  } finally { fs.rmSync(dir, { recursive: true }); }
+  } finally {
+    fs.rmSync(dir, { recursive: true });
+  }
 });
 test('cold startup and transient HTTP failure remain within one deadline', async () => {
   let calls = 0;

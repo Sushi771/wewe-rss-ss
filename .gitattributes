@@ -11,3 +11,4 @@ apps/server/prisma/migrations/**/migration.sql -text
 *.jsx text eol=lf
 *.cjs text eol=lf
 *.mjs text eol=lf
+scripts/local-release/**/*.json text eol=lf

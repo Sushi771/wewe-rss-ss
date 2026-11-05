@@ -93,7 +93,15 @@ function fixture(view) {
     release,
     metric: module.exports.XhsMetricLine,
     panel: module.exports.XhsEngagementPanel,
-    refresh: () => { index = 0; return all(module.exports.XhsCreatorMetricRefresh({creatorId:'creator-a',enabled:true})); },
+    refresh: () => {
+      index = 0;
+      return all(
+        module.exports.XhsCreatorMetricRefresh({
+          creatorId: 'creator-a',
+          enabled: true,
+        }),
+      );
+    },
     unmount: () => cleanups.forEach((fn) => fn?.()),
     text: (node) =>
       all(node)
@@ -111,10 +119,34 @@ const empty = {
   offset: 0,
 };
 test('retained metric values do not claim the latest attempt time', () => {
-  const f=fixture(empty), older=1600000000000, newer=1760000000000;
-  const snapshot={values:{likes:12,collects:7,shares:null,comments:0},collectedAt:newer,valueCollectedAt:{likes:newer,collects:older,comments:newer},evidence:'source-only'};
-  assert.ok(f.metric({snapshot}).props.title.includes(new Date(older).toLocaleString()));
-  assert.ok(f.text(f.metric({creator:true,snapshot:{...snapshot,values:{fans:82},valueCollectedAt:{fans:older}}})).includes(new Date(older).toLocaleString()));
+  const f = fixture(empty),
+    older = 1600000000000,
+    newer = 1760000000000;
+  const snapshot = {
+    values: { likes: 12, collects: 7, shares: null, comments: 0 },
+    collectedAt: newer,
+    valueCollectedAt: { likes: newer, collects: older, comments: newer },
+    evidence: 'source-only',
+  };
+  assert.ok(
+    f
+      .metric({ snapshot })
+      .props.title.includes(new Date(older).toLocaleString()),
+  );
+  assert.ok(
+    f
+      .text(
+        f.metric({
+          creator: true,
+          snapshot: {
+            ...snapshot,
+            values: { fans: 82 },
+            valueCollectedAt: { fans: older },
+          },
+        }),
+      )
+      .includes(new Date(older).toLocaleString()),
+  );
 });
 test('following unknown is omitted, a measured zero and other unknown values stay distinct', () => {
   const f = fixture(empty),
@@ -123,7 +155,10 @@ test('following unknown is omitted, a measured zero and other unknown values sta
       collectedAt: 1760000000000,
       evidence: 'source-only',
     };
-  assert.match(f.text(f.metric({ creator: true, snapshot })), /^粉丝 1,615更新于 /);
+  assert.match(
+    f.text(f.metric({ creator: true, snapshot })),
+    /^粉丝 1,615更新于 /,
+  );
   assert.match(
     f.text(
       f.metric({
@@ -146,11 +181,23 @@ test('following unknown is omitted, a measured zero and other unknown values sta
   );
 });
 test('deleted comment panel cannot read notes; retained creator refresh locks and ignores late results', async () => {
-  const f=fixture(empty);assert.equal(f.panel,undefined);
-  const nodes=f.refresh();assert.equal(f.calls.filter(c=>c[0]==='read').length,0);
-  const button=nodes.find(n=>n.type==='button');const first=button.props.onClick(),second=button.props.onClick();
-  assert.equal(f.calls.filter(c=>c[0]==='mutate').length,1);
-  assert.deepEqual(f.calls.find(c=>c[0]==='mutate')[1],{creatorId:'creator-a'});
-  f.unmount();f.release.reject(Error('synthetic late failure'));await Promise.all([first,second]);
-  assert.equal(f.calls.some(c=>c[0]==='invalidate'),false);assert.equal(f.slots.includes('synthetic late failure'),false);
+  const f = fixture(empty);
+  assert.equal(f.panel, undefined);
+  const nodes = f.refresh();
+  assert.equal(f.calls.filter((c) => c[0] === 'read').length, 0);
+  const button = nodes.find((n) => n.type === 'button');
+  const first = button.props.onClick(),
+    second = button.props.onClick();
+  assert.equal(f.calls.filter((c) => c[0] === 'mutate').length, 1);
+  assert.deepEqual(f.calls.find((c) => c[0] === 'mutate')[1], {
+    creatorId: 'creator-a',
+  });
+  f.unmount();
+  f.release.reject(Error('synthetic late failure'));
+  await Promise.all([first, second]);
+  assert.equal(
+    f.calls.some((c) => c[0] === 'invalidate'),
+    false,
+  );
+  assert.equal(f.slots.includes('synthetic late failure'), false);
 });

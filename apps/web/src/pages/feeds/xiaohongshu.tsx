@@ -91,6 +91,8 @@ import {
   forgetTerminalBatch,
   inspectPersistentBatch,
   type PersistentCreatorBatch,
+  parsePersistentCreatorBatch,
+  parseOptionalPersistentCreatorBatch,
   refreshCreatorWithReceipt,
 } from '@web/utils/xiaohongshu-refresh';
 
@@ -602,8 +604,14 @@ export default function Xiaohongshu() {
     let mounted = true;
     void inspectPersistentBatch(
       window.localStorage,
-      (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
-      () => utils.xiaohongshu.activeRefreshBatch.fetch(),
+      (batchId) =>
+        utils.xiaohongshu.refreshBatchStatus
+          .fetch({ batchId })
+          .then(parsePersistentCreatorBatch),
+      () =>
+        utils.xiaohongshu.activeRefreshBatch
+          .fetch()
+          .then(parseOptionalPersistentCreatorBatch),
     )
       .then((value) => {
         if (mounted) {
@@ -916,9 +924,11 @@ export default function Xiaohongshu() {
       stopRequested.current = true;
       setStopping(true);
       try {
-        const result = await stopBatch.mutateAsync({
-          batchId: currentBatch.id,
-        });
+        const result = await stopBatch
+          .mutateAsync({
+            batchId: currentBatch.id,
+          })
+          .then(parsePersistentCreatorBatch);
         rememberBatch(result);
         setMessage('已记录批次停止；已发出的请求可能仍在结束。');
       } catch {
@@ -1006,16 +1016,6 @@ export default function Xiaohongshu() {
       else setMessage('所选笔记的基础字段已齐全，未发起采集。');
     });
   };
-  const handleRefreshAll = () =>
-    run(async () => {
-      const ids = (creators.data?.items || [])
-        .filter((creator) => creator.enabled)
-        .map((creator) => creator.id);
-      if (!ids.length) return;
-      batchPartialCreators.current = [];
-      queuedCreators.current = ids.slice(1);
-      await updateCreator(ids[0]);
-    });
   const handleResolve = () =>
     run(async () => {
       setResolution(null);
@@ -1065,8 +1065,12 @@ export default function Xiaohongshu() {
   const advanceCurrentBatch = async (initial: PersistentCreatorBatch) => {
     const currentBatch = await advancePersistentBatch(
       initial,
-      (batchId) => advanceBatch.mutateAsync({ batchId }),
-      (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
+      (batchId) =>
+        advanceBatch.mutateAsync({ batchId }).then(parsePersistentCreatorBatch),
+      (batchId) =>
+        utils.xiaohongshu.refreshBatchStatus
+          .fetch({ batchId })
+          .then(parsePersistentCreatorBatch),
       () => stopRequested.current,
       rememberBatch,
     );
@@ -1091,8 +1095,14 @@ export default function Xiaohongshu() {
         created = await createPersistentBatch(
           window.localStorage,
           () => crypto.randomUUID(),
-          () => utils.xiaohongshu.activeRefreshBatch.fetch(),
-          (batchId) => createBatch.mutateAsync({ batchId, ids }),
+          () =>
+            utils.xiaohongshu.activeRefreshBatch
+              .fetch()
+              .then(parseOptionalPersistentCreatorBatch),
+          (batchId) =>
+            createBatch
+              .mutateAsync({ batchId, ids })
+              .then(parsePersistentCreatorBatch),
         );
       } catch (error) {
         setBatchChecked(false);
@@ -1106,8 +1116,14 @@ export default function Xiaohongshu() {
       setBatchChecked(false);
       const found = await inspectPersistentBatch(
         window.localStorage,
-        (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
-        () => utils.xiaohongshu.activeRefreshBatch.fetch(),
+        (batchId) =>
+          utils.xiaohongshu.refreshBatchStatus
+            .fetch({ batchId })
+            .then(parsePersistentCreatorBatch),
+        () =>
+          utils.xiaohongshu.activeRefreshBatch
+            .fetch()
+            .then(parseOptionalPersistentCreatorBatch),
       );
       rememberBatch(found);
       setBatchChecked(true);
@@ -1120,18 +1136,24 @@ export default function Xiaohongshu() {
       const currentBatch = batchRef.current;
       if (!currentBatch) return;
       stopRequested.current = false;
-      const checked = await utils.xiaohongshu.refreshBatchStatus.fetch({
-        batchId: currentBatch.id,
-      });
+      const checked = await utils.xiaohongshu.refreshBatchStatus
+        .fetch({
+          batchId: currentBatch.id,
+        })
+        .then(parsePersistentCreatorBatch);
       rememberBatch(checked);
       if (checked.state === 'running' || checked.state === 'paused') {
         // A paused batch may only inspect the reserved receipt on this explicit action.
-        const next = await advanceBatch.mutateAsync({ batchId: checked.id });
+        const next = await advanceBatch
+          .mutateAsync({ batchId: checked.id })
+          .then(parsePersistentCreatorBatch);
         if (stopRequested.current) {
           rememberBatch(
-            await utils.xiaohongshu.refreshBatchStatus.fetch({
-              batchId: checked.id,
-            }),
+            await utils.xiaohongshu.refreshBatchStatus
+              .fetch({
+                batchId: checked.id,
+              })
+              .then(parsePersistentCreatorBatch),
           );
           return;
         }
@@ -1144,9 +1166,11 @@ export default function Xiaohongshu() {
     run(async () => {
       const currentBatch = batchRef.current;
       if (!currentBatch) return;
-      const checked = await utils.xiaohongshu.refreshBatchStatus.fetch({
-        batchId: currentBatch.id,
-      });
+      const checked = await utils.xiaohongshu.refreshBatchStatus
+        .fetch({
+          batchId: currentBatch.id,
+        })
+        .then(parsePersistentCreatorBatch);
       forgetTerminalBatch(window.localStorage, checked);
       rememberBatch(null);
       setMessage('已清除已结束批次的本地身份。');
