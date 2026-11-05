@@ -15,13 +15,13 @@ const { refreshCreatorBatch } = moduleObject.exports;
 test('complete batch and empty batch account for all requested creators', async () => {
   assert.deepEqual(
     await refreshCreatorBatch(['a', 'b'], async () => 'complete'),
-    { completed: 2, remaining: 0 },
+    { completed: 2, partial: 0, failedNotes: 0, remaining: 0 },
   );
   assert.deepEqual(
     await refreshCreatorBatch([], async () => {
       throw Error('unused');
     }),
-    { completed: 0, remaining: 0 },
+    { completed: 0, partial: 0, failedNotes: 0, remaining: 0 },
   );
 });
 test('partial result stops subsequent requests and retains complete count', async () => {
@@ -31,7 +31,13 @@ test('partial result stops subsequent requests and retains complete count', asyn
     return id === 'a' ? 'complete' : 'partial';
   });
   assert.deepEqual(calls, ['a', 'b']);
-  assert.deepEqual(result, { completed: 1, remaining: 1, failedId: 'b' });
+  assert.deepEqual(result, {
+    completed: 1,
+    partial: 0,
+    failedNotes: 0,
+    remaining: 1,
+    failedId: 'b',
+  });
 });
 test('request error reports failed creator and remaining count', async () => {
   const calls = [];
@@ -42,10 +48,57 @@ test('request error reports failed creator and remaining count', async () => {
   assert.deepEqual(calls, ['a']);
   assert.deepEqual(result, {
     completed: 0,
+    partial: 0,
+    failedNotes: 0,
     remaining: 1,
     failedId: 'a',
     error: 'source unavailable',
   });
+});
+
+test('verified isolated article failures count partial creators and failed notes while continuing', async () => {
+  const calls = [];
+  const result = await refreshCreatorBatch(['a', 'b', 'c', 'd'], async (id) => {
+    calls.push(id);
+    if (id === 'b')
+      return { status: 'partial', failureScope: 'article', failedCount: 2 };
+    if (id === 'c')
+      return { status: 'partial', failureScope: 'article', failedCount: 3 };
+    return { status: 'complete' };
+  });
+  assert.deepEqual(calls, ['a', 'b', 'c', 'd']);
+  assert.deepEqual(result, {
+    completed: 2,
+    partial: 2,
+    failedNotes: 5,
+    remaining: 0,
+  });
+});
+
+test('unverified partial scope or invalid failed-note count stops without inflating totals', async () => {
+  for (const partial of [
+    { status: 'partial', failedCount: 2 },
+    { status: 'partial', failureScope: 'source', failedCount: 2 },
+    { status: 'partial', failureScope: 'article', failedCount: 0 },
+    { status: 'partial', failureScope: 'article', failedCount: -1 },
+    { status: 'partial', failureScope: 'article', failedCount: 1.5 },
+  ]) {
+    const calls = [];
+    const result = await refreshCreatorBatch(['a', 'b', 'c'], async (id) => {
+      calls.push(id);
+      return id === 'a'
+        ? { status: 'partial', failureScope: 'article', failedCount: 4 }
+        : partial;
+    });
+    assert.deepEqual(calls, ['a', 'b']);
+    assert.deepEqual(result, {
+      completed: 0,
+      partial: 1,
+      failedNotes: 4,
+      remaining: 1,
+      failedId: 'b',
+    });
+  }
 });
 
 function downloadFixture() {
