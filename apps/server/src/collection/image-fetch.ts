@@ -1,3 +1,5 @@
+import { Wechat2RssSourceGate } from './wechat2rss-source-gate';
+
 /** Only WeChat CDN images can be copied into exports or served by the image proxy. */
 const MAX_IMAGE_BYTES = 10_000_000;
 const PNG_END = Buffer.from('0000000049454e44ae426082', 'hex');
@@ -5,8 +7,12 @@ const PNG_END = Buffer.from('0000000049454e44ae426082', 'hex');
 type ImageType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
 
 /** Reject obvious truncation or MIME mismatches; this is not a full image decoder. */
-function assertImageContainer(bytes: Buffer, type: string): ImageType {
-  if (!bytes.length || bytes.length > MAX_IMAGE_BYTES)
+function assertImageContainer(
+  bytes: Buffer,
+  type: string,
+  maxBytes: number,
+): ImageType {
+  if (!bytes.length || bytes.length > maxBytes)
     throw new Error('IMAGE_RESPONSE_INVALID');
   const valid =
     (type === 'image/png' &&
@@ -44,7 +50,10 @@ function assertImageContainer(bytes: Buffer, type: string): ImageType {
 }
 
 /** Existing SQLite data URIs must pass the same check before an offline export. */
-export function decodeInlineImage(raw: string): {
+export function decodeInlineImage(
+  raw: string,
+  maxBytes = MAX_IMAGE_BYTES,
+): {
   bytes: Buffer;
   type: ImageType;
 } {
@@ -52,16 +61,13 @@ export function decodeInlineImage(raw: string): {
   // a greedy regexp can exhaust the V8 regexp stack. The canonical round trip
   // below still rejects whitespace, invalid alphabet and malformed padding.
   const match = raw.match(/^data:(image\/(?:png|jpeg|gif|webp));base64,/);
-  if (
-    !match ||
-    raw.length - match[0].length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4
-  )
+  if (!match || raw.length - match[0].length > Math.ceil(maxBytes / 3) * 4)
     throw new Error('IMAGE_RESPONSE_INVALID');
   const encoded = raw.slice(match[0].length);
   const bytes = Buffer.from(encoded, 'base64');
   if (bytes.toString('base64') !== encoded)
     throw new Error('IMAGE_RESPONSE_INVALID');
-  return { bytes, type: assertImageContainer(bytes, match[1]) };
+  return { bytes, type: assertImageContainer(bytes, match[1], maxBytes) };
 }
 
 export function allowedImageUrl(raw: string): URL {
@@ -79,46 +85,97 @@ export function allowedImageUrl(raw: string): URL {
 
 /** Authentication/rate restrictions stop the whole background media lane. */
 export class ImageRequestBlockedError extends Error {
-  constructor(readonly status: number) {
+  constructor(readonly status: number | null) {
     super('IMAGE_REQUEST_BLOCKED');
   }
 }
 
 export async function fetchAllowedImage(
   raw: string,
+  maxBytes = MAX_IMAGE_BYTES,
+  sourceGate?: Wechat2RssSourceGate,
 ): Promise<{ bytes: Buffer; type: string }> {
   const url = allowedImageUrl(raw);
-  const response = await fetch(url, {
-    redirect: 'manual',
-    signal: AbortSignal.timeout(10000),
-    headers: { referer: 'https://mp.weixin.qq.com/' },
-  });
-  if ([401, 403, 429].includes(response.status)) {
-    await response.body?.cancel();
-    throw new ImageRequestBlockedError(response.status);
-  }
-  const type = (response.headers.get('content-type') || '')
-    .split(';')[0]
-    .toLowerCase();
-  if (
-    response.status !== 200 ||
-    !/^image\/(?:png|jpeg|gif|webp)$/.test(type) ||
-    !response.body
-  )
-    throw new Error('IMAGE_RESPONSE_INVALID');
-  let length = 0;
-  const chunks: Buffer[] = [];
-  const reader = response.body.getReader();
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    length += value.length;
-    if (length > MAX_IMAGE_BYTES) {
-      await reader.cancel();
-      throw new Error('IMAGE_TOO_LARGE');
+  let token: string | undefined;
+  if (sourceGate) {
+    try {
+      token = await sourceGate.begin();
+    } catch {
+      throw new ImageRequestBlockedError(null);
     }
-    chunks.push(Buffer.from(value));
   }
-  const bytes = Buffer.concat(chunks);
-  return { bytes, type: assertImageContainer(bytes, type) };
+  let ordinaryOutcome = false;
+  try {
+    const response = await fetch(url, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout(10000),
+      headers: { referer: 'https://mp.weixin.qq.com/' },
+    });
+    if ([401, 403, 429].includes(response.status)) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ImageRequestBlockedError(response.status);
+    }
+    const type = (response.headers.get('content-type') || '')
+      .split(';')[0]
+      .toLowerCase();
+    if (
+      response.status !== 200 ||
+      !/^image\/(?:png|jpeg|gif|webp)$/.test(type) ||
+      !response.body
+    ) {
+      ordinaryOutcome = true;
+      throw new Error('IMAGE_RESPONSE_INVALID');
+    }
+    let length = 0;
+    const chunks: Buffer[] = [];
+    const reader = response.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.length;
+      if (length > maxBytes) {
+        ordinaryOutcome = true;
+        await reader.cancel();
+        throw new Error('IMAGE_TOO_LARGE');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    const bytes = Buffer.concat(chunks);
+    ordinaryOutcome = true;
+    const result = { bytes, type: assertImageContainer(bytes, type, maxBytes) };
+    if (sourceGate && token) {
+      try {
+        await sourceGate.finish(token, 200);
+      } catch {
+        throw new ImageRequestBlockedError(null);
+      }
+    }
+    return result;
+  } catch (error) {
+    if (sourceGate && token) {
+      if (
+        error instanceof ImageRequestBlockedError &&
+        error.status !== null &&
+        [401, 403, 429].includes(error.status)
+      ) {
+        try {
+          await sourceGate.finish(token, error.status as 401 | 403 | 429);
+        } catch {
+          throw new ImageRequestBlockedError(null);
+        }
+      } else if (
+        ordinaryOutcome &&
+        !(error instanceof ImageRequestBlockedError)
+      ) {
+        try {
+          await sourceGate.finish(token, 200);
+        } catch {
+          throw new ImageRequestBlockedError(null);
+        }
+      } else if (!(error instanceof ImageRequestBlockedError)) {
+        throw new ImageRequestBlockedError(null);
+      }
+    }
+    throw error;
+  }
 }

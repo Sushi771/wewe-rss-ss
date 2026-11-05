@@ -12,6 +12,7 @@ import {
   allowedImageUrl,
   decodeInlineImage,
   fetchAllowedImage,
+  ImageRequestBlockedError,
 } from './collection/image-fetch';
 import { metricsMarkdown } from './collection/collection-format';
 import { TRPCError } from '@trpc/server';
@@ -34,12 +35,13 @@ export async function buildArticleMarkdown(
   imageFetcher = fetchAllowedImage,
   imageDirectory: 'attachments' | 'image' = 'attachments',
   limits?: { maxImages: number; maxBytes: number },
+  allowPartialImages = false,
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
-  const mediaComplete =
+  let mediaComplete =
     article.lastBodyStatus !== 'images-pending' &&
     !html.includes('data-wewe-image-pending=');
   if (!html && article.lastBodyStatus === 'unavailable')
@@ -97,6 +99,7 @@ export async function buildArticleMarkdown(
         message: '正文图片超过保存上限。',
       });
     let totalImageBytes = 0;
+    let mediaBlocked = false;
     await pMap(
       imgs,
       async (img) => {
@@ -126,33 +129,44 @@ export async function buildArticleMarkdown(
           const fileName = `image_${hash}.${safeExt}`;
           const localPath = path.join(attachmentsDir, fileName);
 
+          let image: Awaited<ReturnType<typeof imageFetcher>> | undefined;
           try {
             if (!fs.existsSync(localPath)) {
-              const image = dataSrc.startsWith('data:')
-                ? decodeInlineImage(dataSrc)
+              if (mediaBlocked && !dataSrc.startsWith('data:'))
+                throw new Error('IMAGE_REQUEST_BLOCKED');
+              image = dataSrc.startsWith('data:')
+                ? decodeInlineImage(
+                    dataSrc,
+                    allowPartialImages ? 30_000_000 : undefined,
+                  )
                 : await imageFetcher(dataSrc);
-              await fs.promises.writeFile(localPath, image.bytes);
             }
-            if (limits) {
-              totalImageBytes += (await fs.promises.stat(localPath)).size;
-              if (totalImageBytes > limits.maxBytes)
-                throw new TRPCError({
-                  code: 'PRECONDITION_FAILED',
-                  message: '正文图片总字节超过保存上限。',
-                });
-            }
-            $img.attr('src', `${imageDirectory}/${fileName}`);
           } catch (error) {
             if (error instanceof TRPCError) throw error;
-            if (!mediaComplete) {
+            if (error instanceof ImageRequestBlockedError) mediaBlocked = true;
+            if (allowPartialImages || !mediaComplete) {
+              mediaComplete = false;
               $img.remove();
               return;
             }
             throw new Error('图片未能安全下载，离线导出未完成');
           }
-        } else $img.remove();
+          if (image) await fs.promises.writeFile(localPath, image.bytes);
+          if (limits) {
+            totalImageBytes += (await fs.promises.stat(localPath)).size;
+            if (totalImageBytes > limits.maxBytes)
+              throw new TRPCError({
+                code: 'PRECONDITION_FAILED',
+                message: '正文图片总字节超过保存上限。',
+              });
+          }
+          $img.attr('src', `${imageDirectory}/${fileName}`);
+        } else {
+          mediaComplete = false;
+          $img.remove();
+        }
       },
-      { concurrency: limits ? 1 : 5 },
+      { concurrency: limits || allowPartialImages ? 1 : 5 },
     );
   } else {
     // For browser export, we use proxy URLs

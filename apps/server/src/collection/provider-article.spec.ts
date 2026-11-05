@@ -12,6 +12,30 @@ const item = (mid: number) => ({
 });
 
 describe('Wechat2RSS JSON Feed candidate parser', () => {
+  it('keeps verified list metadata and other articles when one body is oversized', () => {
+    const page = parseWechat2RssJsonFeed(
+      {
+        items: [
+          item(1),
+          { ...item(2), content_html: 'x'.repeat(2_000_001) },
+          item(3),
+        ],
+      },
+      feedId,
+    );
+    expect(page.articles.map((article) => article.id)).toEqual([
+      'WX_1234567890_1_1',
+      'WX_1234567890_2_1',
+      'WX_1234567890_3_1',
+    ]);
+    expect(page.articles[1]).toMatchObject({
+      title: '文章 2',
+      contentHtml: null,
+    });
+    expect(page.articles[2].contentHtml).toContain('真实正文');
+    expect(page.bodyMissing).toBe(1);
+  });
+
   it('requires five distinct original identities and keeps safe body images', () => {
     const page = parseWechat2RssJsonFeed(
       { items: [1, 2, 3, 4, 5].map(item) },

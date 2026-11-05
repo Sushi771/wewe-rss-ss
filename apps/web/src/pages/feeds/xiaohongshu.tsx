@@ -16,7 +16,14 @@ import ManagementFolders from '@web/components/ManagementFolders';
 import { trpc } from '@web/utils/trpc';
 import { getAuthCode } from '@web/utils/auth';
 import { serverOriginUrl } from '@web/utils/env';
-import { refreshCreatorBatch } from '@web/utils/xiaohongshu-refresh';
+import {
+  advancePersistentBatch,
+  createPersistentBatch,
+  forgetTerminalBatch,
+  inspectPersistentBatch,
+  type PersistentCreatorBatch,
+  refreshCreatorWithReceipt,
+} from '@web/utils/xiaohongshu-refresh';
 
 type SaveSettings = { directory: string; askEveryTime: boolean };
 type DirectoryChoice = SaveSettings & {
@@ -65,6 +72,11 @@ export default function Xiaohongshu() {
   const [profileUrl, setProfileUrl] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [batch, setBatch] = useState<PersistentCreatorBatch | null>(null);
+  const [batchChecked, setBatchChecked] = useState(false);
+  const batchRef = useRef<PersistentCreatorBatch | null>(null);
   const [adding, setAdding] = useState(false);
   const [managing, setManaging] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -76,6 +88,10 @@ export default function Xiaohongshu() {
   const [saveSettings, setSaveSettings] = useState<SaveSettings | null>(null);
   const [directory, setDirectory] = useState('');
   const active = useRef(false);
+  const refreshOperation = useRef<{ id: string; operationId: string } | null>(
+    null,
+  );
+  const stopRequested = useRef(false);
   const receipts = useRef<Record<string, string>>({});
   useEffect(() => {
     let current = true;
@@ -146,10 +162,42 @@ export default function Xiaohongshu() {
   const edit = trpc.xiaohongshu.edit.useMutation();
   const remove = trpc.xiaohongshu.remove.useMutation();
   const refresh = trpc.xiaohongshu.refresh.useMutation();
+  const stopRefresh = trpc.xiaohongshu.stopRefresh.useMutation();
+  const createBatch = trpc.xiaohongshu.createRefreshBatch.useMutation();
+  const advanceBatch = trpc.xiaohongshu.advanceRefreshBatch.useMutation();
+  const stopBatch = trpc.xiaohongshu.stopRefreshBatch.useMutation();
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation();
   const removeGroup = trpc.xiaohongshu.removeGroup.useMutation();
   const moveCreators = trpc.xiaohongshu.moveCreators.useMutation();
+  const rememberBatch = (value: PersistentCreatorBatch | null) => {
+    batchRef.current = value;
+    setBatch(value);
+  };
+  useEffect(() => {
+    let mounted = true;
+    void inspectPersistentBatch(
+      window.localStorage,
+      (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
+      () => utils.xiaohongshu.activeRefreshBatch.fetch(),
+    )
+      .then((value) => {
+        if (mounted) {
+          rememberBatch(value);
+          setBatchChecked(true);
+          if (value) setMessage('已读取上次批次；不会自动开始新的采集。');
+        }
+      })
+      .catch(() => {
+        if (mounted) setMessage('批次状态未确认；已停止，请核对后重试读取。');
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [
+    utils.xiaohongshu.activeRefreshBatch,
+    utils.xiaohongshu.refreshBatchStatus,
+  ]);
   useEffect(() => {
     if (
       !active.current &&
@@ -204,18 +252,70 @@ export default function Xiaohongshu() {
     });
   };
   const updateCreator = async (id: string) => {
-    const result = await refresh.mutateAsync({ id });
-    const name =
-      creators.data?.items.find((creator) => creator.id === id)?.displayName ||
-      '已选博主';
-    receipts.current[id] =
-      name + '：' + result.message + ' 新增完整缓存笔记：' + result.added;
-    await Promise.all([
-      utils.xiaohongshu.list.invalidate(),
-      utils.xiaohongshu.notes.invalidate(),
-    ]);
-    setMessage(receipts.current[id]);
-    return result.status;
+    try {
+      const result = await refreshCreatorWithReceipt(
+        id,
+        window.localStorage,
+        () => crypto.randomUUID(),
+        (operationId) => refresh.mutateAsync({ id, operationId }),
+        (operationId) =>
+          utils.xiaohongshu.refreshStatus.fetch({ id, operationId }),
+        (operationId) => {
+          refreshOperation.current = { id, operationId };
+          setRefreshing(true);
+        },
+      );
+      const name =
+        creators.data?.items.find((creator) => creator.id === id)
+          ?.displayName || '已选博主';
+      receipts.current[id] =
+        name + '：' + result.message + ' 新增完整缓存笔记：' + result.added;
+      await Promise.all([
+        utils.xiaohongshu.list.invalidate(),
+        utils.xiaohongshu.notes.invalidate(),
+      ]);
+      setMessage(receipts.current[id]);
+      return result;
+    } finally {
+      refreshOperation.current = null;
+      setRefreshing(false);
+    }
+  };
+  const handleStopRefresh = async () => {
+    const currentBatch = batchRef.current;
+    if (currentBatch && ['running', 'paused'].includes(currentBatch.state)) {
+      if (stopping) return;
+      stopRequested.current = true;
+      setStopping(true);
+      try {
+        const result = await stopBatch.mutateAsync({
+          batchId: currentBatch.id,
+        });
+        rememberBatch(result);
+        setMessage('已记录批次停止；已发出的请求可能仍在结束。');
+      } catch {
+        setMessage('批次停止未确认；身份已保留，不会继续。');
+      } finally {
+        setStopping(false);
+      }
+      return;
+    }
+    const operation = refreshOperation.current;
+    if (!operation || stopping) return;
+    stopRequested.current = true;
+    setStopping(true);
+    try {
+      const result = await stopRefresh.mutateAsync(operation);
+      setMessage(
+        result.stopped
+          ? '已记录停止；已发出的请求可能仍在结束，未确认的回执将保留。'
+          : '停止尚未确认，未决回执保留；不会继续下一个博主。',
+      );
+    } catch {
+      setMessage('停止未确认，未决回执保留；不会继续下一个博主。');
+    } finally {
+      setStopping(false);
+    }
   };
   const handleAdd = () =>
     run(async () => {
@@ -230,21 +330,94 @@ export default function Xiaohongshu() {
       setProfileUrl('');
       setAdding(false);
     });
+  const advanceCurrentBatch = async (initial: PersistentCreatorBatch) => {
+    const currentBatch = await advancePersistentBatch(
+      initial,
+      (batchId) => advanceBatch.mutateAsync({ batchId }),
+      (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
+      () => stopRequested.current,
+      rememberBatch,
+    );
+    await Promise.all([
+      utils.xiaohongshu.list.invalidate(),
+      utils.xiaohongshu.notes.invalidate(),
+    ]);
+    setMessage(
+      `批次状态：${currentBatch.state}；已保留批次身份，重新打开只读取状态。`,
+    );
+  };
   const handleRefreshAll = () =>
     run(async () => {
-      if (!capability.data?.canRefresh) return;
-      const items = creators.data?.items || [];
-      const enabled = items.filter((creator) => creator.enabled);
-      const result = await refreshCreatorBatch(
-        enabled.map((creator) => creator.id),
-        updateCreator,
+      if (!batchChecked || !capability.data?.canRefresh) return;
+      stopRequested.current = false;
+      const ids = (creators.data?.items || [])
+        .filter((creator) => creator.enabled)
+        .map((creator) => creator.id);
+      if (!ids.length) return;
+      let created: PersistentCreatorBatch;
+      try {
+        created = await createPersistentBatch(
+          window.localStorage,
+          () => crypto.randomUUID(),
+          () => utils.xiaohongshu.activeRefreshBatch.fetch(),
+          (batchId) => createBatch.mutateAsync({ batchId, ids }),
+        );
+      } catch (error) {
+        setBatchChecked(false);
+        throw error;
+      }
+      rememberBatch(created);
+      await advanceCurrentBatch(created);
+    });
+  const handleInspectBatch = () =>
+    run(async () => {
+      setBatchChecked(false);
+      const found = await inspectPersistentBatch(
+        window.localStorage,
+        (batchId) => utils.xiaohongshu.refreshBatchStatus.fetch({ batchId }),
+        () => utils.xiaohongshu.activeRefreshBatch.fetch(),
       );
-      const detail = result.failedId
-        ? result.error || receipts.current[result.failedId] || '更新未完成。'
-        : '';
+      rememberBatch(found);
+      setBatchChecked(true);
       setMessage(
-        `批量更新：完成 ${result.completed} 位，未完成 ${result.failedId ? 1 : 0} 位，未执行 ${result.remaining} 位；已停用跳过 ${items.length - enabled.length} 位。${detail}`,
+        found ? `已读取批次状态：${found.state}。` : '没有待处理批次。',
       );
+    });
+  const handleContinueBatch = () =>
+    run(async () => {
+      const currentBatch = batchRef.current;
+      if (!currentBatch) return;
+      stopRequested.current = false;
+      const checked = await utils.xiaohongshu.refreshBatchStatus.fetch({
+        batchId: currentBatch.id,
+      });
+      rememberBatch(checked);
+      if (checked.state === 'running' || checked.state === 'paused') {
+        // A paused batch may only inspect the reserved receipt on this explicit action.
+        const next = await advanceBatch.mutateAsync({ batchId: checked.id });
+        if (stopRequested.current) {
+          rememberBatch(
+            await utils.xiaohongshu.refreshBatchStatus.fetch({
+              batchId: checked.id,
+            }),
+          );
+          return;
+        }
+        rememberBatch(next);
+        if (next.state === 'running') await advanceCurrentBatch(next);
+        else setMessage(`批次状态：${next.state}；没有自动重发未确认请求。`);
+      }
+    });
+  const handleForgetBatch = () =>
+    run(async () => {
+      const currentBatch = batchRef.current;
+      if (!currentBatch) return;
+      const checked = await utils.xiaohongshu.refreshBatchStatus.fetch({
+        batchId: currentBatch.id,
+      });
+      forgetTerminalBatch(window.localStorage, checked);
+      rememberBatch(null);
+      setMessage('已清除已结束批次的本地身份。');
     });
   const handleDownload = () =>
     run(async () => {
@@ -570,10 +743,15 @@ export default function Xiaohongshu() {
               size="sm"
               className="mac-btn-outline"
               isDisabled={
-                busy || !current?.enabled || !capability.data?.canRefresh
+                busy ||
+                !batchChecked ||
+                !!batch ||
+                !current?.enabled ||
+                !capability.data?.canRefresh
               }
               onPress={() =>
                 run(async () => {
+                  stopRequested.current = false;
                   if (current) await updateCreator(current.id);
                 })
               }
@@ -585,6 +763,8 @@ export default function Xiaohongshu() {
               variant="light"
               isDisabled={
                 busy ||
+                !batchChecked ||
+                !!batch ||
                 !capability.data?.canRefresh ||
                 !creators.data?.items.some((creator) => creator.enabled)
               }
@@ -592,6 +772,62 @@ export default function Xiaohongshu() {
             >
               刷新全部
             </Button>
+            {batch && ['running', 'paused'].includes(batch.state) && (
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={busy || !capability.data?.canRefresh}
+                onPress={handleContinueBatch}
+              >
+                查看并继续批次
+              </Button>
+            )}
+            {!batchChecked && (
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={busy}
+                onPress={handleInspectBatch}
+              >
+                重新读取批次状态
+              </Button>
+            )}
+            {batch && ['complete', 'stopped'].includes(batch.state) && (
+              <Button
+                size="sm"
+                variant="light"
+                isDisabled={busy}
+                onPress={handleForgetBatch}
+              >
+                清除已结束批次
+              </Button>
+            )}
+            <Button
+              size="sm"
+              color="warning"
+              isDisabled={
+                (!refreshing && !batch) ||
+                stopping ||
+                (!!batch && !['running', 'paused'].includes(batch.state))
+              }
+              onPress={handleStopRefresh}
+            >
+              {stopping ? '正在停止…' : '停止更新'}
+            </Button>
+            {batch && (
+              <span className="text-default-500 text-xs">
+                批次：{batch.state}，完成{' '}
+                {batch.items.filter((item) => item.state === 'complete').length}
+                ，部分完成{' '}
+                {batch.items.filter((item) => item.state === 'partial').length}
+                ，待处理{' '}
+                {
+                  batch.items.filter((item) =>
+                    ['queued', 'reserved'].includes(item.state),
+                  ).length
+                }
+              </span>
+            )}
             <Button
               size="sm"
               color="primary"

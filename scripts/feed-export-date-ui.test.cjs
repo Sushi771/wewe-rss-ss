@@ -30,7 +30,8 @@ async function run(results, rejectAt, options = {}) {
     notifications = [],
     loading = [],
     selections = [],
-    queries = [];
+    queries = [],
+    progress = [];
   const context = {
     articleSelectedIds: new Set(results.map((_, i) => 'fixture-' + i)),
     batchExporting: { current: false },
@@ -40,7 +41,7 @@ async function run(results, rejectAt, options = {}) {
     folderFilter: 'g',
     id: 'MP_WXS_1234567890',
     search: 'match',
-    setExportResult: () => {},
+    setExportResult: (value) => progress.push(value),
     setIsBatchExporting: (x) => loading.push(x),
     setArticleSelectedIds: (x) =>
       selections.push(
@@ -52,6 +53,7 @@ async function run(results, rejectAt, options = {}) {
           exportIds: {
             query: async (filter) => {
               queries.push(filter);
+              if (options.rejectQuery) throw new Error('snapshot unavailable');
               if (options.cancelOnQuery) context.exportCancelled.current = true;
               return options.scopeIds || results.map((_, i) => 'fixture-' + i);
             },
@@ -83,7 +85,7 @@ async function run(results, rejectAt, options = {}) {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
   await vm.runInContext(js, context)(options.wholeScope || false);
-  return { calls, notifications, loading, selections, queries };
+  return { calls, notifications, loading, selections, queries, progress };
 }
 test('normal publication exports keep one compact success notice', async () => {
   const r = await run([{ publicationDate: '2026-10-05' }]);
@@ -123,7 +125,22 @@ test('mixed results keep skipped, repaired and incomplete distinct', async () =>
   ]);
   assert.equal(r.notifications[0][0], 'warning');
   assert.match(r.notifications[0][1], /新增 1.*跳过 1.*补齐 1.*失败 1/);
+  assert.match(
+    r.notifications[0][2].description,
+    /部分图片尚未保存.*可稍后重试/,
+  );
   assert.deepEqual(r.selections, []);
+});
+
+test('snapshot failure replaces stale progress and allows retry without saving', async () => {
+  const r = await run([{}], undefined, { wholeScope: true, rejectQuery: true });
+  assert.equal(r.calls.length, 0);
+  assert.deepEqual(r.progress, [
+    '正在确定导出范围…',
+    '未能取得完整导出范围，请重试',
+  ]);
+  assert.deepEqual(r.loading, [true, false]);
+  assert.equal(r.notifications[0][0], 'error');
 });
 
 test('whole filtered scope freezes all 25 identities with filters and de-duplicates repeated IDs', async () => {

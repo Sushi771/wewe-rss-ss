@@ -92,7 +92,7 @@ export async function prepareWechat2RssSingleDownload(
         : 'available',
     },
     undefined,
-    { maxImages: 60, maxBytes: 20_000_000 },
+    { maxImages: 60, maxBytes: 60_000_000 },
   );
   const prepare: ArticlePreparation = async (directory) => {
     try {

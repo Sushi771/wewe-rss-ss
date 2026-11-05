@@ -41,11 +41,19 @@ function cleanBody(raw: unknown): {
   html: string | null;
   imageBlocked: number;
   cover: string;
+  failure?: 'BODY_TOO_LARGE' | 'BODY_MISSING';
 } {
   if (typeof raw !== 'string' || !raw.trim())
-    return { html: null, imageBlocked: 0, cover: '' };
+    return { html: null, imageBlocked: 0, cover: '', failure: 'BODY_MISSING' };
   if (Buffer.byteLength(raw, 'utf8') > 2_000_000)
-    throw new Error('WECHAT2RSS_BODY_TOO_LARGE');
+    // A single oversized body must not suppress independently verified list
+    // metadata or other articles. Leave it unavailable for later recovery.
+    return {
+      html: null,
+      imageBlocked: 0,
+      cover: '',
+      failure: 'BODY_TOO_LARGE',
+    };
   const $ = load(`<div id="provider-body">${raw}</div>`);
   const body = $('#provider-body');
   body
@@ -91,7 +99,7 @@ function cleanBody(raw: unknown): {
     }
   }
   if (!body.text().trim() && !body.find('img[src]').length)
-    return { html: null, imageBlocked, cover };
+    return { html: null, imageBlocked, cover, failure: 'BODY_MISSING' };
   return {
     // Keep incomplete-image provenance after sanitization; removing an unsafe
     // or source-less tag must not turn it into a complete offline article.
@@ -112,6 +120,7 @@ export function parseWechat2RssJsonFeed(
   if (items.length > 1000) throw new Error('WECHAT2RSS_FEED_TOO_LARGE');
   const seen = new Set<string>();
   const articles: ProviderArticle[] = [];
+  const bodyFailures: NonNullable<ProviderPage['bodyFailures']> = [];
   let bodyMissing = 0;
   let imageBlocked = 0;
   for (const item of items) {
@@ -139,7 +148,18 @@ export function parseWechat2RssJsonFeed(
       timestamp > Date.now() + 300000
     )
       throw new Error('WECHAT2RSS_ARTICLE_DATE_INVALID');
-    const body = cleanBody(item.content_html);
+    let body: ReturnType<typeof cleanBody>;
+    try {
+      body = cleanBody(item.content_html);
+    } catch (error) {
+      // Identity and publication time are verified above. Only a content
+      // syntax error is recoverable; resource and unknown errors still stop.
+      if (!(error instanceof SyntaxError)) throw error;
+      bodyFailures.push({ id: identity.id, code: 'BODY_PARSE_FAILED' });
+      body = { html: null, imageBlocked: 0, cover: '' };
+    }
+    if (body.failure)
+      bodyFailures.push({ id: identity.id, code: body.failure });
     if (!body.html) bodyMissing++;
     imageBlocked += body.imageBlocked;
     const image = typeof item.image === 'string' ? safeImage(item.image) : null;
@@ -157,5 +177,6 @@ export function parseWechat2RssJsonFeed(
     upstreamCount: items.length,
     bodyMissing,
     imageBlocked,
+    bodyFailures,
   };
 }

@@ -50,6 +50,8 @@ describe('incremental export: synthetic files and mocked media only', () => {
     );
   beforeEach(async () => {
     root = await fs.mkdtemp(join(tmpdir(), 'wewe-incremental-'));
+    await fs.writeFile(join(root, 'fixture.db'), '');
+    process.env.DATABASE_URL = `file:${join(root, 'fixture.db')}`;
     store = new LocalArticleStore(join(root, 'settings.json'), root);
     jest
       .mocked(images.fetchAllowedImage)
@@ -152,6 +154,38 @@ describe('incremental export: synthetic files and mocked media only', () => {
       ),
     ).toHaveLength(1);
     expect((await store.save(prepare())).status).toBe('skipped');
+  });
+  it('saves successful images when one fails, then repairs without overwriting edits', async () => {
+    jest
+      .mocked(images.fetchAllowedImage)
+      .mockRejectedValueOnce(new Error('offline'));
+    const first = await store.save(prepare());
+    expect(first).toMatchObject({ status: 'failed', mediaComplete: false });
+    expect(await fs.readdir(join(first.directory, 'image'))).toHaveLength(1);
+    await fs.writeFile(first.markdownPath, 'User notes');
+    jest.mocked(images.fetchAllowedImage).mockClear();
+    expect(await store.save(prepare())).toMatchObject({
+      status: 'repaired',
+      mediaComplete: true,
+    });
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(first.markdownPath, 'utf8')).toBe('User notes');
+    expect(await fs.readdir(join(first.directory, 'image'))).toHaveLength(2);
+  });
+  it('stops subsequent image requests after a restriction', async () => {
+    jest
+      .mocked(images.fetchAllowedImage)
+      .mockRejectedValueOnce(new images.ImageRequestBlockedError(429));
+    expect(await store.save(prepare())).toMatchObject({
+      status: 'failed',
+      mediaComplete: false,
+    });
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
+    expect(
+      await fs.readFile(join(root, '.wechat2rss-media-blocked.json'), 'utf8'),
+    ).toContain('IMAGE_REQUEST_BLOCKED');
+    await store.save(prepare({ id: 'WX_1234567890_2247000002_1' }));
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
   });
   it('failed repair retains receipt and edits, clears locks and can safely resume', async () => {
     const first = await store.save(prepare());

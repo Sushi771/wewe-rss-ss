@@ -479,6 +479,7 @@ const Feeds = () => {
     batchExporting.current = true;
     exportCancelled.current = false;
     setIsBatchExporting(true);
+    setExportResult(wholeScope ? '正在确定导出范围…' : '正在准备导出…');
     const batchSelection = articleSelectedIds;
     const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
     const exportNotices = new Set<string>();
@@ -501,6 +502,8 @@ const Feeds = () => {
             exportNotices.add(`日期待核（${result.datePendingReason}）`);
           if (result.legacyLayoutRetained)
             exportNotices.add('保留原有位置及编辑');
+          if (result.mediaComplete === false)
+            exportNotices.add('部分图片尚未保存，正文可能已保存；可稍后重试');
           const status =
             result.mediaComplete === false
               ? 'failed'
@@ -530,6 +533,7 @@ const Feeds = () => {
           current === batchSelection ? new Set() : current,
         );
     } catch (error) {
+      setExportResult('未能取得完整导出范围，请重试');
       toast.error('未能取得完整导出范围', {
         description: error instanceof Error ? error.message : String(error),
       });

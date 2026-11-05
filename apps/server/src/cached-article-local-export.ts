@@ -8,6 +8,8 @@ import { buildArticleMarkdown } from './article-export';
 import { decodeInlineImage, fetchAllowedImage } from './collection/image-fetch';
 import { ArticlePreparation } from './article-local-save';
 import { ArticleExportSource } from './article-export-source';
+import { mediaSafetyStop } from './feeds/media-safety-stop';
+import { ImageRequestBlockedError } from './collection/image-fetch';
 
 export type CachedExportArticle = Pick<
   Article,
@@ -34,13 +36,33 @@ export function prepareCachedArticleLocalExport(
         code: 'PRECONDITION_FAILED',
         message: '正文尚未缓存，不能完成离线导出；未重新请求原文。',
       });
+    const guardedFetch: typeof fetchAllowedImage = async (url) => {
+      const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');
+      if (safety.isBlocked()) throw new ImageRequestBlockedError(429);
+      try {
+        return await fetchAllowedImage(url, 30_000_000);
+      } catch (error) {
+        if (error instanceof ImageRequestBlockedError) {
+          try {
+            await safety.stop();
+          } catch {
+            throw new TRPCError({
+              code: 'INTERNAL_SERVER_ERROR',
+              message: '媒体停止状态无法保存。',
+            });
+          }
+        }
+        throw error;
+      }
+    };
     const exported = await buildArticleMarkdown(
       snapshot,
       '',
       directory,
-      fetchAllowedImage,
+      guardedFetch,
       'image',
       limits,
+      true,
     );
     const markdown = snapshot.sourceUrl
       ? exported.markdown
@@ -82,7 +104,7 @@ export function prepareCachedArticleLocalExport(
     for (const element of $('img').toArray()) {
       const src = $(element).attr('src') || '';
       if (!src.startsWith('data:image/')) continue;
-      const bytes = decodeInlineImage(src).bytes;
+      const bytes = decodeInlineImage(src, 30_000_000).bytes;
       const hash = createHash('sha256')
         .update(bytes)
         .digest('hex')

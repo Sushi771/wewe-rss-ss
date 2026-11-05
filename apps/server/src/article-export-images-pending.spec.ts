@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { buildArticleMarkdown } from './article-export';
 import { LocalArticleStore } from './article-local-save';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
+import { decodeInlineImage } from './collection/image-fetch';
 
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
@@ -29,6 +30,20 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
   });
   afterEach(async () => {
     await rm(folder, { recursive: true, force: true });
+  });
+
+  it('accepts a bounded image container above the previous 10 MB limit', () => {
+    const bytes = Buffer.concat([
+      png.subarray(0, -12),
+      Buffer.alloc(10_000_001),
+      png.subarray(-12),
+    ]);
+    expect(
+      decodeInlineImage(
+        `data:image/png;base64,${bytes.toString('base64')}`,
+        30_000_000,
+      ).bytes.length,
+    ).toBe(bytes.length);
   });
 
   it('saves reliable text and actual image bytes, reports the limit and preserves edited duplicate notes', async () => {

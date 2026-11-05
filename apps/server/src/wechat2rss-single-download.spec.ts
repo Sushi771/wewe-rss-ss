@@ -1,8 +1,14 @@
 import axios from 'axios';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Wechat2RssProvider } from './collection/providers/wechat2rss';
+jest.mock('./collection/wechat2rss-source-gate', () => ({
+  defaultWechat2RssSourceGate: () => ({
+    begin: async () => 'fixture',
+    finish: async () => undefined,
+  }),
+}));
 import * as registry from './collection/provider-registry';
 import * as images from './collection/image-fetch';
 import { prepareWechat2RssSingleDownload } from './wechat2rss-single-download';
@@ -34,6 +40,8 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
   let calls: string[];
   beforeEach(async () => {
     folder = await mkdtemp(join(tmpdir(), 'wewe-single-w2r-'));
+    await writeFile(join(folder, 'fixture.db'), '');
+    process.env.DATABASE_URL = `file:${join(folder, 'fixture.db')}`;
     calls = [];
     listed = {
       err: '',
@@ -177,6 +185,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     expect(axios.get).not.toHaveBeenCalled();
     expect(images.fetchAllowedImage).toHaveBeenCalledWith(
       'https://mmbiz.qpic.cn/fixture.png',
+      30_000_000,
     );
   });
 
@@ -293,7 +302,9 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       expect(calls).toEqual(['/feed/all.json']);
       expect(images.fetchAllowedImage).not.toHaveBeenCalled();
       expect(axios.get).not.toHaveBeenCalled();
-      expect(await readdir(folder)).toEqual([]);
+      expect(
+        (await readdir(folder)).filter((name) => name !== 'fixture.db'),
+      ).toEqual([]);
     },
   );
 
@@ -378,7 +389,9 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       });
       expect(images.fetchAllowedImage).not.toHaveBeenCalled();
       expect(axios.get).not.toHaveBeenCalled();
-      expect(await readdir(folder)).toEqual([]);
+      expect(
+        (await readdir(folder)).filter((name) => name !== 'fixture.db'),
+      ).toEqual([]);
       expect(calls).toEqual(['/list', `/feed/${number}.json`]);
     },
   );
@@ -406,18 +419,18 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     expect(calls).toEqual([]);
   });
 
-  it('reports media failure separately from the Wechat2RSS article source and publishes nothing', async () => {
+  it('retains cached text and reports incomplete media when an image fails', async () => {
     jest
       .mocked(images.fetchAllowedImage)
       .mockRejectedValue(new Error('unsafe upstream detail'));
     const prepare = await prepareWechat2RssSingleDownload(url);
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
-    await expect(prepare(folder)).rejects.toMatchObject({
-      diagnostic: { code: 'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE' },
+    await expect(prepare(folder)).resolves.toMatchObject({
+      mediaComplete: false,
     });
     expect(
       (await readdir(folder)).filter((name) => name.endsWith('.md')),
-    ).toEqual([]);
+    ).toEqual(['index.md']);
     expect(axios.get).not.toHaveBeenCalled();
   });
 
