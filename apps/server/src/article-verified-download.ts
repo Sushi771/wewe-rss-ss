@@ -58,6 +58,7 @@ export function verifiedDownloadBody(
         !$(image).attr('src') &&
         !$(image).attr('data-src')
       ) {
+        body.attr('data-wewe-image-pending', '1');
         $(image).remove();
         continue;
       }
@@ -72,6 +73,8 @@ export function verifiedDownloadBody(
     const content = inertDownloadBody($.html(body));
     const clean = load(content)('#js_content');
     if (!clean.text().trim() && !clean.find('img').length) throw unavailable();
+    if (body.attr('data-wewe-image-pending') === '1')
+      return clean.attr('data-wewe-image-pending', '1').toString();
     return content;
   } catch {
     throw unavailable();
@@ -89,15 +92,17 @@ export async function buildCompleteArticleDownload(
   source: string,
   directory: string,
   allowUnconfirmedMedia = false,
+  sourceLayout = false,
 ): Promise<PreparedArticle> {
   if (article.lastBodyStatus === 'unavailable') throw unavailable();
-  const mediaComplete =
-    article.lastBodyStatus !== 'images-pending' &&
-    !article.contentHtml?.includes('data-wewe-image-pending=');
   const contentHtml = verifiedDownloadBody(
     article.contentHtml,
     allowUnconfirmedMedia,
   );
+  const mediaComplete =
+    article.lastBodyStatus !== 'images-pending' &&
+    !article.contentHtml?.includes('data-wewe-image-pending=') &&
+    !contentHtml.includes('data-wewe-image-pending=');
   const { markdown } = await buildArticleMarkdown(
     {
       ...article,
@@ -111,6 +116,9 @@ export async function buildCompleteArticleDownload(
       throw unavailable();
     },
     'image',
+    undefined,
+    false,
+    sourceLayout ? { includeTitle: false, includeSourceLink: false } : {},
   );
   const title = article.title.replace(/[\r\n]/g, ' ').replace(
     /[&<>"']/g,
@@ -125,7 +133,9 @@ export async function buildCompleteArticleDownload(
   );
   await writeFile(
     join(directory, 'index.md'),
-    `# ${title}\n\n原文来源：${source}\n\n${markdown}\n`,
+    sourceLayout
+      ? markdown
+      : `# ${title}\n\n原文来源：${source}\n\n${markdown}\n`,
   );
   return {
     articleId: article.id,

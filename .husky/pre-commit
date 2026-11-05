@@ -1,1 +1,15 @@
-npx lint-staged
+set -e
+
+# Retain lint-staged's Git-operation chunking and automatic file restoration.
+npx lint-staged --config lint-staged.config.js --max-arg-length 6000
+
+# Inspect paths once; never append hundreds of filenames to a full-project lint.
+server_files=$(git diff --cached --name-only --diff-filter=ACMR -- ':(glob)apps/server/**/*.ts')
+web_files=$(git diff --cached --name-only --diff-filter=ACMR -- ':(glob)apps/web/**/*.ts' ':(glob)apps/web/**/*.tsx')
+
+if [ -n "$server_files" ]; then
+  pnpm --filter server exec eslint "{src,apps,libs,test,scripts}/**/*.ts"
+fi
+if [ -n "$web_files" ]; then
+  pnpm --filter web lint
+fi

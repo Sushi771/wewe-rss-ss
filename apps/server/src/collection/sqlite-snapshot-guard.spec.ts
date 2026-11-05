@@ -10,9 +10,47 @@ import {
   stopSqliteSnapshotGuard,
   assertInsertOnlySnapshotPermit,
   notifySqliteSnapshotDirty,
+  safePeriodicSnapshotFailure,
+  safePeriodicRetentionStatus,
+  safePeriodicLifecycleStatus,
 } from './sqlite-snapshot-guard';
 
 describe('snapshot owner with real local Python / Prisma SQLite only', () => {
+  it('keeps lifecycle diagnostics finite and strips paths, arbitrary errors and lease claims', () => {
+    expect(
+      safePeriodicLifecycleStatus({
+        status: 'pending-confirmation',
+        normalCopies: 3,
+        pendingCopies: 1,
+        intervalSeconds: 86400,
+        path: 'private',
+        fresh: true,
+      }),
+    ).toEqual({
+      status: 'pending-confirmation',
+      normalCopies: 3,
+      pendingCopies: 1,
+      intervalSeconds: 86400,
+      automaticDeletion: false,
+      generationPaused: true,
+      generationPauseReason: 'pending-confirmation',
+      lastGeneratedAtMs: null,
+      lastVerifiedAtMs: null,
+      coverageAtMs: null,
+      verificationBasis: 'unknown',
+      coverageBasis: 'unknown',
+    });
+    expect(
+      safePeriodicLifecycleStatus({ status: 'private/path' }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_PERIODIC_NOT_DUE',
+        stage: 'rotation',
+        argv: 'private',
+      }),
+    ).toEqual({ code: 'SQLITE_PERIODIC_NOT_DUE', stage: 'rotation' });
+  });
   const originalEnv = { ...process.env };
   const originalCwd = process.cwd();
   let root: string;
@@ -79,6 +117,20 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
     process.chdir(originalCwd);
   });
 
+  it('periodic snapshots use the exact configured production root', async () => {
+    process.env.SQLITE_PRODUCTION_BACKUP_ROOT = path.join(
+      root,
+      'configured-backups',
+    );
+    const owner = await newOwner();
+    await waitForLease(owner);
+    expect(
+      (await readdir(process.env.SQLITE_PRODUCTION_BACKUP_ROOT)).some((name) =>
+        name.startsWith('periodic-snapshot-'),
+      ),
+    ).toBe(true);
+    await expect(readdir(path.join(root, 'backups'))).rejects.toThrow();
+  });
   it('defaults to rejection with scheduling disabled', async () => {
     process.env.SQLITE_PERIODIC_SNAPSHOT_ENABLED = '0';
     const owner = await newOwner();
@@ -212,5 +264,110 @@ describe('snapshot owner with real local Python / Prisma SQLite only', () => {
       await assertInsertOnlySnapshotPermit(tx, outerCopy);
     });
     await notifySqliteSnapshotDirty(outerCopy);
+  });
+  it.each(['0', '1'])(
+    'reports periodic quota failure without blocking ordinary writes with history review enabled=%s',
+    async (historyEnabled) => {
+      Object.assign(process.env, {
+        SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED: historyEnabled,
+        SQLITE_BACKUP_KIND: 'test',
+        SQLITE_TEST_MAX_BYTES: '1',
+        SQLITE_TEST_MAX_COPIES: '1',
+        SQLITE_TEST_BACKUP_ROOT: path.join(root, 'full-budget'),
+      });
+      const warning = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const owner = await newOwner();
+        for (
+          let n = 0;
+          n < 50 &&
+          !warning.mock.calls.some(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          );
+          n++
+        )
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        expect(
+          warning.mock.calls.filter(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          ),
+        ).toHaveLength(1);
+        expect(
+          warning.mock.calls.find(
+            (args) => args[0] === '[SQLITE_PERIODIC_SNAPSHOT_FAILED]',
+          )?.[1],
+        ).toEqual({
+          code: 'SQLITE_SPACE_BUDGET_EXCEEDED',
+          stage: 'budget',
+        });
+        expect((await owner.query()).fresh).toBe(false);
+        await prisma.$executeRawUnsafe(
+          "INSERT INTO articles VALUES ('ordinary-after-backup-failure','retained')",
+        );
+        expect(
+          await prisma.$queryRawUnsafe(
+            "SELECT body FROM articles WHERE id='ordinary-after-backup-failure'",
+          ),
+        ).toEqual([{ body: 'retained' }]);
+      } finally {
+        warning.mockRestore();
+      }
+    },
+  );
+});
+
+describe('bounded snapshot and automatic retention diagnostics', () => {
+  it('keeps distinct safe layout/budget/rotation codes and strips private fields', () => {
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+        stage: 'layout',
+        path: 'private',
+      }),
+    ).toEqual({
+      code: 'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+      stage: 'layout',
+    });
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_PERIODIC_RETENTION_HELD',
+        stage: 'rotation',
+        error: 'private',
+      }),
+    ).toEqual({
+      code: 'SQLITE_PERIODIC_RETENTION_HELD',
+      stage: 'rotation',
+    });
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'arbitrary private path',
+        stage: 'layout',
+      }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicSnapshotFailure({
+        code: 'SQLITE_BACKUP_FAILED',
+        stage: 'private argv',
+      }),
+    ).toBeUndefined();
+    expect(
+      safePeriodicRetentionStatus({
+        status: 'held',
+        code: 'private error',
+        deletedCopies: -1,
+        heldUnique: 2,
+        path: 'private',
+      }),
+    ).toEqual({
+      status: 'held',
+      code: 'AUTO_RETENTION_HELD',
+      deletedCopies: null,
+      heldUnique: 2,
+      heldOther: null,
+      protectedOrUnknown: null,
+    });
+    expect(
+      safePeriodicRetentionStatus({ status: 'unknown', code: 'COMPLETE' }),
+    ).toBeUndefined();
   });
 });

@@ -1,0 +1,580 @@
+import { PrismaClient } from '@prisma/client';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
+import { XhsSubscriptionService } from './xhs-subscription.service';
+import { extractXhsMediaManifest } from './xhs-native-media';
+import { scheduledTaskId } from './xhs-scheduled-admission';
+import { assertScheduledMediaBinding } from './xhs-scheduled-media-binding';
+
+describe('scheduled bound media integration (synthetic SQLite)', () => {
+  let db: PrismaClient, dir: string;
+  const round = '2026-10-31/09:15',
+    creator = 'creator',
+    author = 'author',
+    note = JSON.stringify(['xiaohongshu', 'note', 'synthetic']);
+  const basicId = scheduledTaskId(round, creator, 'basic'),
+    mediaId = scheduledTaskId(round, creator, 'media');
+  const raw = {
+    items: [
+      {
+        id: 'synthetic',
+        note_card: {
+          note_id: 'synthetic',
+          user: { user_id: author },
+          type: 'normal',
+          time: 1760000000000,
+          title: 'Synthetic',
+          desc: 'text',
+          image_list: [{ url_default: 'https://sns-webpic.xhscdn.com/a.png' }],
+        },
+      },
+    ],
+  };
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
+    'base64',
+  );
+  beforeAll(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), 'xhs-sched-integration-'));
+    db = new PrismaClient({
+      datasources: {
+        db: { url: 'file:' + path.join(dir, 'test.db').replace(/\\/g, '/') },
+      },
+    });
+    await db.$executeRawUnsafe(
+      'CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER)',
+    );
+    await db.$executeRawUnsafe(
+      'CREATE TABLE xhs_creators(id TEXT PRIMARY KEY,enabled INTEGER,external_author_id TEXT)',
+    );
+    await db.$executeRawUnsafe(
+      'CREATE TABLE xhs_source_risk(id TEXT,state TEXT)',
+    );
+    await db.$executeRawUnsafe(
+      'CREATE TABLE xhs_notes(id TEXT PRIMARY KEY,creator_id TEXT,content_html TEXT,status TEXT)',
+    );
+    await db.$executeRawUnsafe(
+      'CREATE TABLE xhs_request_budgets(id TEXT PRIMARY KEY,used INTEGER,request_limit INTEGER)',
+    );
+  }, 40000);
+  beforeEach(async () => {
+    for (const table of [
+      'xhs_subscription_tasks',
+      'xhs_creators',
+      'xhs_source_risk',
+      'xhs_notes',
+      'xhs_request_budgets',
+    ])
+      await db.$executeRawUnsafe('DELETE FROM ' + table);
+  });
+  afterAll(async () => {
+    await db.$disconnect();
+    await rm(dir, { recursive: true, force: true });
+  });
+  async function setup(
+    options: { missingUrl?: boolean; blocked?: boolean; fail?: boolean } = {},
+  ) {
+    const source = extractXhsMediaManifest(raw, author, 'synthetic');
+    const slot = { state: 'pending', manifest: source.manifest };
+    const basic = {
+      taskId: basicId,
+      creatorId: creator,
+      state: 'completed',
+      schedule: { round, phase: 'basic' },
+      noteIds: [note],
+      mediaManifests: { [note]: slot },
+    };
+    const t: any = {
+      taskId: mediaId,
+      creatorId: creator,
+      kind: 'list',
+      state: 'running',
+      schedule: { round, phase: 'media' },
+      noteIds: [note],
+      items: {},
+      total: 1,
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      remaining: 1,
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${basicId},${creator},'completed',${JSON.stringify(basic)},0)`;
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${mediaId},${creator},'running',${JSON.stringify(t)},0)`;
+    await db.$executeRaw`INSERT INTO xhs_creators VALUES(${creator},1,${author})`;
+    await db.$executeRaw`INSERT INTO xhs_source_risk VALUES('source',${options.blocked ? 'blocked' : 'pending'})`;
+    await db.$executeRaw`INSERT INTO xhs_notes VALUES(${note},${creator},'<div id="js_content"><p>text</p></div>','listed')`;
+    const transport = jest.fn(async () =>
+      options.fail
+        ? new Response('failure', { status: 500 })
+        : new Response(png, {
+            status: 200,
+            headers: { 'content-type': 'image/png' },
+          }),
+    );
+    const runtime: any = {
+      getTransientMediaUrl: (_a: string, _n: string, _v: string, k: string) =>
+        options.missingUrl ? undefined : source.getUrl(k),
+      withScheduledMediaSession: async (fn: any) => fn(transport),
+    };
+    const service: any = new XhsSubscriptionService(db as any, runtime);
+    service.write = async (_bytes: number, fn: any) => db.$transaction(fn);
+    service.persist = async (current: any) => {
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(current)},state=${current.state} WHERE id=${current.taskId}`;
+    };
+    return { service, t, transport };
+  }
+  it('rejects prior unknown detail before starting media', async () => {
+    const { service, t, transport } = await setup();
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    const basic = JSON.parse(rows[0].document);
+    basic.items = { [note]: 'completed' };
+    basic.code = 'XHS_DETAIL_OUTCOME_UNKNOWN';
+    basic.remaining = 0;
+    await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='partial',document=${JSON.stringify(basic)} WHERE id=${basicId}`;
+    await expect(
+      assertScheduledMediaBinding(db as any, {
+        round,
+        creatorId: creator,
+        taskId: mediaId,
+        basicId,
+        authorId: author,
+        noteId: note,
+      }),
+    ).rejects.toThrow();
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow('XHS_SCHEDULE_BASIC_INCOMPLETE');
+    expect(transport).not.toHaveBeenCalled();
+  }, 40000);
+  it.each(['XHS_DETAIL_PARSE_FAILED', 'XHS_LOCAL_PRE_DISPATCH_FAILED'])(
+    'accepts only completed items from a %s basic task',
+    async (code) => {
+      const { service, t, transport } = await setup();
+      const bad = JSON.stringify(['xiaohongshu', 'note', 'bad']);
+      await db.$executeRaw`INSERT INTO xhs_notes VALUES(${bad},${creator},'', 'listed')`;
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+      const basic = JSON.parse(rows[0].document);
+      basic.noteIds = [bad, note];
+      basic.items = { [bad]: 'failed', [note]: 'completed' };
+      basic.code = code;
+      basic.remaining = 0;
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='partial',document=${JSON.stringify(basic)} WHERE id=${basicId}`;
+      const media = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${mediaId}`;
+      const m = JSON.parse(media[0].document);
+      m.noteIds = [bad, note];
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(m)} WHERE id=${mediaId}`;
+      const binding = (noteId: string) =>
+        assertScheduledMediaBinding(db as any, {
+          round,
+          creatorId: creator,
+          taskId: mediaId,
+          basicId,
+          authorId: author,
+          noteId,
+        });
+      await expect(binding(note)).resolves.toBeUndefined();
+      await expect(binding(bad)).rejects.toThrow(
+        'XHS_SCHEDULE_MEDIA_BINDING_REQUIRED',
+      );
+      await service.runScheduledMedia(t, {
+        id: creator,
+        externalAuthorId: author,
+      });
+      expect(t.state).toBe('completed');
+      expect(t.items[note]).toBe('completed');
+      expect(transport).toHaveBeenCalledTimes(1);
+      const saved = await db.$queryRaw<
+        Array<{ content_html: string }>
+      >`SELECT content_html FROM xhs_notes WHERE id=${note}`;
+      expect(saved[0].content_html).toContain('data-xhs-media');
+    },
+  );
+  it('saves image and receipt from the basic response under the same round', async () => {
+    const { service, t, transport } = await setup();
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(t.state).toBe('completed');
+    expect(transport).toHaveBeenCalledTimes(1);
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT content_html FROM xhs_notes WHERE id=${note}`;
+    expect(rows[0].content_html).toContain('data-xhs-media');
+    const tasks = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    expect(
+      JSON.parse(tasks[0].document).mediaManifests[note].items['1'].state,
+    ).toBe('saved');
+  }, 40000);
+  it('records one invalid image response and saves the next note without retrying the first', async () => {
+    const { service, t, transport } = await setup();
+    const second = JSON.stringify(['xiaohongshu', 'note', 'second']);
+    const source = extractXhsMediaManifest(
+      {
+        items: [
+          {
+            id: 'second',
+            note_card: {
+              ...raw.items[0].note_card,
+              note_id: 'second',
+              image_list: [
+                { url_default: 'https://sns-webpic.xhscdn.com/b.png' },
+              ],
+            },
+          },
+        ],
+      },
+      author,
+      'second',
+    );
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    const basic = JSON.parse(rows[0].document);
+    basic.noteIds = [note, second];
+    basic.mediaManifests[second] = {
+      state: 'pending',
+      manifest: source.manifest,
+    };
+    await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(basic)} WHERE id=${basicId}`;
+    t.noteIds = [note, second];
+    t.total = 2;
+    t.remaining = 2;
+    await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(t)} WHERE id=${mediaId}`;
+    await db.$executeRaw`INSERT INTO xhs_notes VALUES(${second},${creator},'<div id="js_content"><p>second</p></div>','listed')`;
+    transport.mockResolvedValueOnce(
+      new Response(Buffer.from('89504e470d0a1a0a', 'hex'), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    const firstLookup = service.source.getTransientMediaUrl;
+    service.source.getTransientMediaUrl = (
+      a: string,
+      n: string,
+      v: string,
+      k: string,
+    ) => (n === 'second' ? source.getUrl(k) : firstLookup(a, n, v, k));
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(t.state).toBe('partial');
+    expect(t.scheduledMediaResults[note]).toBe('needs-review');
+    expect(t.items[second]).toBe('completed');
+    expect(transport).toHaveBeenCalledTimes(2);
+    const saved = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    const basicSaved = JSON.parse(saved[0].document),
+      receipts = basicSaved.mediaManifests;
+    expect(receipts[note].items['1']).toMatchObject({
+      state: 'review',
+      code: 'XHS_MEDIA_BYTES_INVALID',
+    });
+    expect(receipts[second].items['1'].state).toBe('saved');
+    expect(service.view(basicSaved).mediaSummary.needsReviewNotes).toBe(1);
+    const notes = await db.$queryRaw<
+      any[]
+    >`SELECT id,content_html FROM xhs_notes WHERE creator_id=${creator}`;
+    expect(notes.find((x) => x.id === note).content_html).toContain(
+      '<p>text</p>',
+    );
+    expect(notes.find((x) => x.id === second).content_html).toContain(
+      'data-xhs-media',
+    );
+    t.state = 'running';
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow();
+    expect(transport).toHaveBeenCalledTimes(2);
+  }, 40000);
+  it('missing URL remains partial without a source request', async () => {
+    const { service, t, transport } = await setup({ missingUrl: true });
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(t.state).toBe('partial');
+    expect(t.scheduledMediaResults[note]).toBe('needs-detail-refresh');
+    expect(transport).not.toHaveBeenCalled();
+  }, 40000);
+  it('blocked risk prevents resource dispatch', async () => {
+    const { service, t, transport } = await setup({ blocked: true });
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow('BINDING_REQUIRED');
+    expect(transport).not.toHaveBeenCalled();
+  }, 40000);
+  it('unknown media attempt persists and a repeated call never resends', async () => {
+    const { service, t, transport } = await setup({ fail: true });
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow();
+    expect(transport).toHaveBeenCalledTimes(1);
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    expect(
+      JSON.parse(rows[0].document).mediaManifests[note].items['1'].state,
+    ).toBe('unknown');
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow();
+    expect(transport).toHaveBeenCalledTimes(1);
+  }, 40000);
+  it.each(['text/html', 'image/png'])(
+    'treats a 200 HTML verification page as unknown with MIME %s and sends no later request',
+    async (type) => {
+      const { service, t, transport } = await setup();
+      t.noteIds = [note, 'later'];
+      t.total = 2;
+      t.remaining = 2;
+      transport.mockResolvedValueOnce(
+        new Response('<html>verification</html>', {
+          status: 200,
+          headers: { 'content-type': type },
+        }),
+      );
+      await expect(
+        service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+      ).rejects.toThrow('XHS_MEDIA_RESPONSE_INVALID');
+      expect(transport).toHaveBeenCalledTimes(1);
+      const rows = await db.$queryRaw<
+        any[]
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+      const item = JSON.parse(rows[0].document).mediaManifests[note].items['1'];
+      expect(item).toMatchObject({
+        state: 'unknown',
+        code: 'XHS_MEDIA_OUTCOME_UNKNOWN',
+      });
+      expect(JSON.stringify(item)).not.toContain('verification');
+    },
+    40000,
+  );
+  it('same-round verified saved image is reused without a second request', async () => {
+    const { service, t, transport } = await setup();
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    t.state = 'running';
+    t.items = {};
+    t.completed = 0;
+    t.remaining = 1;
+    await service.persist(t);
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+    expect(t.state).toBe('completed');
+  }, 40000);
+  it('safely appends to a complete note without replacing its existing body', async () => {
+    const { service, t, transport } = await setup();
+    await db.$executeRaw`UPDATE xhs_notes SET status='complete' WHERE id=${note}`;
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    const rows = await db.$queryRaw<
+      any[]
+    >`SELECT content_html,status FROM xhs_notes WHERE id=${note}`;
+    expect(rows[0].content_html).toContain('<p>text</p>');
+    expect(rows[0].content_html).toContain('data-xhs-media');
+    expect(rows[0].status).toBe('complete');
+    expect(transport).toHaveBeenCalledTimes(1);
+  }, 40000);
+  it('next round reuses prior verified bytes without network or duplicated image', async () => {
+    const { service, t, transport } = await setup();
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    const prior = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    const slot = JSON.parse(prior[0].document).mediaManifests[note];
+    delete slot.items;
+    const round2 = '2026-10-31/14:00',
+      b = scheduledTaskId(round2, creator, 'basic'),
+      m = scheduledTaskId(round2, creator, 'media');
+    const basic = {
+      taskId: b,
+      creatorId: creator,
+      state: 'completed',
+      schedule: { round: round2, phase: 'basic' },
+      noteIds: [note],
+      mediaManifests: { [note]: slot },
+    };
+    const t2 = {
+      taskId: m,
+      creatorId: creator,
+      kind: 'list',
+      state: 'running',
+      schedule: { round: round2, phase: 'media' },
+      noteIds: [note],
+      items: {},
+      total: 1,
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      remaining: 1,
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${b},${creator},'completed',${JSON.stringify(basic)},0)`;
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${m},${creator},'running',${JSON.stringify(t2)},0)`;
+    await db.$executeRaw`UPDATE xhs_notes SET status='complete' WHERE id=${note}`;
+    await service.runScheduledMedia(t2, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(transport).toHaveBeenCalledTimes(1);
+    const notes = await db.$queryRaw<
+      any[]
+    >`SELECT content_html FROM xhs_notes WHERE id=${note}`;
+    expect((notes[0].content_html.match(/data-xhs-media/g) || []).length).toBe(
+      1,
+    );
+  }, 40000);
+  it('prior unknown resource blocks next round even if risk appears clear', async () => {
+    const { service, t, transport } = await setup({ fail: true });
+    await expect(
+      service.runScheduledMedia(t, { id: creator, externalAuthorId: author }),
+    ).rejects.toThrow();
+    const prior = await db.$queryRaw<
+      any[]
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicId}`;
+    const slot = JSON.parse(prior[0].document).mediaManifests[note];
+    delete slot.items;
+    const r = '2026-10-31/14:00',
+      b = scheduledTaskId(r, creator, 'basic'),
+      m = scheduledTaskId(r, creator, 'media');
+    const basic = {
+      schedule: { round: r, phase: 'basic' },
+      noteIds: [note],
+      mediaManifests: { [note]: slot },
+    };
+    const next = {
+      taskId: m,
+      creatorId: creator,
+      state: 'running',
+      schedule: { round: r, phase: 'media' },
+      noteIds: [note],
+      items: {},
+      total: 1,
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      remaining: 1,
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${b},${creator},'completed',${JSON.stringify(basic)},0)`;
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${m},${creator},'running',${JSON.stringify(next)},0)`;
+    await expect(
+      service.runScheduledMedia(next, {
+        id: creator,
+        externalAuthorId: author,
+      }),
+    ).rejects.toThrow();
+    expect(transport).toHaveBeenCalledTimes(1);
+  }, 40000);
+  it('changed fingerprint stops for review without redownloading a possibly identical image', async () => {
+    const { service, t, transport } = await setup();
+    await service.runScheduledMedia(t, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    const changed = extractXhsMediaManifest(
+      {
+        ...raw,
+        items: [
+          {
+            ...raw.items[0],
+            note_card: {
+              ...raw.items[0].note_card,
+              image_list: [
+                { url_default: 'https://sns-webpic.xhscdn.com/changed.png' },
+              ],
+            },
+          },
+        ],
+      },
+      author,
+      'synthetic',
+    ).manifest;
+    const r = '2026-10-31/14:00',
+      b = scheduledTaskId(r, creator, 'basic'),
+      m = scheduledTaskId(r, creator, 'media');
+    const basic = {
+      schedule: { round: r, phase: 'basic' },
+      noteIds: [note],
+      mediaManifests: { [note]: { state: 'pending', manifest: changed } },
+    };
+    const next: any = {
+      taskId: m,
+      creatorId: creator,
+      state: 'running',
+      schedule: { round: r, phase: 'media' },
+      noteIds: [note],
+      items: {},
+      total: 1,
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      remaining: 1,
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${b},${creator},'completed',${JSON.stringify(basic)},0)`;
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES(${m},${creator},'running',${JSON.stringify(next)},0)`;
+    await service.runScheduledMedia(next, {
+      id: creator,
+      externalAuthorId: author,
+    });
+    expect(next.state).toBe('partial');
+    expect(next.scheduledMediaResults[note]).toBe('needs-review');
+    expect(transport).toHaveBeenCalledTimes(1);
+  }, 40000);
+  it('service selects all 1001 notes in two bounded batches', async () => {
+    const { service } = await setup();
+    const ids = Array.from({ length: 1001 }, (_, i) => `note-${i}`);
+    service.creator = async () => ({
+      id: creator,
+      enabled: true,
+      externalAuthorId: author,
+    });
+    service.loadTask = async () => ({ noteIds: ids });
+    service.enqueue = jest.fn(async (...args: any[]) => ({
+      taskId: `batch-${args[13].batch}`,
+    }));
+    await service.scheduleCreatorPhase({
+      round,
+      creatorId: creator,
+      phase: 'media',
+      batch: 0,
+    });
+    await service.scheduleCreatorPhase({
+      round,
+      creatorId: creator,
+      phase: 'media',
+      batch: 1,
+    });
+    expect(service.enqueue.mock.calls[0][2]).toEqual(ids.slice(0, 1000));
+    expect(service.enqueue.mock.calls[1][2]).toEqual([ids[1000]]);
+    expect(
+      await service.scheduleCreatorPhase({
+        round,
+        creatorId: creator,
+        phase: 'media',
+        batch: 2,
+      }),
+    ).toEqual({ state: 'nothing-to-archive' });
+    expect(service.enqueue).toHaveBeenCalledTimes(2);
+  }, 40000);
+});

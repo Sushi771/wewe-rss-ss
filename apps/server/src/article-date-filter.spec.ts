@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
@@ -39,8 +40,7 @@ describe('Shanghai calendar dates, paginated list / summary / CSV (isolated SQLi
         join(migrations, entry.name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);

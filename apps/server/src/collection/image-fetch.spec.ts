@@ -2,6 +2,8 @@ import {
   allowedImageUrl,
   decodeInlineImage,
   fetchAllowedImage,
+  ImageRequestBlockedError,
+  ImageRequestTransientError,
 } from './image-fetch';
 
 const png = Buffer.from(
@@ -11,6 +13,43 @@ const png = Buffer.from(
 
 describe('archived image fetch boundary', () => {
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([408, 500, 502, 503, 504])(
+    'classifies HTTP %s as transient, distinct from policy stops',
+    async (status) => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response(null, { status }));
+      await expect(
+        fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+      ).rejects.toBeInstanceOf(ImageRequestTransientError);
+    },
+  );
+  it.each([401, 403, 429])(
+    'retains persistent lane-stop classification for HTTP %s',
+    async (status) => {
+      jest
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response(null, { status }));
+      await expect(
+        fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+      ).rejects.toBeInstanceOf(ImageRequestBlockedError);
+    },
+  );
+  it('retains a policy stop even when cancelling the denied response fails', async () => {
+    const response = new Response(null, { status: 403 });
+    Object.defineProperty(response, 'body', {
+      value: {
+        cancel: async () => {
+          throw Error('CANCEL_FAILED');
+        },
+      },
+    });
+    jest.spyOn(global, 'fetch').mockResolvedValue(response);
+    await expect(
+      fetchAllowedImage('https://mmbiz.qpic.cn/photo'),
+    ).rejects.toBeInstanceOf(ImageRequestBlockedError);
+  });
 
   it('rejects local destinations and redirect responses', async () => {
     expect(() => allowedImageUrl('http://127.0.0.1/private')).toThrow(

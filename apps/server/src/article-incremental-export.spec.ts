@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { LocalArticleStore, ArticlePreparation } from './article-local-save';
 import { prepareCachedArticleLocalExport } from './cached-article-local-export';
@@ -68,6 +68,12 @@ describe('incremental export: synthetic files and mocked media only', () => {
 
   it('skips before prepare or temporary generation, across changed dates/title and missing database body', async () => {
     const first = await store.save(prepare());
+    const initialMarkdown = await fs.readFile(first.markdownPath, 'utf8');
+    expect(initialMarkdown).toContain('Body');
+    expect(basename(first.markdownPath)).toBe('Fixture.md');
+    expect(initialMarkdown).not.toContain('# Fixture');
+    expect(initialMarkdown).toContain('公众号：Test');
+    expect(initialMarkdown).not.toContain('| 指标 |');
     await fs.writeFile(first.markdownPath, 'User edits and notes');
     jest.mocked(images.fetchAllowedImage).mockClear();
     const base = prepare({
@@ -80,11 +86,13 @@ describe('incremental export: synthetic files and mocked media only', () => {
       identity: base.identity,
     });
     const temporary = jest.spyOn(fs, 'mkdtemp');
-    expect(await store.save(callback)).toMatchObject({
+    const repeated = await store.save(callback);
+    expect(repeated).toMatchObject({
       status: 'skipped',
       markdownPath: first.markdownPath,
       legacyLayoutRetained: true,
     });
+    expect(repeated.mediaComplete).not.toBe(false);
     expect(callback).not.toHaveBeenCalled();
     expect(temporary).not.toHaveBeenCalled();
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
@@ -92,6 +100,43 @@ describe('incremental export: synthetic files and mocked media only', () => {
       'User edits and notes',
     );
   });
+  it.each(['<img>', '<img src=" " data-src=" ">'])(
+    'downgrades a legacy false-complete receipt for %s without preparing or changing user notes',
+    async (missingImage) => {
+      const cached = {
+        contentHtml: `<div id="js_content"><p>Body</p>${missingImage}</div>`,
+      };
+      const first = await store.save(prepare(cached));
+      const file = await receiptAt(first.directory);
+      const receipt = JSON.parse(await fs.readFile(file, 'utf8'));
+      delete receipt.imageMap;
+      await fs.writeFile(
+        file,
+        JSON.stringify({ ...receipt, mediaComplete: true }),
+      );
+      const legacyBytes = await fs.readFile(file, 'utf8');
+      await fs.writeFile(first.markdownPath, 'User handwritten notes');
+      jest.mocked(images.fetchAllowedImage).mockClear();
+      const base = prepare(cached);
+      const callback: ArticlePreparation = Object.assign(jest.fn(base), {
+        identity: base.identity,
+      });
+      const temporary = jest.spyOn(fs, 'mkdtemp');
+      expect(await store.save(callback)).toMatchObject({
+        status: 'skipped',
+        alreadySaved: true,
+        mediaComplete: false,
+        markdownPath: first.markdownPath,
+      });
+      expect(callback).not.toHaveBeenCalled();
+      expect(temporary).not.toHaveBeenCalled();
+      expect(images.fetchAllowedImage).not.toHaveBeenCalled();
+      expect(await fs.readFile(first.markdownPath, 'utf8')).toBe(
+        'User handwritten notes',
+      );
+      expect(await fs.readFile(file, 'utf8')).toBe(legacyBytes);
+    },
+  );
   it('different roots save normally and simultaneous repeat clicks create only one note', async () => {
     const [first, second] = await Promise.all([
       store.save(prepare()),
@@ -153,6 +198,12 @@ describe('incremental export: synthetic files and mocked media only', () => {
         name.startsWith('补齐图片-'),
       ),
     ).toHaveLength(1);
+    const companion = (await fs.readdir(first.directory)).find((name) =>
+      name.startsWith('补齐图片-'),
+    )!;
+    expect(
+      await fs.readFile(join(first.directory, companion), 'utf8'),
+    ).not.toContain('| 指标 |');
     expect((await store.save(prepare())).status).toBe('skipped');
   });
   it('saves successful images when one fails, then repairs without overwriting edits', async () => {

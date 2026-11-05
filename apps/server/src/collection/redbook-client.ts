@@ -1,0 +1,372 @@
+import { buildGetUri, signMainApi, USER_AGENT } from './redbook-vendor/signing';
+import { redbookErrorSummary } from './redbook-error-summary';
+
+export type RedbookPauseReason =
+  | 'configuration'
+  | 'authentication'
+  | 'verification'
+  | 'unknown_rejection'
+  | 'permission'
+  | 'signature'
+  | 'rate_limit'
+  | 'transport'
+  | 'response';
+
+/** Deliberately excludes server text, URL, cookies, tokens and raw response. */
+export class RedbookPauseError extends Error {
+  readonly paused = true;
+  constructor(
+    readonly reason: RedbookPauseReason,
+    readonly httpStatus?: number,
+    readonly endpoint?: 'profile' | 'list' | 'detail' | 'comments' | 'replies',
+  ) {
+    super(`Redbook scan paused: ${reason}`);
+    this.name = 'RedbookPauseError';
+  }
+}
+export type RedbookTransportFailureKind =
+  | 'guard-url'
+  | 'guard-route'
+  | 'guard-limits'
+  | 'guard-headers'
+  | 'guard-body'
+  | 'guard-aborted'
+  | 'request-create'
+  | 'request-start'
+  | 'request-error'
+  | 'response-error'
+  | 'response-aborted'
+  | 'timeout'
+  | 'abort'
+  | 'response-length'
+  | 'response-content-type'
+  | 'response-size'
+  | 'response-json'
+  | 'response-url'
+  | 'transport-other';
+export class RedbookTransportDiagnosticError extends RedbookPauseError {
+  readonly nativeCode?: string;
+  constructor(
+    readonly transportFailure: RedbookTransportFailureKind,
+    readonly notSent: boolean,
+    nativeCode?: unknown,
+    reason: 'transport' | 'response' = 'transport',
+    httpStatus?: unknown,
+  ) {
+    super(
+      reason,
+      typeof httpStatus === 'number' &&
+        Number.isInteger(httpStatus) &&
+        httpStatus >= 100 &&
+        httpStatus <= 599
+        ? httpStatus
+        : undefined,
+    );
+    if (
+      typeof nativeCode === 'string' &&
+      [
+        'ENOTFOUND',
+        'EAI_AGAIN',
+        'ECONNREFUSED',
+        'ECONNRESET',
+        'ETIMEDOUT',
+        'EHOSTUNREACH',
+        'ENETUNREACH',
+        'EPIPE',
+        'ERR_TLS_CERT_ALTNAME_INVALID',
+        'CERT_HAS_EXPIRED',
+        'DEPTH_ZERO_SELF_SIGNED_CERT',
+        'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      ].includes(nativeCode)
+    )
+      this.nativeCode = nativeCode;
+  }
+}
+
+/** A local error observed before invoking the source transport. */
+export class RedbookPreDispatchError extends Error {
+  constructor() {
+    super('XHS_LOCAL_PRE_DISPATCH_FAILED');
+  }
+}
+
+export interface RedbookRequest {
+  url: string;
+  method: 'GET' | 'POST';
+  headers: Record<string, string>;
+  body?: string;
+  redirect: 'error';
+  timeoutMs: number;
+  maxResponseBytes: number;
+  signal?: AbortSignal;
+}
+
+export interface RedbookResponse {
+  status: number;
+  /** Required even for injected transports; redirected/cross-host results fail closed. */
+  url: string;
+  body: unknown;
+}
+
+/** Transport implementations must enforce timeout/size, no redirects and no retries. */
+export type RedbookTransport = (
+  request: RedbookRequest,
+) => Promise<RedbookResponse>;
+
+export interface RedbookClientOptions {
+  transport?: RedbookTransport;
+  /** Explicit in-memory credential handoff only. Never populated from env or browser. */
+  cookies?: () => Record<string, string>;
+}
+
+export interface RedbookUserPageOptions {
+  xsecToken?: string | null;
+  xsecSource?: string | null;
+  signal?: AbortSignal;
+}
+
+const HOST = 'https://edith.xiaohongshu.com';
+// The pinned upstream also supports v1; v2 returned HTTP 404 in the bounded
+// acceptance. Choose the reviewed route explicitly, without automatic retries.
+const LIST_PATH = '/api/sns/web/v1/user_posted';
+const DETAIL_PATH = '/api/sns/web/v1/feed';
+const PROFILE_PATH = '/api/sns/web/v1/user/otherinfo';
+const COMMENTS_PATH = '/api/sns/web/v2/comment/page';
+const REPLIES_PATH = '/api/sns/web/v2/comment/sub/page';
+
+function checkedText(value: string, maxLength: number): string {
+  if (
+    typeof value !== 'string' ||
+    value.length > maxLength ||
+    /[\x00-\x1f\x7f]/.test(value)
+  ) {
+    throw new RedbookPauseError('configuration');
+  }
+  return value;
+}
+
+function checkedId(value: string): string {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(value))
+    throw new RedbookPauseError('configuration');
+  return value;
+}
+
+export function redbookResponseReason(
+  status: number,
+  body?: unknown,
+): RedbookPauseReason | undefined {
+  const { code, msg } = redbookErrorSummary(body);
+  if (status === 406 || code === 300015) return 'signature';
+  if (status === 429 || code === 300012) return 'rate_limit';
+  if (status === 401 || code === -100 || code === -101) return 'authentication';
+  if (status === 403 || code === -104) return 'permission';
+  if (msg === 'captcha required') return 'verification';
+  if (status === 461 || status === 471) return 'unknown_rejection';
+  return undefined;
+}
+
+/** Audited read endpoints only. No network transport is enabled by default. */
+export class RedbookClient {
+  constructor(private readonly options: RedbookClientOptions = {}) {}
+
+  getComments(noteId: string, cursor = '', token = ''): Promise<unknown> {
+    return this.request('GET', COMMENTS_PATH, {
+      note_id: checkedId(noteId),
+      cursor: checkedText(cursor, 2048),
+      image_formats: 'jpg,webp,avif',
+      xsec_token: checkedText(token, 4096),
+    });
+  }
+  getSubComments(
+    noteId: string,
+    rootId: string,
+    cursor = '',
+  ): Promise<unknown> {
+    return this.request('GET', REPLIES_PATH, {
+      note_id: checkedId(noteId),
+      root_comment_id: checkedId(rootId),
+      num: 30,
+      cursor: checkedText(cursor, 2048),
+    });
+  }
+
+  getUserInfo(
+    userId: string,
+    options: RedbookUserPageOptions = {},
+  ): Promise<unknown> {
+    return this.request(
+      'GET',
+      PROFILE_PATH,
+      {
+        target_user_id: checkedId(userId),
+        xsec_token: checkedText(options.xsecToken ?? '', 4096),
+        xsec_source: checkedText(options.xsecSource ?? '', 128),
+      },
+      undefined,
+      options.signal,
+    );
+  }
+
+  getUserNotes(
+    userId: string,
+    cursor = '',
+    options: RedbookUserPageOptions = {},
+  ): Promise<unknown> {
+    return this.request(
+      'GET',
+      LIST_PATH,
+      {
+        num: 30,
+        cursor: checkedText(cursor, 2048),
+        user_id: checkedId(userId),
+        image_formats: 'jpg,webp',
+        xsec_token: checkedText(options.xsecToken ?? '', 4096),
+        xsec_source: checkedText(options.xsecSource ?? '', 128),
+      },
+      undefined,
+      options.signal,
+    );
+  }
+
+  getNoteById(
+    noteId: string,
+    xsecToken: string,
+    xsecSource = 'pc_feed',
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return this.request(
+      'POST',
+      DETAIL_PATH,
+      undefined,
+      {
+        source_note_id: checkedId(noteId),
+        image_formats: ['jpg', 'webp'],
+        extra: { need_body_topic: 1 },
+        xsec_source: checkedText(xsecSource, 128),
+        xsec_token: checkedText(xsecToken, 4096),
+      },
+      signal,
+    );
+  }
+
+  private async request(
+    method: 'GET' | 'POST',
+    path:
+      | typeof LIST_PATH
+      | typeof DETAIL_PATH
+      | typeof PROFILE_PATH
+      | typeof COMMENTS_PATH
+      | typeof REPLIES_PATH,
+    params?: Record<string, string | number | string[]>,
+    payload?: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    if (!this.options.transport || !this.options.cookies)
+      throw new RedbookPauseError('configuration');
+    let response: RedbookResponse;
+    let uri: string;
+    try {
+      uri = method === 'GET' ? buildGetUri(path, params) : path;
+    } catch {
+      throw new RedbookPreDispatchError();
+    }
+    let invoked = false;
+    try {
+      signal?.throwIfAborted();
+      const cookies = { ...this.options.cookies() };
+      if (
+        !cookies.a1 ||
+        !cookies.web_session ||
+        Object.keys(cookies).length > 100
+      ) {
+        throw new RedbookPauseError('authentication');
+      }
+      for (const [key, value] of Object.entries(cookies)) {
+        if (
+          !/^[a-zA-Z0-9_-]{1,128}$/.test(key) ||
+          !value ||
+          value.length > 8192 ||
+          /[;\s\x00-\x1f\x7f]/.test(value)
+        ) {
+          throw new RedbookPauseError('authentication');
+        }
+      }
+      const request: RedbookRequest = {
+        url: HOST + uri,
+        method,
+        headers: {
+          'user-agent': USER_AGENT,
+          'content-type': 'application/json',
+          origin: 'https://www.xiaohongshu.com',
+          referer: 'https://www.xiaohongshu.com/',
+          cookie: Object.entries(cookies)
+            .map(([key, value]) => `${key}=${value}`)
+            .join('; '),
+          ...signMainApi(method, path, cookies, params, payload),
+        },
+        ...(payload ? { body: JSON.stringify(payload) } : {}),
+        redirect: 'error',
+        timeoutMs: 15_000,
+        maxResponseBytes: 8 * 1024 * 1024,
+        ...(signal ? { signal } : {}),
+      };
+      invoked = true;
+      response = await this.options.transport(request);
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (error instanceof RedbookPauseError) {
+        if (invoked && error.reason === 'configuration')
+          throw new RedbookTransportDiagnosticError('transport-other', false);
+        throw error;
+      }
+      if (!invoked) throw new RedbookPreDispatchError();
+      throw new RedbookTransportDiagnosticError('transport-other', false);
+    }
+    if (response.url !== HOST + uri)
+      throw new RedbookTransportDiagnosticError('response-url', false);
+    const statusReason = redbookResponseReason(response.status, response.body);
+    if (statusReason)
+      throw new RedbookPauseError(
+        statusReason,
+        [401, 403, 406, 429, 461, 471].includes(response.status)
+          ? response.status
+          : undefined,
+        path === PROFILE_PATH
+          ? 'profile'
+          : path === LIST_PATH
+            ? 'list'
+            : path === DETAIL_PATH
+              ? 'detail'
+              : path === COMMENTS_PATH
+                ? 'comments'
+                : 'replies',
+      );
+    if (
+      !Number.isInteger(response.status) ||
+      response.status < 200 ||
+      response.status >= 300
+    )
+      throw new RedbookPauseError(
+        'response',
+        Number.isInteger(response.status) &&
+          response.status >= 100 &&
+          response.status <= 599
+          ? response.status
+          : undefined,
+      );
+    const envelope = response.body;
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope))
+      throw new RedbookPauseError('response');
+    const data = envelope as Record<string, unknown>;
+    if (
+      data.success !== true ||
+      (data.code !== undefined && data.code !== 0) ||
+      !data.data ||
+      typeof data.data !== 'object' ||
+      Array.isArray(data.data)
+    ) {
+      throw new RedbookPauseError('response');
+    }
+    return data.data;
+  }
+}

@@ -42,6 +42,15 @@ const EXPECTED_INSERT_TABLES = [
   ...EXPECTED_GROUP_TABLES,
   'cache_insert_batches',
 ].sort();
+const EXPECTED_INCREMENTAL_TABLES = [
+  ...EXPECTED_INSERT_TABLES,
+  'cache_refresh_commits',
+  'refresh_submission_claims',
+].sort();
+const EXPECTED_SEARCH_TABLES = [
+  ...EXPECTED_INCREMENTAL_TABLES,
+  'article_search_documents',
+].sort();
 const INSERT_COLUMNS = [
   'id',
   'mp_id',
@@ -181,10 +190,12 @@ function snapshot(db, omitTarget = false) {
     tableNames !== JSON.stringify(EXPECTED_TABLES) &&
     tableNames !== JSON.stringify(EXPECTED_XHS_TABLES) &&
     tableNames !== JSON.stringify(EXPECTED_GROUP_TABLES) &&
-    tableNames !== JSON.stringify(EXPECTED_INSERT_TABLES)
+    tableNames !== JSON.stringify(EXPECTED_INSERT_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_INCREMENTAL_TABLES) &&
+    tableNames !== JSON.stringify(EXPECTED_SEARCH_TABLES)
   )
     fail('SQLITE_SCHEMA_UNEXPECTED');
-  if (tableNames === JSON.stringify(EXPECTED_INSERT_TABLES)) {
+  if (definitions.some((row) => row.name === 'cache_insert_batches')) {
     const columns = db.prepare('PRAGMA table_info(cache_insert_batches)').all();
     const expected = INSERT_COLUMNS.map((name, i) => ({
       name,
@@ -203,15 +214,107 @@ function snapshot(db, omitTarget = false) {
     if (JSON.stringify(actual) !== JSON.stringify(expected))
       fail('SQLITE_SCHEMA_UNEXPECTED');
   }
+  if (
+    tableNames === JSON.stringify(EXPECTED_INCREMENTAL_TABLES) ||
+    tableNames === JSON.stringify(EXPECTED_SEARCH_TABLES)
+  ) {
+    const schemas = {
+      cache_refresh_commits: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['result_json', 'TEXT'],
+        ['committed_at_ms', 'BIGINT'],
+      ],
+      refresh_submission_claims: [
+        ['id', 'TEXT'],
+        ['mp_id', 'TEXT'],
+        ['state', 'TEXT'],
+        ['reserved_at', 'INTEGER'],
+        ['previous_at', 'INTEGER'],
+        ['updated_at_ms', 'BIGINT'],
+      ],
+    };
+    for (const [table, fields] of Object.entries(schemas)) {
+      const actual = db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map(({ name, type, notnull, dflt_value, pk }) => ({
+          name,
+          type,
+          notnull,
+          dflt_value,
+          pk,
+        }));
+      const expected = fields.map(([name, type], i) => ({
+        name,
+        type,
+        notnull: 1,
+        dflt_value: null,
+        pk: i === 0 ? 1 : 0,
+      }));
+      if (JSON.stringify(actual) !== JSON.stringify(expected))
+        fail('SQLITE_SCHEMA_UNEXPECTED');
+    }
+  }
+  if (tableNames === JSON.stringify(EXPECTED_SEARCH_TABLES)) {
+    const actual = db
+      .prepare('PRAGMA table_info(article_search_documents)')
+      .all()
+      .map(({ name, type, notnull, dflt_value, pk }) => ({
+        name,
+        type,
+        notnull,
+        dflt_value,
+        pk,
+      }));
+    const expected = [
+      ['article_id', 'TEXT', null, 1],
+      ['body_text', 'TEXT', "''", 0],
+      ['body_cached', 'INTEGER', '0', 0],
+      ['pending', 'INTEGER', '1', 0],
+      ['generation', 'INTEGER', '0', 0],
+    ].map(([name, type, dflt_value, pk]) => ({
+      name,
+      type,
+      notnull: 1,
+      dflt_value,
+      pk,
+    }));
+    if (JSON.stringify(actual) !== JSON.stringify(expected))
+      fail('SQLITE_SCHEMA_UNEXPECTED');
+  }
   const tables = {};
   for (const { name, sql } of definitions) {
     const safe = `"${name.replaceAll('"', '""')}"`;
     const rows = db.prepare(`SELECT * FROM ${safe} ORDER BY rowid`).all();
+    if (name === 'article_search_documents') {
+      const article = db
+        .prepare('SELECT content_html FROM articles WHERE id=?')
+        .get(TARGET_ARTICLE_ID);
+      const document = rows.find((row) => row.article_id === TARGET_ARTICLE_ID);
+      if (
+        article &&
+        (!document ||
+          document.body_text !== '' ||
+          document.body_cached !==
+            (article.content_html != null && article.content_html !== ''
+              ? 1
+              : 0) ||
+          document.pending !== 1 ||
+          document.generation !== 0)
+      )
+        fail('TARGET_SEARCH_ROW_INVALID');
+    }
     tables[name] = {
       sql,
       rows: encodeRows(
-        name === 'articles' && omitTarget
-          ? rows.filter((row) => row.id !== TARGET_ARTICLE_ID)
+        omitTarget &&
+          (name === 'articles' || name === 'article_search_documents')
+          ? rows.filter(
+              (row) =>
+                (name === 'articles' ? row.id : row.article_id) !==
+                TARGET_ARTICLE_ID,
+            )
           : rows,
       ),
     };

@@ -133,12 +133,22 @@ describe('original subscription UI action (actual handler, offline)', () => {
         },
       },
       toast: { error: jest.fn(), success: jest.fn(), warning: jest.fn() },
+      OperationNotice: 'OperationNotice',
+      FailureNotice: 'FailureNotice',
+      exports: {},
+      require: (name: string) => {
+        if (name === 'react/jsx-runtime')
+          return { jsx: (type: unknown, props: unknown) => ({ type, props }) };
+        throw new Error('Unexpected dependency ' + name);
+      },
     };
     vm.runInNewContext(
       ts.transpileModule(
         `module.exports={run:${repairHandlers.handleRepairConfirm},open:${repairHandlers.handleOpenRepair},cancel:${repairHandlers.handleCancelRepair}};`,
         {
+          fileName: 'repair-handler.tsx',
           compilerOptions: {
+            jsx: ts.JsxEmit.ReactJSX,
             target: ts.ScriptTarget.ES2021,
             module: ts.ModuleKind.CommonJS,
           },

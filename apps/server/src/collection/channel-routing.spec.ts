@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -84,8 +85,7 @@ describe('backend collection routing', () => {
       const folder = path.join(migrations, name);
       if (!(await fs.stat(folder)).isDirectory()) continue;
       const sql = await fs.readFile(path.join(folder, 'migration.sql'), 'utf8');
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);
@@ -712,10 +712,7 @@ describe('backend collection routing', () => {
     expect(await prisma.article.count()).toBe(0);
     const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
     expect(feed.syncTime).toBe(0);
-    expect(JSON.parse(feed.lastCollectionResult || '{}')).toMatchObject({
-      status: 'failed',
-      coverage: 'none',
-    });
+    expect(feed.lastCollectionResult).toBeNull();
   });
 
   it('manual and scheduled owner search share the same normal update route and retain blocked status', async () => {
@@ -901,11 +898,7 @@ describe('backend collection routing', () => {
     ).rejects.toThrow('list service unavailable');
     const feed = await prisma.feed.findUniqueOrThrow({ where: { id: ids[0] } });
     expect(feed.syncTime).toBe(1700000000);
-    expect(JSON.parse(feed.lastCollectionResult!)).toMatchObject({
-      status: 'failed',
-      complete: false,
-      coverage: 'none',
-    });
+    expect(feed.lastCollectionResult).toBeNull();
     expect(await prisma.article.count()).toBe(0);
   });
 });

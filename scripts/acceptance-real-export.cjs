@@ -2,7 +2,8 @@
 // This verifies export, NOT acquisition, paging, metrics, or complete history.
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const os = require('node:os');
+const artifactsApi = require('./local-release/test-artifacts.cjs');
+const budget = require('./local-release/space-budget.cjs');
 const { createRequire } = require('node:module');
 const server = path.resolve(__dirname, '../apps/server');
 const serverRequire = createRequire(path.join(server, 'package.json'));
@@ -23,6 +24,8 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
     throw new Error(
       'Usage: node scripts/acceptance-real-export.cjs <real target HTML>',
     );
+  if ((await fs.stat(source)).size > 4 * 1024 ** 2)
+    throw new Error('HTML input exceeds 4 MiB test limit');
   const html = await fs.readFile(source, 'utf8');
   const $ = load(html);
   const title = $('#activity-name').text().trim();
@@ -40,44 +43,38 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
     !$('#js_content').text().trim()
   )
     throw new Error('HTML is not the real target article');
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-real-export-'));
-  const input = path.join(root, 'input');
-  await fs.mkdir(input);
-  const articleUrl = new URL('https://mp.weixin.qq.com/s');
-  for (const [key, value] of Object.entries({
-    __biz: get('biz'),
-    mid: get('mid'),
-    idx: get('idx'),
-    sn: get('sn'),
-  }))
-    articleUrl.searchParams.set(key, value);
-  $('meta[property="og:url"]').attr('content', articleUrl.toString());
-  await fs.writeFile(path.join(input, 'article.html'), $.html());
-  await fs.writeFile(
-    path.join(input, 'article.csv'),
-    'title,url,time\n' +
-      [title, articleUrl.toString(), timestamp].map(csvCell).join(',') +
-      '\n',
-  );
-  const prisma = new PrismaClient({
-    datasources: {
-      db: { url: `file:${path.join(root, 'test.db').replace(/\\/g, '/')}` },
-    },
+  if ($('img').length > 8) throw new Error('HTML exceeds 8 image test limit');
+  const artifacts = artifactsApi.begin({
+    migrations: path.join(server, 'prisma/migrations'),
   });
+  const root = artifacts.audit;
+  let prisma, failure;
   try {
-    for (const name of (
-      await fs.readdir(path.join(server, 'prisma/migrations'))
-    ).sort()) {
-      const folder = path.join(server, 'prisma/migrations', name);
-      if (!(await fs.stat(folder)).isDirectory()) continue;
-      for (const sql of (
-        await fs.readFile(path.join(folder, 'migration.sql'), 'utf8')
-      )
-        .split(';')
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(sql);
-    }
+    budget.preflight(artifacts.root, 256 * 1024 ** 2, 0);
+    const input = path.join(root, 'input');
+    await fs.mkdir(input);
+    const articleUrl = new URL('https://mp.weixin.qq.com/s');
+    for (const [key, value] of Object.entries({
+      __biz: get('biz'),
+      mid: get('mid'),
+      idx: get('idx'),
+      sn: get('sn'),
+    }))
+      articleUrl.searchParams.set(key, value);
+    $('meta[property="og:url"]').attr('content', articleUrl.toString());
+    await fs.writeFile(path.join(input, 'article.html'), $.html());
+    await fs.writeFile(
+      path.join(input, 'article.csv'),
+      'title,url,time\n' +
+        [title, articleUrl.toString(), timestamp].map(csvCell).join(',') +
+        '\n',
+    );
+    prisma = new PrismaClient({
+      datasources: {
+        db: { url: `file:${artifacts.database.replace(/\\/g, '/')}` },
+      },
+    });
+    artifacts.checkpoint?.();
     const collection = new CollectionService(prisma);
     const imported = await collection.importDirectory({
       directory: input,
@@ -100,6 +97,8 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
     });
     const article = await prisma.article.findFirstOrThrow();
     const saved = await caller.article.saveToObsidian(article.id);
+    artifacts.checkpoint?.();
+    budget.preflight(artifacts.root, 0, 0);
     const markdown = await fs.readFile(saved.path, 'utf8');
     const attachments = [
       ...new Set(
@@ -160,8 +159,19 @@ const { csvCell } = require(path.join(built, 'collection/collection-format'));
       !result.rssContainsBody
     )
       process.exitCode = 1;
+  } catch (error) {
+    failure = error;
+    throw error;
   } finally {
-    await prisma.$disconnect();
+    try {
+      await prisma?.$disconnect();
+      artifacts.checkpoint();
+      // These paths exist only under this invocation's UUID audit directory.
+      for (const name of ['input', 'vault', 'target.rss'])
+        await fs.rm(path.join(root, name), { recursive: true, force: true });
+    } finally {
+      artifacts.finish(failure);
+    }
   }
 })().catch((error) => {
   console.error(error.message);

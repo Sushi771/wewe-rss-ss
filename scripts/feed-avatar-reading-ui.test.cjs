@@ -10,7 +10,8 @@ const ts = require(
 const { loadActualTs } = require('./offline-ts-fixture.cjs');
 const selection = loadActualTs('apps/web/src/utils/feed-selection.ts');
 const articleDates = loadActualTs('packages/shared/src/article-date-filter.ts');
-const jsx = (type, props) => ({ type, props: props || {} });
+const jsx = (type, props) =>
+  typeof type === 'function' ? type(props || {}) : { type, props: props || {} };
 function hooks() {
   const state = [];
   let cursor = 0;
@@ -30,6 +31,11 @@ function hooks() {
         ];
       },
       useMemo: (fn) => fn(),
+      useRef(initial) {
+        const i = cursor++;
+        return (state[i] ||= { current: initial });
+      },
+      useCallback: (fn) => fn,
       useEffect() {},
       useLayoutEffect() {},
     },
@@ -48,7 +54,23 @@ function load(file, modules) {
     module,
     exports: module.exports,
     require: (name) => {
+      if (name === '@web/components/OperationNotice')
+        return {
+          __esModule: true,
+          default: 'OperationNotice',
+          FailureNotice: 'FailureNotice',
+        };
+      if (name === '@web/components/ArticleSearchStatus')
+        return { __esModule: true, default: 'ArticleSearchStatus' };
+
+      if (name === '@web/components/SubscriptionPrimitives')
+        return require('./offline-subscription-primitives.cjs')(
+          jsx,
+          modules.react,
+        );
       if (name === '@web/utils/feed-selection') return selection;
+      if (name === '@web/utils/article-body-state')
+        return loadActualTs('apps/web/src/utils/article-body-state.ts');
       if (name === '@wewe-rss/shared') return articleDates;
       assert(name in modules, name);
       return modules[name];
@@ -136,6 +158,10 @@ function readingFixture(cached) {
   const trpc = {
     useUtils: () => ({}),
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: async () => ({}) }) },
       byId: {
         useQuery: (id, options) => {
           readInput = { id, options };
@@ -164,15 +190,16 @@ function readingFixture(cached) {
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
     '@nextui-org/react': new Proxy({}, { get: (_, key) => key }),
     '@web/utils/trpc': { trpc },
-    '@web/components/ArticleReader': { default: 'ArticleReader' },
+    '@web/utils/reading-query-cache': { READING_CACHE_TIME: 60_000 },
+    '@web/utils/wechat-original-url': loadActualTs(
+      'apps/web/src/utils/wechat-original-url.ts',
+    ),
     // This fixture checks row content; scroll restoration has its own browser regression.
     '@web/utils/use-article-list-position': {
       useArticleListPosition: () => ({
         scrollRef: { current: null },
         capturePosition() {},
         cancelRestore() {},
-        rememberForReader() {},
-        restoreAfterReader() {},
       }),
     },
     'react-router-dom': { useParams: () => ({ id: 'synthetic' }) },
@@ -195,15 +222,16 @@ function readingFixture(cached) {
     },
   };
 }
-test('cached title remains a keyboard-focusable reading link without a duplicate success button', () => {
+test('cached title opens the stored original without a body request or duplicate success button', () => {
   const f = readingFixture(true);
   const view = f.render();
   assert(!text(view).includes('阅读已缓存正文'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' && n.props['aria-label'] === '打开原文：Synthetic title',
   );
   assert(link.props.href);
-  assert.equal(link.props['aria-label'], '阅读缓存正文：Synthetic title');
+  assert.equal(link.props['aria-label'], '打开原文：Synthetic title');
   let prevented = false;
   link.props.onClick({
     preventDefault: () => {
@@ -211,19 +239,23 @@ test('cached title remains a keyboard-focusable reading link without a duplicate
     },
   });
   f.render();
-  assert.equal(prevented, true);
-  assert.equal(f.readInput.id, 'synthetic-article');
-  assert.equal(f.readInput.options.enabled, true);
-  assert.match(text(f.render()), /失败|未能|无法/);
+  assert.equal(prevented, false);
+  assert.equal(f.readInput, undefined);
+  assert.equal(link.props.target, '_blank');
+  assert.equal(link.props.rel, 'noopener noreferrer');
+  assert(
+    !nodes(f.render()).some((n) => n.type === 'Modal' || n.type === 'iframe'),
+  );
 });
 test('missing bodies retain a short warning and original link; no false complete claim', () => {
   const f = readingFixture(false);
   const view = f.render();
-  assert.match(text(view), /正文未缓存/);
+  assert.match(text(view), /正文尚未保存/);
   assert.match(text(view), /正文暂不可重试/);
   assert(!text(view).includes('Synthetic source unavailable'));
   const link = nodes(view).find(
-    (n) => n.type === 'a' && n.props.children === 'Synthetic title',
+    (n) =>
+      n.type === 'a' && n.props['aria-label'] === '打开原文：Synthetic title',
   );
   let prevented = false;
   link.props.onClick({
@@ -233,6 +265,6 @@ test('missing bodies retain a short warning and original link; no false complete
   });
   f.render();
   assert.equal(prevented, false);
-  assert.equal(f.readInput.options.enabled, false);
+  assert.equal(f.readInput, undefined);
   assert.equal(link.props.href, 'https://mp.weixin.qq.com/s/synthetic');
 });

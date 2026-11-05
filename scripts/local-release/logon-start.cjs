@@ -1,5 +1,5 @@
 // Stable Task Scheduler entry point. It never stops a listener on port 4000.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const {
@@ -39,6 +39,7 @@ function classifyListener(
 }
 
 async function startAtLogon() {
+  require('./release-scope.cjs').assertWritableSession(['restart']);
   if (process.platform !== 'win32') throw new Error('登录任务仅支持 Windows');
   // Login starts only the verified web server package.
   const identity = processIdentity('Discover', undefined, 4000);
@@ -68,6 +69,7 @@ async function startAtLogon() {
     production: true,
     rehearsal: false,
     reuseVerified: true,
+    startupReuse: true,
   });
   return {
     status: 'started',
@@ -78,6 +80,20 @@ async function startAtLogon() {
 }
 
 function activateRunning(candidate) {
+  return require('./release-scope.cjs').within(
+    {
+      kind: 'activate',
+      root: path.dirname(fs.realpathSync(candidate)),
+      reserveBytes: 256 * 1024,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(candidate);
+      return activateRunningInner(candidate);
+    },
+  );
+}
+function activateRunningInner(candidate) {
   const { release } = checkedRelease(candidate);
   const listener = classifyListener(
     processIdentity('Port', undefined, 4000),

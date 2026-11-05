@@ -69,6 +69,8 @@ function makeSourceDb(file, { groups = true } = {}) {
           '20261009063000_add_management_groups',
           '20261010090000_management_group_order',
           '20261011090000_cache_insert_batches',
+          '20261015090000_incremental_refresh_commits',
+          '20261020160000_local_body_search',
         ].includes(name)
       )
         continue;
@@ -118,6 +120,9 @@ function makeSourceDb(file, { groups = true } = {}) {
       '<p>Unchanged XHS body</p>',
     );
     if (groups) {
+      db.exec(
+        "INSERT INTO cache_refresh_commits VALUES('local-commit','synthetic-feed','retained-result',1); INSERT INTO refresh_submission_claims VALUES('unknown-remote','synthetic-feed','unknown',2,1,3)",
+      );
       db.prepare(
         'INSERT INTO cache_insert_batches VALUES (?,?,?,?,?,?,?,?,?)',
       ).run(
@@ -432,6 +437,51 @@ test('retains the INSERT ledger and rejects its drift since rehearsal', async ()
   });
 });
 
+test('retains old search documents and rejects drift since rehearsal', async () => {
+  await withRehearsal(async (options) => {
+    const db = new DatabaseSync(options.sourceDb);
+    try {
+      db.exec('UPDATE article_search_documents SET generation=generation+1');
+    } finally {
+      db.close();
+    }
+    options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+    await assert.rejects(
+      runOneArticleImport(options),
+      /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+    );
+  });
+});
+
+test('rejects an altered search schema or unexpected new target projection', async () => {
+  await withRehearsal(async (options) => {
+    let db = new DatabaseSync(options.trialDir + '/trial.db');
+    try {
+      db.prepare(
+        'UPDATE article_search_documents SET pending=0 WHERE article_id=?',
+      ).run(TARGET_ARTICLE_ID);
+    } finally {
+      db.close();
+    }
+    assert.throws(
+      () => readSnapshot(options.trialDir + '/trial.db', true),
+      /TARGET_SEARCH_ROW_INVALID/,
+    );
+    db = new DatabaseSync(options.sourceDb);
+    try {
+      db.exec(
+        'ALTER TABLE article_search_documents ADD COLUMN unknown_column TEXT',
+      );
+    } finally {
+      db.close();
+    }
+    assert.throws(
+      () => readSnapshot(options.sourceDb),
+      /SQLITE_SCHEMA_UNEXPECTED/,
+    );
+  });
+});
+
 test('rejects incomplete or changed INSERT ledger schema', () => {
   const dir = fs.mkdtempSync(
     path.join(os.tmpdir(), 'wewe-insert-schema-test-'),
@@ -452,3 +502,40 @@ test('rejects incomplete or changed INSERT ledger schema', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+for (const table of ['cache_refresh_commits', 'refresh_submission_claims']) {
+  test(`retains ${table} and rejects its drift since rehearsal`, async () => {
+    await withRehearsal(async (options) => {
+      assert.equal(readSnapshot(options.sourceDb).tables[table].rows.length, 1);
+      const db = new DatabaseSync(options.sourceDb);
+      try {
+        db.exec(`DELETE FROM ${table}`);
+      } finally {
+        db.close();
+      }
+      options.expectedSourceSha256 = sha256(fs.readFileSync(options.sourceDb));
+      await assert.rejects(
+        runOneArticleImport(options),
+        /SOURCE_DRIFTED_SINCE_REHEARSAL/,
+      );
+    });
+  });
+  test(`rejects changed ${table} schema`, () => {
+    const dir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wewe-incremental-schema-'),
+    );
+    try {
+      const file = path.join(dir, 'source.db');
+      makeSourceDb(file);
+      const db = new DatabaseSync(file);
+      try {
+        db.exec(`ALTER TABLE ${table} RENAME COLUMN mp_id TO unknown_column`);
+      } finally {
+        db.close();
+      }
+      assert.throws(() => readSnapshot(file), /SQLITE_SCHEMA_UNEXPECTED/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

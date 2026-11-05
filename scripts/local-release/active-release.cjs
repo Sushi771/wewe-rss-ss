@@ -1,5 +1,5 @@
 // The logon task reads this local pointer; only a verified production start may advance it.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const {
@@ -55,26 +55,75 @@ function readActiveRelease(options) {
 }
 
 function writeActiveRelease(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   // Seed a validated receipt during activation, before the user's next launch.
   return storePointer(
     checkedRelease(candidate, {
       ...options,
-      reuseVerified: true,
+      reuseVerified: !require('./release-scope.cjs').session(),
       runningOnly: false,
     }),
+    options,
   );
 }
 
 async function writeActiveReleaseAsync(candidate, options) {
+  require('./release-scope.cjs').assertWritableSession(
+    ['activate', 'restart', 'switch'],
+    4096,
+  );
   const release = checkedDirectory(candidate);
   const manifest = await verifyReleaseAsync(release, {
     ...options,
-    reuseVerified: true,
+    reuseVerified: !require('./release-scope.cjs').session(),
   });
-  return storePointer(checkedManifest(release, manifest));
+  return storePointer(checkedManifest(release, manifest), options);
 }
 
-function storePointer({ release, manifest }) {
+function storePointer({ release, manifest }, options = {}) {
+  // All current publication paths share the retain-only update's publication
+  // lock. Historical packages are never rewritten to acquire this cooperation.
+  // Fixed administrative mutex beside the release root, not a package output.
+  // Creating it inside a frozen inventory would invalidate that inventory.
+  const lock = path.join(root, '.active-release.lock');
+  const token = randomUUID();
+  fs.writeFileSync(lock, token, { flag: 'wx', mode: 0o600 });
+  try {
+    return storePointerLocked({ release, manifest }, options);
+  } finally {
+    if (fs.readFileSync(lock, 'utf8') !== token)
+      throw new Error('ACTIVE_RELEASE_LOCK_OWNER_CHANGED');
+    fs.unlinkSync(lock);
+  }
+}
+
+function storePointerLocked({ release, manifest }, options = {}) {
+  const scope = require('./release-scope.cjs').session();
+  const preserving = scope?.policy?.preservingUpdate;
+  if (preserving) {
+    const active = preserving.active;
+    if (preserving.operation !== 'restart' || active.pointer !== pointer ||
+        fs.realpathSync(pointer) !== pointer || fs.lstatSync(pointer).isSymbolicLink())
+      throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    const currentHash = require('./lib.cjs').fileHash(pointer);
+    const nextHash = require('node:crypto').createHash('sha256')
+      .update(JSON.stringify({ format: 1, id: active.candidateId }) + '\n').digest('hex');
+    if (options.recovery === true) {
+      if (manifest.id !== active.currentId || ![active.pointerSha256, nextHash].includes(currentHash))
+        throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+    } else if (manifest.id !== active.candidateId || currentHash !== active.pointerSha256)
+      throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+  }
+  if (scope) {
+    if (options.recovery === true) scope.authorizeRecoveryPackage(release);
+    else {
+      scope.authorizePublication(release);
+      scope.check(true);
+    }
+  }
   const temporary = path.join(releases, `active-${randomUUID()}.tmp`);
   try {
     fs.writeFileSync(
@@ -84,6 +133,7 @@ function storePointer({ release, manifest }) {
         flag: 'wx',
       },
     );
+    scope?.authorizePointerCommit?.(temporary, pointer, manifest.id, options.recovery === true);
     fs.renameSync(temporary, pointer);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);

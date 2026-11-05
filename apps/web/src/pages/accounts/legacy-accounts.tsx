@@ -1,3 +1,4 @@
+import { FailureNotice } from '@web/components/OperationNotice';
 import {
   Modal,
   ModalContent,
@@ -57,7 +58,9 @@ const AccountPage = () => {
       setConnectionAccountId(null);
     },
     onError(error) {
-      toast.error(error.message);
+      toast.error('操作未完成，请查看详情。', {
+        description: <FailureNotice error={error} />,
+      });
     },
   });
 
@@ -68,7 +71,9 @@ const AccountPage = () => {
     isLoading: creatingLogin,
   } = trpc.platform.createLoginUrl.useMutation({
     onError(err) {
-      toast.error(err.message || '获取登录二维码失败');
+      toast.error('二维码获取失败，请手动重试。', {
+        description: <FailureNotice error={err} />,
+      });
       setLoginError(err.message || '获取登录二维码失败');
       setCount(0);
     },
@@ -98,7 +103,9 @@ const AccountPage = () => {
       enabled: !!loginData?.uuid && isOpen && count > 0,
       retry: false,
       onError(err) {
-        toast.error(err.message || '登录状态查询失败，已停止本次轮询');
+        toast.error('登录状态读取失败，已停止检查。', {
+          description: <FailureNotice error={err} />,
+        });
         setLoginError(err.message || '登录状态查询失败，已停止本次轮询');
         setCount(0);
       },
@@ -127,7 +134,9 @@ const AccountPage = () => {
           !data.message.includes('扫码') &&
           !data.message.includes('确认')
         ) {
-          toast.error(`登录失败: ${data.message}`);
+          toast.error('登录未完成，请检查账号。', {
+            description: <FailureNotice error={data.message} />,
+          });
         }
       },
     },
@@ -330,7 +339,9 @@ const AccountPage = () => {
                       登录已过期
                     </span>
                   ) : isBlocked ? (
-                    <span className="mac-badge mac-badge-warning">小黑屋</span>
+                    <span className="mac-badge mac-badge-warning">
+                      暂受限制
+                    </span>
                   ) : (
                     <StatusDropdown
                       value={item.status}
@@ -435,7 +446,10 @@ const AccountPage = () => {
             {connection.isFetching ? (
               <Spinner />
             ) : connection.error ? (
-              <p>{connection.error.message}</p>
+              <FailureNotice
+                error={connection.error}
+                fallback="连接状态读取失败，请稍后重试。"
+              />
             ) : (
               <>
                 <p>{connection.data?.accountLabel}</p>

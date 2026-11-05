@@ -1,9 +1,10 @@
 // 从固定旧源码构建静态页面；通过已安装 Vite 的 Node API 避开深层 junction 的配置打包失败。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { createRequire } = require('node:module');
 
 async function buildLegacyWeb(sourceWeb, output) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const outputDir = path.resolve(output);
   sourceWeb = fs.realpathSync(sourceWeb);
   const currentWeb = path.resolve(__dirname, '../../apps/web');

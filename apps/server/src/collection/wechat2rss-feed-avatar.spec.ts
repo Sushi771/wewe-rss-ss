@@ -1,5 +1,11 @@
 import { parseWechat2RssFeedAvatar } from './wechat2rss-feed-avatar';
 import { Wechat2RssProvider } from './providers/wechat2rss';
+jest.mock('./wechat2rss-source-gate', () => ({
+  defaultWechat2RssSourceGate: () => ({
+    begin: async () => 'fixture',
+    finish: async () => undefined,
+  }),
+}));
 
 const rss = (image: string) =>
   `<rss><channel><title>Synthetic publisher</title><image><url>${image}</url></image><item><image>https://mmbiz.qpic.cn/article.jpg</image></item></channel></rss>`;
@@ -36,14 +42,18 @@ describe('existing Wechat2RSS RSS avatar metadata', () => {
     );
     expect(await provider.fetchFeedAvatar('MP_WXS_bad')).toBeUndefined();
     expect(fetcher).not.toHaveBeenCalled();
-    expect(await provider.fetchFeedAvatar('MP_WXS_1234567890')).toBeUndefined();
+    await expect(provider.fetchFeedAvatar('MP_WXS_1234567890')).rejects.toThrow(
+      'WECHAT2RSS_SOURCE_STOPPED',
+    );
     fetcher.mockResolvedValue(
       new Response('', {
         status: 302,
         headers: { location: 'https://outside.invalid/' },
       }),
     );
-    expect(await provider.fetchFeedAvatar('MP_WXS_1234567890')).toBeUndefined();
+    await expect(provider.fetchFeedAvatar('MP_WXS_1234567890')).rejects.toThrow(
+      'WECHAT2RSS_SOURCE_STOPPED',
+    );
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
   it('maps the real channel image and decodes XML without inventing an avatar', () => {

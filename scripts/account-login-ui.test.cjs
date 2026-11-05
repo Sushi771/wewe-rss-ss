@@ -302,6 +302,15 @@ function fixture({
       {
         exports,
         require(name) {
+          if (name === '@web/components/OperationNotice')
+            return {
+              __esModule: true,
+              default: 'OperationNotice',
+              FailureNotice: 'FailureNotice',
+            };
+          if (name === '@web/components/ArticleSearchStatus')
+            return { __esModule: true, default: 'ArticleSearchStatus' };
+
           assert.ok(name in modules, 'Unexpected dependency ' + name);
           return modules[name];
         },

@@ -1,0 +1,1906 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const ts = require(
+  require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
+);
+function load(file, imports = {}) {
+  const output = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
+    compilerOptions: {
+      target: ts.ScriptTarget.ES2021,
+      module: ts.ModuleKind.CommonJS,
+      jsx: ts.JsxEmit.ReactJSX,
+      esModuleInterop: true,
+    },
+  }).outputText;
+  const mod = { exports: {} };
+  new Function('require', 'exports', 'module', output)(
+    (name) => {
+      if (
+        name === '@web/components/AppOverlays' &&
+        imports['@nextui-org/react']
+      )
+        return imports['@nextui-org/react'];
+      if (!(name in imports)) throw Error(`Unexpected dependency ${name}`);
+      return imports[name];
+    },
+    mod.exports,
+    mod,
+  );
+  return mod.exports;
+}
+const helpers = load('apps/web/src/utils/xiaohongshu-subscription.ts');
+const dateHelpers = load('apps/web/src/utils/article-date-selection.ts');
+const zod = require(
+  require.resolve('zod', { paths: [path.resolve('packages/shared')] }),
+);
+const shared = load('packages/shared/src/article-date-filter.ts', { zod });
+const tick = () => new Promise((resolve) => setTimeout(resolve, 15));
+test('shared transport logger excludes signed-link resolution and session fields in both directions', () => {
+  const source = fs.readFileSync('apps/web/src/provider/trpc.tsx', 'utf8');
+  const ast = ts.createSourceFile(
+    'provider.tsx',
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let enabled;
+  function visit(node) {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(ast) === 'loggerLink'
+    ) {
+      enabled = node.arguments[0].properties
+        .find((p) => p.name?.getText(ast) === 'enabled')
+        .initializer.getText(ast);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(ast);
+  assert.ok(enabled);
+  const permitLog = new Function('return (' + enabled + ')')();
+  for (const direction of ['up', 'down']) {
+    for (const route of [
+      'xiaohongshu.resolveSubscription',
+      'xiaohongshu.prepareOriginalLink',
+      'xiaohongshu.connectSession',
+    ])
+      assert.equal(
+        permitLog({
+          direction,
+          path: route,
+          input: { secret: 'synthetic-only' },
+        }),
+        false,
+      );
+  }
+  assert.equal(permitLog({ direction: 'up', path: 'article.list' }), true);
+});
+test('missing basic action submits only selected notes to the guarded entry',async()=>{
+  const f=fixture();
+  try {
+    await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
+    await f.button('仅补所选基础缺项').props.onPress();await tick();
+    assert.deepEqual(f.calls.find(([name])=>name==='refreshMissingBasic'),['refreshMissingBasic',{id:'creator-a',noteIds:['pending']}]);
+    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,0);
+  } finally {f.dispose();}
+});
+test('media summary distinguishes a missing manifest and a stopped request',async()=>{
+  const active={...status('running','list'),taskId:'media-task',creatorId:'creator-a',mediaSummary:{manifestNotes:0,declaredImages:0,recordedSavedImages:0,pendingImages:0,needsReviewNotes:1,blockedNotes:1,needsDetailRefreshNotes:0}};
+  const f=fixture({recentTasks:[active],taskStatus:active});try{
+    await f.start(true);await tick();
+    const visible=f.render().filter(value=>typeof value==='string').join(' ');
+    assert.match(visible,/图片清单待核对/);assert.match(visible,/请求结果待核对，已停止/);
+  }finally{f.dispose();}
+});
+const status = (state = 'running', kind = 'download') => ({
+  kind,
+  state,
+  total: 3,
+  completed: state === 'completed' ? 3 : 1,
+  skipped: 0,
+  failed: 0,
+  remaining: state === 'completed' ? 0 : 2,
+});
+
+function fixture(options = {}) {
+  let index = 0;
+  const slots = [],
+    effects = [],
+    calls = [];
+  const element = (type, props) =>
+    typeof type === 'function'
+      ? type(props || {})
+      : { type, props: props || {} };
+  const react = {
+    useState(value) {
+      const i = index++;
+      if (!(i in slots))
+        slots[i] = typeof value === 'function' ? value() : value;
+      return [
+        slots[i],
+        (next) => {
+          slots[i] = typeof next === 'function' ? next(slots[i]) : next;
+        },
+      ];
+    },
+    useRef(value) {
+      const i = index++;
+      if (!(i in slots)) slots[i] = { current: value };
+      return slots[i];
+    },
+    useMemo(fn, deps) {
+      const i = index++;
+      if (!slots[i] || deps.some((v, j) => !Object.is(v, slots[i].deps[j])))
+        slots[i] = { deps, value: fn() };
+      return slots[i].value;
+    },
+    useCallback(fn, deps) {
+      return react.useMemo(() => fn, deps);
+    },
+    useEffect(fn, deps) {
+      const i = index++;
+      const prev = slots[i];
+      if (!prev || deps.some((v, j) => !Object.is(v, prev.deps[j]))) {
+        slots[i] = { deps, cleanup: prev?.cleanup };
+        effects.push(() => {
+          slots[i].cleanup?.();
+          slots[i].cleanup = fn();
+        });
+      }
+    },
+  };
+  let groupData = { items: (options.groups || [{ id: 'group-a', name: '合成分组', order: 0 }]) };
+  const creators = {
+    items: [
+      {
+        id: 'creator-a',
+        displayName: '合成作者',
+        enabled: true,
+        groupId: null,
+        _count: { notes: 4 },
+      },
+    ],
+  };
+  const items = [
+    {
+      id: 'pending',
+      title: '苹果图文',
+      kind: 'image-text',
+      status: 'pending',
+      publishTime: Date.parse('2026-10-23T16:00Z') / 1000,
+    },
+    {
+      id: 'saved',
+      title: '苹果存档',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: Date.parse('2026-10-24T15:59:59Z') / 1000,
+    },
+    {
+      id: 'old',
+      title: '旧笔记',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: Date.parse('2026-10-22T12:00Z') / 1000,
+    },
+    {
+      id: 'video',
+      title: '视频',
+      kind: 'video',
+      status: 'complete',
+      publishTime: 0,
+    },
+  ];
+  let taskStatus = options.taskStatus || status();
+  let recentItems = options.recentTasks || [];
+  const recoveryQueries = [];
+  let resolveKind = 'note',
+    existing = null,
+    expired = false,
+    cancelledPicker = false,
+    failStatus = false;
+  let bodyData = null;
+  let connectionData = {
+    liveEnabled: false,
+    connected: false,
+    stored: null,
+    verified: false,
+    canConnect: false,
+    canPersist: false,
+    restartRequiresReparse: true,
+  };
+  let nextTask = 0;
+  let releaseResolve;
+  const api = Object.fromEntries(
+    [
+      'resolveSubscription',
+      'subscribe',
+      'refresh',
+      'refreshFull',
+      'refreshMissingBasic',
+      'downloadNotes',
+      'cancelTask',
+      'resumeTask',
+    ].map((name) => [
+      name,
+      {
+        mutate: async (input) => {
+          calls.push([name, input]);
+          if (name === 'resolveSubscription') {
+            if (releaseResolve)
+              await new Promise((resolve) => {
+                releaseResolve = resolve;
+              });
+            return {
+              resolutionId: 'resolution-a',
+              inputKind: resolveKind,
+              author: {
+                id: 'author-a',
+                name: '合成作者',
+                profileUrl:
+                  'https://www.xiaohongshu.com/user/profile/synthetic',
+              },
+              existingCreatorId: existing,
+              expiresAt: new Date(
+                Date.now() + (expired ? -100 : 60000),
+              ).toISOString(),
+            };
+          }
+          if (name === 'subscribe')
+            return {
+              creatorId: 'creator-a',
+              created: !existing,
+              subscribed: true,
+              ...(!existing ? { collection: { taskId: 'list-task', creatorId: 'creator-a' } } : {}),
+            };
+          if (name === 'refresh' || name === 'refreshFull' || name === 'refreshMissingBasic') {
+            taskStatus = status('running', 'list');
+            return { taskId: 'list-task', creatorId: input.id };
+          }
+          if (name === 'downloadNotes') {
+            taskStatus = status('running');
+            return {
+              taskId: nextTask++
+                ? 'download-task-' + nextTask
+                : 'download-task',
+              creatorId: input.creatorId,
+            };
+          }
+          if (name === 'resumeTask') {
+            if (options.resumeError) throw Error(options.resumeError);
+            taskStatus = status('running');
+            return { taskId: 'resumed-task', creatorId: 'creator-a' };
+          }
+          if (name === 'cancelTask') {
+            taskStatus = status('cancelled', taskStatus.kind);
+            return {};
+          }
+        },
+      },
+    ]),
+  );
+  api.recentTasks = {
+    query: async (input) => {
+      recoveryQueries.push(input);
+      if (options.discoveryGate) await options.discoveryGate;
+      return { items: recentItems };
+    },
+  };
+  api.task = {
+    query: async (input) => {
+      calls.push(['task', input]);
+      if (failStatus) throw Error('offline');
+      return taskStatus;
+    },
+  };
+  const utils = {
+    client: {
+      get xiaohongshu() {
+        return { ...api };
+      },
+    },
+    xiaohongshu: Object.fromEntries(
+      ['list', 'notes', 'body', 'groups', 'capability', 'connectionStatus'].map(
+        (name) => [
+          name,
+          {
+            invalidate: async () => {
+              calls.push(['invalidate', name]);
+              if (options.stallInvalidation) return new Promise(() => {});
+              if (options.failInvalidation) throw Error('synthetic refresh failed');
+            },
+            cancel: async () => {},
+            setData: (_key, update) => { if (name === 'groups') groupData = update(groupData); if (name === 'list') Object.assign(creators, update(creators)); },
+          },
+        ],
+      ),
+    ),
+  };
+  const query = (data) => ({ data, isLoading: false, error: null });
+  const router = {
+    connectionStatus: {
+      useQuery: () => ({
+        ...query(connectionData),
+        refetch: async () => {
+          calls.push(['connectionStatus']);
+          return { data: connectionData };
+        },
+      }),
+    },
+    restoreSession: {
+      useMutation: () => ({
+        mutateAsync: async () => {
+          calls.push(['restoreSession']);
+          connectionData = { ...connectionData, connected: true };
+        },
+      }),
+    },
+    disconnectSession: {
+      useMutation: () => ({
+        mutateAsync: async () => {
+          calls.push(['disconnectSession']);
+          connectionData = {
+            ...connectionData,
+            connected: false,
+            stored: false,
+          };
+        },
+      }),
+    },
+    capability: { useQuery: () => query({ canRefresh: true }) },
+    list: { useQuery: () => query(creators) },
+    groups: {
+      useQuery: () => ({ ...query(groupData), refetch: async () => ({ data: groupData }) }),
+    },
+    notes: {
+      useQuery: (input) => {
+        const range = shared.articlePublicationRange(input);
+        return query({
+          ...(options.queryVersion
+            ? { queryVersion: options.queryVersion }
+            : {}),
+          items: items
+            .map((note) => ({
+              creatorId: 'creator-a',
+              creatorName: '合成作者',
+              groupId: null,
+              ...note,
+            }))
+            .filter(
+              (note) =>
+                (!input.creatorId || note.creatorId === input.creatorId) &&
+                (input.groupId === undefined ||
+                  note.groupId === input.groupId) &&
+                (!input.search ||
+                  (
+                    note.title +
+                    note.creatorName +
+                    (note.id === 'pending' ? ' 合成正文关键词' : '')
+                  ).includes(input.search)) &&
+                (!range ||
+                  (note.publishTime > 0 &&
+                    (range.gte === undefined ||
+                      note.publishTime >= range.gte) &&
+                    (range.lt === undefined || note.publishTime < range.lt))),
+            ),
+        });
+      },
+    },
+    body: {
+      useQuery: (input) => {
+        if (input.noteId) calls.push(['bodyLookup', input]);
+        return query(
+          bodyData
+            ? {
+                ...bodyData,
+                engagement: bodyData.engagement ?? {
+                  metrics: null,
+                  creatorMetrics: null,
+                  comments: [],
+                  windows: [],
+                  totalSaved: 0,
+                  returned: 0,
+                  offset: 0,
+                },
+              }
+            : bodyData,
+        );
+      },
+    },
+  };
+  api.notes = {
+    query: async (input) => {
+      calls.push(['notesScope', input]);
+      return router.notes.useQuery(input).data;
+    },
+  };
+  for (const name of [
+    'edit',
+    'remove',
+    'export',
+    'saveGroup',
+    'reorderGroups',
+    'removeGroup',
+    'moveCreators',
+  ])
+    router[name] = {
+      useMutation: () => ({
+        mutateAsync: async (input) => {
+          calls.push([name, input]);
+          if (name === 'moveCreators') return {ids:input.ids,groupId:input.groupId,moved:input.ids.length};
+          if (name === 'reorderGroups') { if (options.reorderError) throw Error('synthetic reorder failed'); return { ids: input.ids }; }
+          return name === 'export'
+            ? {
+                base64: '',
+                mimeType: 'application/zip',
+                filename: 'synthetic.zip',
+                notes: input.noteIds.length,
+              }
+            : {};
+        },
+      }),
+    };
+  const ui = Object.fromEntries(
+    [
+      'Button',
+      'Input',
+      'Checkbox',
+      'Chip',
+      'Modal',
+      'ModalHeader',
+      'ModalBody',
+      'ModalContent',
+      'ModalFooter',
+      'Spinner',
+      'Progress',
+      'Tooltip',
+      'Popover',
+      'PopoverContent',
+      'PopoverTrigger',
+      'Switch',
+    ].map((name) => [name, name]),
+  );
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
+  const primitives = load(
+    'apps/web/src/components/SubscriptionPrimitives.tsx',
+    {
+      'react/jsx-runtime': { jsx: element, jsxs: element },
+      '@nextui-org/react': ui,
+    },
+  );
+  const Recovery = load('apps/web/src/components/XhsTaskRecovery.tsx', {
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@nextui-org/react': ui,
+    './SubscriptionPrimitives': primitives,
+    '@web/utils/xiaohongshu-subscription': helpers,
+  }).default;
+  router.refreshMetrics = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  router.collectComments = {
+    useMutation: () => ({ isLoading: false, mutateAsync: async () => {} }),
+  };
+  ui.ModalContent = (props) => ({
+    type: 'ModalContent',
+    props: {
+      ...props,
+      children:
+        typeof props.children === 'function'
+          ? props.children(() => {})
+          : props.children,
+    },
+  });
+  router.engagement = {
+    useQuery: (input) => {
+      if (input.noteId) calls.push(['engagementLookup', input]);
+      return query(undefined);
+    },
+  };
+  const engagement = load('apps/web/src/components/XhsEngagement.tsx', {
+    react,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@web/utils/trpc': {
+      trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
+    },
+  });
+  const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
+    react,
+    'react/jsx-runtime': { jsx: element, jsxs: element },
+    '@nextui-org/react': ui,
+    '@web/utils/trpc': {
+      trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
+    },
+    '@web/components/SubscriptionPrimitives': primitives,
+    sonner: { toast: { warning: message => calls.push(['warning', message]) } },
+    '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/XhsWholeCreator': 'XhsWholeCreator',
+    '@web/components/XhsTaskRecovery': Recovery,
+    '@web/components/XhsOriginalLink': 'XhsOriginalLink',
+    '@web/components/XhsCreatorAvatar': 'XhsCreatorAvatar',
+    '@web/components/XhsSavedComments': 'XhsSavedComments',
+    '@web/components/XhsBatchSubscription': 'XhsBatchSubscription',
+    '@web/components/XhsCombinedFilter': 'XhsCombinedFilter',
+    '@web/utils/xhs-combined-filter': load(
+      'apps/web/src/utils/xhs-combined-filter.ts',
+    ),
+    '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
+    '@web/components/XhsSourceBudget': 'XhsSourceBudget',
+    '@web/components/XhsEngagement': engagement,
+    '@web/utils/xhs-note-presentation': load(
+      'apps/web/src/utils/xhs-note-presentation.ts',
+    ),
+    '@web/components/ArticleDateFilter': 'ArticleDateFilter',
+    '@web/utils/article-date-selection': dateHelpers,
+    '@wewe-rss/shared': shared,
+    '@web/utils/xiaohongshu-subscription': {
+      ...helpers,
+      watchSubscriptionTask: (options) =>
+        helpers.watchSubscriptionTask({ ...options, interval: 2 }),
+    },
+    '@web/utils/auth': { getAuthCode: () => '' },
+    '@web/utils/env': { serverOriginUrl: '' },
+    '@web/utils/operation-message': {
+      failureMessage: (cause) => cause.message,
+    },
+  }).default;
+  const previousFetch = global.fetch;
+  let cacheMode = 'normal';
+  const directoryCalls=[];
+  global.fetch = async (url, request) => {
+    if (/\/directory(?:-confirm)?\?/.test(url)) directoryCalls.push(url);
+    if (url.endsWith('/xiaohongshu/cache-export')) {
+      const payload = JSON.parse(request.body);
+      calls.push(['cacheExport', payload]);
+      if (cacheMode === 'lost') throw Error('transport lost');
+      if(['audit-status','audit-cancel','audit-code'].includes(cacheMode))return {ok:true,json:async()=>({results:payload.items.map(item=>cacheMode==='audit-code'?{id:item.id,error:'XHS_CACHED_SAVE_FAILED'}:{id:item.id,saved:{alreadySaved:false,status:cacheMode==='audit-status'?'failed':'new'}}),cancelled:cacheMode==='audit-cancel'?'false':false})};
+
+      if (cacheMode === 'bad')
+        return {
+          ok: true,
+          json: async () => ({
+            results: [{ id: payload.items[0].id }],
+            cancelled: false,
+          }),
+        };
+      if (cacheMode === 'pending')
+        return new Promise((resolve, reject) =>
+          request.signal.addEventListener(
+            'abort',
+            () => reject(Error('aborted')),
+            { once: true },
+          ),
+        );
+      return {
+        ok: true,
+        json: async () => ({
+          results: payload.items.map((item) => ({
+            id: item.id,
+            saved: { alreadySaved: false, status: 'new' },
+          })),
+          cancelled: false,
+        }),
+      };
+    }
+    if (url.endsWith('/directory-confirm?target=xiaohongshu')) return {ok:true,json:async()=>({directory:'synthetic-only',askEveryTime:true,pickToken:'synthetic-grant'})};
+    return {
+      ok: true,
+      json: async () =>
+        url.endsWith('/directory?target=xiaohongshu')
+          ? {
+              directory: 'synthetic-only',
+              askEveryTime: true,
+              cancelled: cancelledPicker,
+              pickToken: 'synthetic-grant',
+            }
+          : { directory: 'synthetic-only', askEveryTime: true },
+    };
+  };
+  let tree;
+  const all = (node) =>
+    node == null
+      ? []
+      : Array.isArray(node)
+        ? node.flatMap(all)
+        : typeof node === 'object'
+          ? [node, ...all(node.props?.children)]
+          : [node];
+  const render = () => {
+    index = 0;
+    tree = page();
+    effects.splice(0).forEach((effect) => effect());
+    return all(tree);
+  };
+  const find = (type, text) =>
+    render().find(
+      (n) =>
+        n.type === type &&
+        (n.props['aria-label'] === text ||
+          n.props.label === text ||
+          all(n.props.children)
+            .filter((child) => typeof child !== 'object')
+            .join('') === text),
+    );
+  const button = (text) => {
+    const node = find('Button', text);
+    assert.ok(node, `button ${text}`);
+    return node;
+  };
+  return {
+    calls,
+    recoveryQueries,
+    directoryCalls,
+    all,
+    creators,
+    items,
+    render,
+    find,
+    button,
+    async start(includeAll = false) {
+      render();
+      await tick();
+      render();
+      if (!includeAll) {
+        const matches = render().filter(
+          (node) =>
+            node.type === 'button' &&
+            typeof node.props['aria-pressed'] === 'boolean' &&
+            all(node.props.children).includes('合成作者'),
+        );
+        assert.equal(
+          matches.length,
+          1,
+          'one selectable creator named 合成作者',
+        );
+        assert.equal(typeof matches[0].props.onClick, 'function');
+        matches[0].props.onClick();
+        render();
+      }
+    },
+    async openZip() { await button('导出笔记').props.onPress(); find('select', '导出方式').props.onChange({target:{value:'zip'}}); render(); },
+    async startExport(twice=false) { const n=render().find(x=>x.type==='Button' && all(x.props.children).join('').startsWith('开始导出')); assert.ok(n, 'export confirmation button'); n.props.onPress(); if(twice)n.props.onPress(); for(let i=0;i<8;i++)await tick(); },
+    async openLocalExport(twice=false) { await button('导出笔记').props.onPress(); render(); await this.startExport(twice); await tick(); },
+    async confirmDirectory(accept=true) { await tick(); render(); if(accept)button('确认保存').props.onPress(); else {const footer=render().find(n=>n.type==='ModalFooter'&&all(n.props.children).some(x=>x?.type==='Button'&&all(x.props.children).join('')==='确认保存'));assert.ok(footer);const cancelExport=all(footer.props.children).find(x=>x?.type==='Button'&&all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();} },
+    dispose() {
+      slots.forEach((slot) => slot?.cleanup?.());
+      global.fetch = previousFetch;
+    },
+    settings(o) {
+      if ('cacheMode' in o) cacheMode = o.cacheMode;
+      if ('body' in o) bodyData = o.body;
+      if ('recentTasks' in o) recentItems = o.recentTasks;
+      if ('connection' in o) connectionData = o.connection;
+      if (o.kind) resolveKind = o.kind;
+      if ('existing' in o) existing = o.existing;
+      if ('expired' in o) expired = o.expired;
+      if ('cancelledPicker' in o) cancelledPicker = o.cancelledPicker;
+      if ('failStatus' in o) failStatus = o.failStatus;
+    },
+    setTask(value) {
+      taskStatus = value;
+    },
+    async resolve() {
+      await button('订阅').props.onPress();
+      find('Input', '笔记或博主主页链接').props.onValueChange(
+        'https://www.xiaohongshu.com/explore/synthetic',
+      );
+      await button('识别作者').props.onPress();
+      render();
+    },
+  };
+}
+
+test('note/profile resolution requires confirmation, preserves grouping, and refreshes only after successful new subscription', async () => {
+  for (const kind of ['note', 'profile']) {
+    const f = fixture();
+    try {
+      f.settings({ kind });
+      await f.start();
+      await f.resolve();
+      assert.deepEqual(
+        f.calls.map(([name]) => name),
+        ['resolveSubscription'],
+      );
+      f.find('select', '订阅文件夹').props.onChange({
+        target: { value: 'group-a' },
+      });
+      const confirm = f.button('确认订阅');
+      await Promise.all([confirm.props.onPress(), confirm.props.onPress()]);
+      assert.equal(f.calls.filter(([name]) => name === 'subscribe').length, 1);
+      assert.deepEqual(
+        f.calls.find(([name]) => name === 'subscribe'),
+        ['subscribe', { resolutionId: 'resolution-a', groupId: 'group-a' }],
+      );
+      assert.equal(f.calls.filter(([name]) => name === 'refreshFull').length, 0);
+      assert.equal(f.calls.filter(([name]) => name === 'refresh').length, 0);
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test('existing subscription feedback, changed input invalidation, and expired confirmation', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({ existing: 'creator-a' });
+    await f.resolve();
+    assert.ok(f.button('查看已订阅博主'));
+    f.find('Input', '笔记或博主主页链接').props.onValueChange('changed');
+    assert.ok(f.button('识别作者'));
+    f.settings({ expired: true, existing: null });
+    await f.resolve();
+    await f.button('确认订阅').props.onPress();
+    assert.equal(f.calls.filter(([n]) => n === 'subscribe').length, 0);
+    assert.ok(
+      f
+        .render()
+        .some((n) => typeof n === 'string' && n.includes('作者确认已过期')),
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('date and title filters reset selection; pending image notes selectable, uncached videos excluded; ZIP keeps cached video', async () => {
+  const f = fixture();
+  const oldDocument = global.document;
+  const oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    await f.start();
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.equal(f.find('Checkbox', '选择笔记 视频').props.isDisabled, false);
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
+      true,
+    );
+    await f.openZip();
+    await f.startExport();
+    assert.deepEqual(f.calls.find(([n]) => n === 'export')[1].noteIds, [
+      'saved',
+      'old',
+      'video',
+    ]);
+    f.find('ArticleDateFilter').props.onChange({
+      mode: 'day',
+      start: '2026-10-24',
+      end: '',
+    });
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
+      false,
+    );
+    assert.equal(f.find('Checkbox', '选择笔记 旧笔记'), undefined);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    await f.button('搜索笔记').props.onPress();
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('存档');
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      false,
+    );
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('正文关键词');
+    assert.ok(f.find('Checkbox', '选择笔记 苹果图文'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果存档'), undefined);
+    f.find('ArticleDateFilter').props.onChange({
+      mode: 'range',
+      start: '2026-10-25',
+      end: '2026-10-24',
+    });
+    assert.equal(f.find('Checkbox', '全选已加载').props.isDisabled, true);
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('cancelling the native directory picker retains settings and submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.settings({cancelledPicker:true});
+    await f.button('选择目录').props.onPress();
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory?')).length,1);
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport','refreshFull'].includes(name)).length,0);
+    assert(f.render().filter(x=>typeof x==='string').join(' ').includes('已取消目录选择'));
+  } finally { f.dispose(); }
+});
+
+test('cancelling the archived save confirmation submits no work', async () => {
+  const f=fixture();
+  try {
+    await f.start(); f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true); f.render();
+    const pending=f.button('保存已选归档到本地').props.onPress();
+    await f.confirmDirectory(false); await pending;
+    assert.equal(f.calls.filter(([name])=>['downloadNotes','cacheExport'].includes(name)).length,0);
+    assert.equal(f.directoryCalls.filter(url=>url.includes('/directory-confirm?')).length,0);
+  } finally { f.dispose(); }
+});
+
+test('export confirmation cancellation submits nothing; repeated export and cancel clicks start one operation', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    await f.button('导出笔记').props.onPress();
+    const footer=f.render().find(n=>n.type==='ModalFooter'&&f.all(n.props.children).some(x=>x?.type==='Button'&&f.all(x.props.children).join('').startsWith('开始导出')));
+    assert.ok(footer);const cancelExport=f.all(footer.props.children).find(x=>x?.type==='Button'&&f.all(x.props.children).join('')==='取消');assert.ok(cancelExport);cancelExport.props.onPress();
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+    await f.openLocalExport(true);
+    f.render();
+    await tick();
+    assert.deepEqual(f.calls.find(([n]) => n === 'downloadNotes')[1], {
+      creatorId: 'creator-a',
+      noteIds: ['pending'],
+      pickToken: 'synthetic-grant',
+    });
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 1);
+    const cancel = f.button('取消任务');
+    await Promise.all([cancel.props.onPress(), cancel.props.onPress()]);
+    await tick();
+    f.render();
+    assert.equal(f.calls.filter(([n]) => n === 'cancelTask').length, 1);
+    f.find('summary', '收起进度').props.onClick({ preventDefault() {} });
+    assert.ok(f.find('summary', '查看进度'));
+    assert.equal(f.button('更新本号').props.isDisabled, false);
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.render();
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果图文').props.isSelected,
+      true,
+      'terminal polling must not clear a new selection',
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('subscription and cache update never request a save directory', async () => {
+  const f=fixture();
+  try {
+    await f.start(); await f.resolve(); await f.button('确认订阅').props.onPress();
+    assert.equal(f.directoryCalls.length,0);
+    f.render(); await tick(); f.setTask(status('completed','list')); await tick(); f.render();
+    await f.button('更新本号').props.onPress();
+    assert.equal(f.calls.filter(([name])=>name==='refreshFull').length,1);
+    assert.equal(f.directoryCalls.length,0);
+  } finally { f.dispose(); }
+});
+
+test('list refresh has distinct progress; status outages never resubmit work; partial completion unlocks controls', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    const refresh = f.button('更新本号');
+    await Promise.all([refresh.props.onPress(), refresh.props.onPress()]);
+    f.settings({ failStatus: true });
+    f.render();
+    await tick();
+    assert.equal(f.calls.filter(([n]) => n === 'refreshFull').length, 1);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
+    f.settings({ failStatus: false });
+    f.setTask(status('partial', 'list'));
+    await tick();
+    assert.equal(f.button('更新本号').props.isDisabled, false);
+    assert.ok(
+      f
+        .render()
+        .some(
+          (n) => typeof n === 'string' && n.includes('部分完成'),
+        ),
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('management folders retain move/filter handlers and selections above 100 remain downloadable', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    await f.find('ManagementFolders').props.onMove(['creator-a'], 'group-a');
+    assert.deepEqual(
+      f.calls.find(([name]) => name === 'moveCreators'),
+      ['moveCreators', { ids: ['creator-a'], groupId: 'group-a' }],
+    );
+    f.find('ManagementFolders').props.onFilter('group-a');
+    assert.equal(f.find('ManagementFolders').props.filter, 'group-a');
+    f.find('ManagementFolders').props.onFilter('all');
+    for (let i = 0; i < 101; i++)
+      f.items.push({
+        id: `synthetic-${i}`,
+        title: `图文 ${i}`,
+        kind: 'image-text',
+        status: 'pending',
+        publishTime: 0,
+      });
+    await f.button('选择当前筛选全部').props.onPress();
+    await f.openLocalExport();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'downloadNotes').length,
+      1,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('poller abort prevents stale completion; all terminal states and counts remain visible', async () => {
+  const controller = new AbortController();
+  let finish;
+  const observed = [];
+  const watching = helpers.watchSubscriptionTask({
+    taskId: 'synthetic',
+    query: () =>
+      new Promise((r) => {
+        finish = r;
+      }),
+    signal: controller.signal,
+    onTask: (value) => observed.push(value),
+    onError: assert.fail,
+    interval: 1,
+  });
+  controller.abort();
+  finish(status('completed'));
+  await watching;
+  assert.deepEqual(observed, []);
+  for (const state of [
+    'completed',
+    'partial',
+    'blocked',
+    'cancelled',
+    'failed',
+  ])
+    assert.equal(helpers.taskFinished(status(state)), true);
+  assert.match(
+    helpers.taskText({ ...status('partial'), skipped: 1, failed: 1 }),
+    /跳过 1，失败 1，剩余 2/,
+  );
+});
+
+test('cross-page loaded selection preserves earlier IDs; filtered export includes unloaded matches and batches above 100', async () => {
+  const f = fixture();
+  const oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  const filenames = [];
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({
+      click() {
+        filenames.push(this.download);
+      },
+      remove() {},
+    }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    for (let i = 0; i < 205; i++)
+      f.items.push({
+        id: `batch-${String(i).padStart(3, '0')}`,
+        title: `批量 ${i}`,
+        kind: 'image-text',
+        status: 'complete',
+        publishTime: Date.parse('2026-10-24T00:00Z') / 1000,
+      });
+    f.items.push({
+      id: 'excluded-day',
+      title: '批量 日期外',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: Date.parse('2026-10-20T00:00Z') / 1000,
+    });
+    await f.start();
+    await f.button('搜索笔记').props.onPress();
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('批量');
+    f.find('ArticleDateFilter').props.onChange({
+      mode: 'day',
+      start: '2026-10-24',
+      end: '',
+    });
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
+    await f.button('加载更多').props.onPress();
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
+    f.find('Checkbox', '全选已加载').props.onValueChange(true);
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
+    assert.equal(f.find('Checkbox', '选择笔记 批量 204'), undefined);
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.startExport();
+    const exports = f.calls
+      .filter(([name]) => name === 'export')
+      .map(([, input]) => input);
+    assert.deepEqual(
+      exports.map((input) => input.noteIds.length),
+      [100, 100, 5],
+    );
+    assert.equal(new Set(exports.flatMap((input) => input.noteIds)).size, 205);
+    assert.ok(!exports.some((input) => input.noteIds.includes('excluded-day')));
+    assert.deepEqual(f.calls.find(([name]) => name === 'notesScope')[1], {
+      creatorId: 'creator-a',
+      search: '批量',
+      dateStart: '2026-10-24',
+      dateEnd: '2026-10-24',
+    });
+    assert.deepEqual(filenames, [
+      'synthetic-part-1-of-3.zip',
+      'synthetic-part-2-of-3.zip',
+      'synthetic-part-3-of-3.zip',
+    ]);
+    assert.equal(f.find('Checkbox', '选择笔记 批量 0').props.isSelected, true);
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('archive batches stop after cancellation or uncertain response and never replay; receipts validate counts', async () => {
+  const ids = Array.from({ length: 225 }, (_, i) => `id-${i}`);
+  const controller = new AbortController();
+  const sends = [],
+    saved = [];
+  const result = await helpers.exportArchiveBatches({
+    ids,
+    signal: controller.signal,
+    send: async (batch) => {
+      sends.push(batch);
+      return { notes: batch.length };
+    },
+    save: (receipt) => {
+      saved.push(receipt);
+      controller.abort();
+    },
+    onProgress() {},
+  });
+  assert.equal(result.cancelled, true);
+  assert.equal(result.completed, 100);
+  assert.equal(sends.length, 1);
+  assert.equal(saved.length, 1);
+  let attempts = 0;
+  await assert.rejects(
+    helpers.exportArchiveBatches({
+      ids,
+      signal: new AbortController().signal,
+      send: async () => {
+        attempts++;
+        throw Error('lost response');
+      },
+      save: assert.fail,
+      onProgress: assert.fail,
+    }),
+    /lost response/,
+  );
+  assert.equal(attempts, 1);
+  await assert.rejects(
+    helpers.exportArchiveBatches({
+      ids: ['one'],
+      signal: new AbortController().signal,
+      send: async () => ({ notes: 0 }),
+      save: assert.fail,
+      onProgress: assert.fail,
+    }),
+    /回执篇数/,
+  );
+});
+
+test('resuming waits for executor release, uses original task identity and newly returned task ID, and retains new selections', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    await f.openLocalExport();
+    f.render();
+    await tick();
+    f.setTask({ ...status('cancelled'), resumable: false });
+    await tick();
+    assert.equal(f.find('Button', '继续未完成任务'), undefined);
+    assert.equal(f.button('更新本号').props.isDisabled, true);
+    f.setTask({ ...status('cancelled'), resumable: true });
+    await tick();
+    const resume = f.button('继续未完成任务');
+    const resumes = Promise.all([resume.props.onPress(), resume.props.onPress()]);
+    await f.confirmDirectory();
+    await resumes;
+    assert.deepEqual(
+      f.calls.find(([name]) => name === 'resumeTask'),
+      ['resumeTask', { taskId: 'download-task', pickToken: 'synthetic-grant' }],
+    );
+    assert.equal(f.calls.filter(([name]) => name === 'resumeTask').length, 1);
+    f.render();
+    await tick();
+    assert.ok(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'resumed-task',
+      ),
+    );
+    f.setTask({ ...status('completed'), resumable: false });
+    await tick();
+    f.render();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('search clear and hidden-filter feedback match WeChat; Escape closes input without dropping filter', async () => {
+  const previousWindow = global.window;
+  const listeners = new Map();
+  global.window = {
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    removeEventListener: (name, callback) => {
+      if (listeners.get(name) === callback) listeners.delete(name);
+    },
+  };
+  const f = fixture();
+  try {
+    await f.start();
+    await f.button('搜索笔记').props.onPress();
+    const input = f.find('Input', '搜索笔记标题或正文');
+    assert.equal(input.props.autoFocus, true);
+    assert.equal(input.props.isClearable, true);
+    assert.equal(input.props.maxLength, 200);
+    assert.ok(f.render().some((node) => node.props?.id === 'xhs-search-panel'));
+    input.props.onValueChange('存档');
+    f.render();
+    listeners.get('keydown')({ key: 'Escape' });
+    assert.equal(f.find('Input', '搜索笔记标题或正文'), undefined);
+    const chip = f.find('Chip', '搜索：存档；清除关键词');
+    assert.ok(chip);
+    chip.props.onClose();
+    assert.equal(f.find('Chip', '搜索：存档；清除关键词'), undefined);
+    assert.ok(f.find('Checkbox', '选择笔记 苹果图文'));
+    await f.button('搜索笔记').props.onPress();
+    f.find('Input', '搜索笔记标题或正文').props.onValueChange('存档');
+    f.find('Input', '搜索笔记标题或正文').props.onClear();
+    assert.equal(f.find('Input', '搜索笔记标题或正文').props.value, '');
+  } finally {
+    f.dispose();
+    global.window = previousWindow;
+  }
+});
+
+test('comment entry and panel are absent while native original-link and count data remain', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    const nodes = f.render();
+    assert.equal(
+      nodes.some(
+        (n) =>
+          n.type === 'button' &&
+          String(n.props?.['aria-label'] || '').startsWith('查看互动与评论'),
+      ),
+      false,
+    );
+    assert.equal(
+      nodes.some((n) => n.type === 'Modal' && n.props.size === '4xl'),
+      false,
+    );
+    assert(
+      nodes.some(
+        (n) => n.type === 'XhsOriginalLink' && n.props.noteId === 'saved',
+      ),
+    );
+    assert.equal(
+      f.calls.filter(
+        ([name]) => name === 'bodyLookup' || name === 'engagementLookup',
+      ).length,
+      0,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('global/group queries preserve authors, exports dispatch by author and original links use the actual owner', async () => {
+  const queryVersion = 'a'.repeat(64);
+  const f = fixture({ queryVersion });
+  const oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    f.items.push({
+      id: 'author-b-note',
+      creatorId: 'creator-b',
+      creatorName: '第二作者',
+      groupId: 'group-a',
+      title: '分组正文',
+      kind: 'image-text',
+      status: 'complete',
+      publishTime: 1,
+    });
+    await f.start(true);
+    assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
+    await f.button('选择当前筛选全部').props.onPress();
+    await f.openZip();
+    await f.startExport();
+    const exports = f.calls.filter(([name]) => name === 'export');
+    assert.ok(exports.some(([, input]) => input.noteIds.includes('saved')));
+    assert.ok(exports.every(([, input]) => input.creatorId === undefined));
+    assert.ok(
+      exports.every(([, input]) => input.queryVersion === queryVersion),
+    );
+    assert.deepEqual(
+      exports.find(([, input]) => input.noteIds.includes('author-b-note'))[1]
+        .noteIds,
+      ['author-b-note'],
+    );
+    f.find('ManagementFolders').props.onFilter('group-a');
+    assert.ok(f.find('Checkbox', '选择笔记 分组正文'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文'), undefined);
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.startExport();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].queryVersion,
+      queryVersion,
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].groupId,
+      'group-a',
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'notesScope').at(-1)[1].groupId,
+      'group-a',
+    );
+    assert.equal(
+      f
+        .render()
+        .find(
+          (n) =>
+            n.type === 'XhsOriginalLink' && n.props.noteId === 'author-b-note',
+        ).props.creatorId,
+      'creator-b',
+    );
+    assert.equal(
+      f.calls.filter(([name]) => name === 'engagementLookup').length,
+      0,
+    );
+    f.find('ManagementFolders').props.onFilter('ungrouped');
+    assert.equal(f.find('Checkbox', '选择笔记 分组正文'), undefined);
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('mixed-author downloads run serially, stop queued authors on cancellation, and preserve the selected scope', async () => {
+  const f = fixture();
+  try {
+    f.items.push({
+      id: 'author-b-pending',
+      creatorId: 'creator-b',
+      creatorName: '第二作者',
+      groupId: null,
+      title: '第二图文',
+      kind: 'image-text',
+      status: 'pending',
+      publishTime: 1,
+    });
+    f.items.push({
+      id: 'author-c-pending',
+      creatorId: 'creator-c',
+      creatorName: '第三作者',
+      groupId: null,
+      title: '第三图文',
+      kind: 'image-text',
+      status: 'pending',
+      publishTime: 1,
+    });
+    await f.start(true);
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    f.find('Checkbox', '选择笔记 第二图文').props.onValueChange(true);
+    f.find('Checkbox', '选择笔记 第三图文').props.onValueChange(true);
+    await f.openLocalExport();
+    f.render();
+    await tick();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'downloadNotes').length,
+      1,
+    );
+    f.setTask(status('completed'));
+    await tick();
+    f.render();
+    await tick();
+    const downloads = f.calls.filter(([name]) => name === 'downloadNotes');
+    assert.equal(downloads.length, 2);
+    assert.deepEqual(downloads[1][1].noteIds, ['author-b-pending']);
+    assert.equal(downloads[1][1].creatorId, 'creator-b');
+    await f.button('取消任务').props.onPress();
+    await tick();
+    f.render();
+    assert.equal(f.find('Checkbox', '选择笔记 苹果图文').props.isSelected, true);
+    assert.equal(
+      f.calls.filter(([name]) => name === 'downloadNotes').length,
+      2,
+      'cancel must not submit the queued third author',
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('an exited unknown task unlocks review entry but a settling writer keeps it locked', async () => {
+  for (const settling of [false,true]) {
+    const task={...status('blocked'),taskId:'synthetic-unknown',creatorId:'creator-a',resumable:false,settling,code:'XHS_DETAIL_OUTCOME_UNKNOWN'};
+    const f=fixture({recentTasks:[task],taskStatus:task});
+    try {
+      await f.start(true); await tick();
+      f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
+      assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
+      assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
+    } finally { f.dispose(); }
+  }
+});
+test('completed and uncertain tasks keep the session entry locked while their writer settles', async () => {
+  for (const state of [{state:'completed'},{state:'blocked',code:'XHS_TASK_RECEIPT_UNCERTAIN'}]) {
+    for (const settling of [true,false]) {
+      const task={...status(state.state),...state,taskId:'synthetic-terminal',creatorId:'creator-a',resumable:false,settling};
+      const f=fixture({recentTasks:[task],taskStatus:task});
+      try {
+        await f.start(true);await tick();
+        f.settings({connection:{liveEnabled:true,connected:false,stored:true,verified:false}});
+        assert.equal(f.button('\u6062\u590d\u672c\u673a\u4f1a\u8bdd').props.isDisabled,settling);
+        assert.equal(f.calls.some(([name])=>name==='resumeTask'),false);
+      } finally {f.dispose();}
+    }
+  }
+});
+test('connection controls stay default-off, never request secrets or connect automatically, and restore/disconnect only when pressed', async () => {
+  const f = fixture();
+  try {
+    await f.start(true);
+    assert.equal(f.button('恢复本机会话').props.isDisabled, true);
+    assert.equal(f.button('断开本机会话').props.isDisabled, true);
+    assert.equal(
+      f.calls.some(([name]) => /Session/.test(name)),
+      false,
+    );
+    assert.equal(
+      f
+        .render()
+        .some(
+          (n) =>
+            n.type === 'Input' &&
+            /a1|webSession|cookie/i.test(
+              n.props.label || n.props['aria-label'] || '',
+            ),
+        ),
+      false,
+    );
+    f.settings({
+      connection: {
+        liveEnabled: true,
+        connected: false,
+        stored: true,
+        verified: false,
+      },
+    });
+    const restore = f.button('恢复本机会话');
+    await Promise.all([restore.props.onPress(), restore.props.onPress()]);
+    assert.equal(
+      f.calls.filter(([name]) => name === 'restoreSession').length,
+      1,
+    );
+    await f.button('断开本机会话').props.onPress();
+    assert.equal(
+      f.calls.filter(([name]) => name === 'disconnectSession').length,
+      1,
+    );
+    assert.ok(f.find('Checkbox', '选择笔记 苹果存档'));
+    f.calls.length = 0;
+    f.button('重新读取连接状态').props.onPress();
+    await tick();
+    assert.ok(f.calls.some(([name]) => name === 'connectionStatus'));
+    assert.ok(
+      f.calls.some(
+        ([name, target]) => name === 'invalidate' && target === 'capability',
+      ),
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('moving group membership invalidates cached note scope and clears stale selection', async () => {
+  const f = fixture();
+  try {
+    await f.start(true);
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+    f.calls.length = 0;
+    await f.find('ManagementFolders').props.onMove(['creator-a'], 'group-a');
+    assert.ok(
+      f.calls.some(
+        ([name, target]) => name === 'invalidate' && target === 'notes',
+      ),
+    );
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('recent task history starts collapsed on each entry and only explicit disclosure opens it', async () => {
+  for (let entry = 0; entry < 2; entry++) {
+    const f = fixture({
+      recentTasks: [
+        {
+          ...status('completed'),
+          taskId: 'history-only',
+          creatorId: 'creator-a',
+          resumable: false,
+        },
+      ],
+    });
+    try {
+      await f.start(true);
+      await tick();
+      const region = f
+        .render()
+        .find(
+          (node) =>
+            node.type === 'section' &&
+            node.props['aria-label'] === '最近笔记任务',
+        );
+      assert.ok(region);
+      assert.equal(region.props.children.at(-1).props.open, false);
+      f.find('summary', '查看最近任务').props.onClick({ preventDefault() {} });
+      assert.ok(f.find('summary', '收起最近任务'));
+      assert.equal(
+        f.calls.some(([name]) =>
+          ['resumeTask', 'refresh', 'downloadNotes'].includes(name),
+        ),
+        false,
+      );
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test('fresh page discovers and monitors an existing task using local reads only; cancel/reentry offers explicit resume', async () => {
+  const active = {
+    ...status('running', 'list'),
+    taskId: 'persisted-task',
+    creatorId: 'creator-a',
+  };
+  const first = fixture({ recentTasks: [active], taskStatus: active });
+  try {
+    await first.start(true);
+    await tick();
+    first.render();
+    assert.deepEqual(first.recoveryQueries[0], { limit: 10 });
+    assert.ok(
+      first.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'persisted-task',
+      ),
+    );
+    assert.equal(
+      first.calls.some(([name]) =>
+        [
+          'resumeTask',
+          'refresh',
+          'downloadNotes',
+          'subscribe',
+          'restoreSession',
+        ].includes(name),
+      ),
+      false,
+    );
+    await first.button('取消任务').props.onPress();
+    await tick();
+    first.render();
+  } finally {
+    first.dispose();
+  }
+  const cancelled = { ...active, state: 'cancelled', resumable: true };
+  const second = fixture({ recentTasks: [cancelled], taskStatus: cancelled });
+  try {
+    await second.start(true);
+    assert.ok(second.button('继续未完成任务'));
+    assert.equal(
+      second.calls.some(([name]) =>
+        ['resumeTask', 'refresh', 'downloadNotes'].includes(name),
+      ),
+      false,
+    );
+    await second.button('继续未完成任务').props.onPress();
+    second.render();
+    await tick();
+    assert.equal(
+      second.calls.find(([name]) => name === 'resumeTask')[1].taskId,
+      'persisted-task',
+    );
+    assert.ok(
+      second.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'resumed-task',
+      ),
+    );
+  } finally {
+    second.dispose();
+  }
+});
+
+test('uncertain receipt and consumed old task never enable unsafe resume or endless settling polls', async () => {
+  const old = {
+    ...status('cancelled'),
+    taskId: 'consumed',
+    creatorId: 'creator-a',
+    resumable: true,
+    supersededByTaskId: 'child',
+  };
+  const child = {
+    ...status('running'),
+    taskId: 'child',
+    creatorId: 'creator-a',
+    resumedFromTaskId: 'consumed',
+  };
+  const f = fixture({ recentTasks: [old, child], taskStatus: child });
+  try {
+    await f.start(true);
+    await tick();
+    f.render();
+    assert.ok(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'child',
+      ),
+    );
+    assert.equal(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'consumed',
+      ),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+  const uncertain = {
+    ...status('failed'),
+    taskId: 'uncertain',
+    creatorId: 'creator-a',
+    resumable: false,
+    code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+  };
+  const g = fixture({ recentTasks: [uncertain], taskStatus: uncertain });
+  try {
+    await g.start(true);
+    await g.button('查看未完成任务').props.onPress();
+    g.render();
+    await tick();
+    assert.equal(g.find('Button', '继续未完成任务'), undefined);
+    assert.equal(
+      g.calls.some(([name]) => name === 'task' || name === 'resumeTask'),
+      false,
+    );
+    assert.ok(
+      g
+        .render()
+        .some(
+          (n) => typeof n === 'string' && n.includes('不能直接续跑或自动重发'),
+        ),
+    );
+  } finally {
+    g.dispose();
+  }
+});
+
+test('late discovery does not replace a newly started task or clear selections after terminal state', async () => {
+  let release;
+  const gate = new Promise((resolve) => (release = resolve));
+  const previous = {
+    ...status('running'),
+    taskId: 'late-old',
+    creatorId: 'creator-a',
+  };
+  const f = fixture({ recentTasks: [previous], discoveryGate: gate });
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果图文').props.onValueChange(true);
+    await f.openLocalExport();
+    f.render();
+    release();
+    await tick();
+    f.render();
+    assert.equal(
+      f.calls.some(
+        ([name, input]) => name === 'task' && input.taskId === 'late-old',
+      ),
+      false,
+    );
+    f.setTask({ ...status('completed'), resumable: false });
+    await tick();
+    f.render();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    await tick();
+    assert.equal(
+      f.find('Checkbox', '选择笔记 苹果存档').props.isSelected,
+      true,
+    );
+  } finally {
+    release();
+    f.dispose();
+  }
+});
+
+test('uncertain resume receipt immediately removes stale continue action and only rereads local history', async () => {
+  const previous = {
+    ...status('cancelled'),
+    taskId: 'old-resume',
+    creatorId: 'creator-a',
+    resumable: true,
+  };
+  const f = fixture({
+    recentTasks: [previous],
+    taskStatus: previous,
+    resumeError: 'XHS_TASK_RECEIPT_UNCERTAIN',
+  });
+  try {
+    await f.start(true);
+    f.settings({
+      recentTasks: [
+        {
+          ...previous,
+          state: 'blocked',
+          resumable: false,
+          code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+        },
+      ],
+    });
+    const resumePending = f.button('继续未完成任务').props.onPress();
+    await f.confirmDirectory();
+    await resumePending;
+    await tick();
+    f.render();
+    assert.equal(f.find('Button', '继续未完成任务'), undefined);
+    assert.equal(f.calls.filter(([name]) => name === 'resumeTask').length, 1);
+    assert.ok(f.recoveryQueries.length >= 2);
+    assert.equal(
+      f.calls.some(([name]) => name === 'refresh' || name === 'downloadNotes'),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test('disabled source displays recorded risk and unrecorded history remains unknown', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    assert.ok(
+      f.find(
+        'p',
+        '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。',
+      ),
+    );
+    f.settings({
+      connection: {
+        liveEnabled: false,
+        connected: false,
+        riskCode: 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+      },
+    });
+    assert.ok(
+      f.find(
+        'p',
+        '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。',
+      ),
+    );
+    assert.equal(f.calls.filter(([name]) => /Session/.test(name)).length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('combined filters preserve exact refreshed export ids and leave all export unfiltered', async () => {
+  const f = fixture({ queryVersion: 'a'.repeat(64) }),
+    oldDocument = global.document,
+    oldCreate = URL.createObjectURL,
+    oldRevoke = URL.revokeObjectURL;
+  global.document = {
+    body: { appendChild() {} },
+    createElement: () => ({ click() {}, remove() {} }),
+  };
+  URL.createObjectURL = () => 'blob:synthetic';
+  URL.revokeObjectURL = () => {};
+  try {
+    f.items.forEach(
+      (row, i) => (row.metrics = { values: { likes: i * 10, collects: i } }),
+    );
+    await f.start(true);
+    const combo = f.render().find((n) => n.type === 'XhsCombinedFilter');
+    combo.props.onChange({
+      mode: 'and',
+      conditions: [
+        { id: 1, metric: 'likes', operator: '>=', value: '20', upper: '' },
+        { id: 2, metric: 'collects', operator: '<=', value: '2', upper: '' },
+      ],
+    });
+    assert(f.find('Checkbox', '选择笔记 旧笔记'));
+    assert.equal(f.find('Checkbox', '选择笔记 苹果存档'), undefined);
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'filtered')
+      .props.onChange();
+    await f.startExport();
+    assert.deepEqual(
+      f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds,
+      ['old'],
+    );
+    await f.openZip();
+    f.render()
+      .find((n) => n.type === 'input' && n.props.value === 'all')
+      .props.onChange();
+    await f.startExport();
+    const ids = f.calls.filter(([name]) => name === 'export').at(-1)[1].noteIds;
+    assert(
+      ids.includes('saved') && ids.includes('old') && ids.includes('video'),
+    );
+  } finally {
+    f.dispose();
+    global.document = oldDocument;
+    URL.createObjectURL = oldCreate;
+    URL.revokeObjectURL = oldRevoke;
+  }
+});
+
+test('archived-only action freezes one cache scope and never calls source-capable downloadNotes', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    assert.deepEqual(f.calls.find(([n]) => n === 'cacheExport')[1], {
+      items: [{ id: 'saved', creatorId: 'creator-a' }],
+      pickToken: 'synthetic-grant',
+    });
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+test('a lost cache-only receipt is not replayed or routed to a source download', async () => {
+  const f = fixture();
+  try {
+    await f.start();
+    f.settings({ cacheMode: 'lost' });
+    f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+    f.render();
+    const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+    assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+    assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test('cache-only stop aborts its single scope request; malformed receipts cannot fall back to source work', async () => {
+  for (const mode of ['bad', 'pending']) {
+    const f = fixture();
+    try {
+      await f.start();
+      f.settings({ cacheMode: mode });
+      f.find('Checkbox', '选择笔记 苹果存档').props.onValueChange(true);
+      f.render();
+      const pending = f.button('保存已选归档到本地').props.onPress();
+      await f.confirmDirectory();
+      if (mode === 'pending') {
+        await tick();
+        f.render();
+        await f.button('停止后续缓存保存').props.onPress();
+      }
+      await pending;
+      assert.equal(f.calls.filter(([n]) => n === 'cacheExport').length, 1);
+      assert.equal(f.calls.filter(([n]) => n === 'downloadNotes').length, 0);
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test('AUDIT: malformed saved status and cancellation type cannot claim cache completion',async()=>{
+ for(const mode of ['audit-status','audit-cancel']){
+  const f=fixture();try{await f.start();f.settings({cacheMode:mode});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+   const visible=f.render().filter(n=>typeof n==='string').join(' ');
+   assert.match(visible,/回执未确认|回执不完整/);assert.equal(f.calls.filter(([n])=>n==='cacheExport').length,1);
+  }finally{f.dispose()}
+ }
+});
+test('AUDIT: failed cache receipt displays a user explanation without backend codes',async()=>{
+ const f=fixture();try{await f.start();f.settings({cacheMode:'audit-code'});f.find('Checkbox','选择笔记 苹果存档').props.onValueChange(true);f.render();const savePending = f.button('保存已选归档到本地').props.onPress(); await f.confirmDirectory(); await savePending;
+  const visible=f.render().filter(n=>typeof n==='string').join(' ');assert.doesNotMatch(visible,/XHS_CACHED_SAVE_FAILED/);assert.match(visible,/失败 1/);
+ }finally{f.dispose()}
+});
+
+
+test('xhs folder reorder sends confirmed order, keeps membership, and leaves cache unchanged on failure',async()=>{
+ const groups=[{id:'a',name:'A',order:0},{id:'b',name:'B',order:1},{id:'c',name:'C',order:2}];
+ const f=fixture({groups});try { await f.start();
+   await f.find('ManagementFolders').props.onReorder(['c','a','b'],['a','b','c']);
+   assert.deepEqual(f.calls.find(([name])=>name==='reorderGroups'),['reorderGroups',{ids:['c','a','b'],expectedIds:['a','b','c']}]);
+   assert.deepEqual(f.find('ManagementFolders').props.folders.map(x=>x.id),['c','a','b']);
+   assert.equal(f.calls.filter(([name])=>name==='moveCreators').length,0);
+ } finally {f.dispose();}
+ const bad=fixture({groups,reorderError:true});try {await bad.start();
+   await assert.rejects(bad.find('ManagementFolders').props.onReorder(['b','a','c'],['a','b','c']),/synthetic reorder failed/);
+   assert.deepEqual(bad.find('ManagementFolders').props.folders.map(x=>x.id),['a','b','c']);
+ } finally {bad.dispose();}
+});
+
+
+test('folder member picker receives unfiltered creators and confirmed move releases without waiting for invalidation',async()=>{
+ const f=fixture({stallInvalidation:true});try {await f.start(); const folders=f.find('ManagementFolders');
+ assert.deepEqual(folders.props.members.map(x=>x.id),['creator-a']);
+ let done=false;void folders.props.onMove(['creator-a'],'group-a').then(()=>done=true);await tick();
+ assert.equal(done,true);assert.deepEqual(f.calls.find(([n])=>n==='moveCreators'),['moveCreators',{ids:['creator-a'],groupId:'group-a'}]);
+ assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
+ }finally{f.dispose()}
+});
+
+
+test('failed refresh after a confirmed creator move warns without undoing membership',async()=>{
+ const f=fixture({failInvalidation:true});try {await f.start();await f.find('ManagementFolders').props.onMove(['creator-a'],'group-a');await tick();
+ assert.equal(f.find('ManagementFolders').props.members[0].groupId,'group-a');
+ assert.match(f.calls.find(([name])=>name==='warning')[1],/分类已保存，列表刷新失败/);
+ }finally{f.dispose()}
+});
+
+
+test('selected note media action opens existing diagnostics with exact selection',async()=>{
+ const f=fixture();try{await f.start();f.find('Checkbox','选择笔记 苹果图文').props.onValueChange(true);f.render();
+ assert.deepEqual(f.find('XhsWholeCreator').props.selectedNoteIds,['pending']);
+ assert.ok(f.button('补所选图片'));assert.equal(f.calls.some(([name])=>/Media/.test(name)),false);
+ }finally{f.dispose()}
+});
+
+
+test('saved comments entry opens only a local view of the selected note', async()=>{const f=fixture();try{await f.start();const button=f.render().find(n=>n.type==='button'&&n.props.children==='查看评论');assert.ok(button);button.props.onClick();const view=f.find('XhsSavedComments');assert.equal(view.props.creatorId,'creator-a');assert.ok(view.props.noteId);assert.equal(f.calls.some(([name])=>name==='collectComments'),false)}finally{f.dispose()}});

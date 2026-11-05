@@ -1,0 +1,43 @@
+name: Frontend interaction regressions
+
+on:
+  push:
+    branches: [codex/frontend-export-receipt-folder-20261019]
+  pull_request:
+    branches: [main, codex/reading-first-response-20261018]
+    paths:
+      - 'apps/web/**'
+      - 'scripts/*ui.test.cjs'
+      - 'scripts/folder-*.test.cjs'
+      - 'scripts/feed-export-date-ui.test.cjs'
+      - '.github/workflows/frontend-interactions-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  frontend-synthetic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Frontend build and focused lint
+        run: |
+          pnpm --filter web build
+          pnpm --filter web exec eslint src/components/ManagementFolders.tsx src/components/FolderMemberPicker.tsx src/pages/feeds/index.tsx src/pages/feeds/list.tsx src/pages/feeds/cache-sync-status.tsx --max-warnings 0
+      - name: Offline interaction and production contract tests
+        run: node --test scripts/folder-member-picker.test.cjs scripts/feed-export-date-ui.test.cjs scripts/feed-refresh-state-ui.test.cjs scripts/feed-reading-ui.test.cjs scripts/subscription-tasks-ui.test.cjs scripts/export-article-batches.test.cjs scripts/cache-sync-status-ui.test.cjs scripts/deployed-export-adaptation.test.cjs
+      - name: Synthetic browser path
+        env:
+          LAYOUT_TEST_BROWSER: /usr/bin/google-chrome
+        run: |
+          test -x "$LAYOUT_TEST_BROWSER"
+          node --test scripts/folder-subscriptions-browser.test.cjs

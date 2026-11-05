@@ -1,20 +1,28 @@
+import { Modal, Tooltip } from '@web/components/AppOverlays';
+import {
+  ContentExportScope,
+  SubscriptionSearch,
+  SubscriptionMore,
+  SubscriptionToolbar,
+  SubscriptionDialog,
+} from '@web/components/SubscriptionPrimitives';
+import ArticleExportGuidance from '@web/components/ArticleExportGuidance';
+import OperationNotice, {
+  FailureNotice,
+} from '@web/components/OperationNotice';
+import { exportArticleBatches } from '@web/utils/export-article-batches';
 import {
   Button,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
   ModalHeader,
   Switch,
   Textarea,
-  Tooltip,
   useDisclosure,
   Checkbox,
   Input,
   Chip,
-  Popover,
-  PopoverTrigger,
-  PopoverContent,
 } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import { refreshFeedViews } from '@web/utils/refresh-feed-view';
@@ -51,7 +59,7 @@ const Feeds = () => {
 
   const { isOpen, onOpen, onClose } = useDisclosure();
   const folders = trpc.feed.groups.useQuery(undefined, { retry: false });
-  const saveFolder = trpc.feed.saveGroup.useMutation();
+  const saveFolder = trpc.feed.saveGroup.useMutation({ retry: false });
   const removeFolder = trpc.feed.removeGroup.useMutation();
   const moveFeeds = trpc.feed.moveFeeds.useMutation();
   const reorderFolders = trpc.feed.reorderGroups.useMutation({ retry: false });
@@ -221,7 +229,7 @@ const Feeds = () => {
             ),
           )
         ) {
-          toast.warning('缓存已同步，部分正文或图片仍待核');
+          toast.warning('文章已同步，部分正文或图片尚未确认完整');
         }
         try {
           await refreshSavedSubscriptions(false);
@@ -231,9 +239,10 @@ const Feeds = () => {
       }
     },
   });
-  const manualBatch = manualBatches.data?.items.find((batch) =>
-    ['queued', 'running', 'paused'].includes(batch.state),
-  );
+  const manualBatch =
+    manualBatches.data?.items.find((batch) =>
+      ['queued', 'running', 'paused'].includes(batch.state),
+    ) ?? manualBatches.data?.items[0];
   const {
     mutateAsync: getHistoryArticles,
     isLoading: isGetHistoryArticlesLoading,
@@ -282,11 +291,11 @@ const Feeds = () => {
   const handleRepairConfirm = async () => {
     if (addingSubscriptions.current || !repairTarget) return;
     if (!defaultAddCapability?.existingRepairAvailable) {
-      toast.error('当前来源修复不可用，未发目录请求。');
+      toast.error('当前无法修复来源，请先检查服务状态。');
       return;
     }
     if (!addAccountId) {
-      toast.error('请先选择正常Web登录账号');
+      toast.error('请先选择已登录且可用的账号');
       return;
     }
     const target = repairTarget;
@@ -317,9 +326,22 @@ const Feeds = () => {
         .join('；');
       setRepairMessages([details]);
       if (result.accepted && !result.pending && result.feed?.id === target.id) {
-        toast.success('本号来源已修复', { description: details });
+        toast.success('本号来源已修复', {
+          description: (
+            <OperationNotice message="查看来源修复结果">
+              {details}
+            </OperationNotice>
+          ),
+        });
         setRepairTarget(null);
-      } else toast.warning('本号来源修复未完成', { description: details });
+      } else
+        toast.warning('本号来源修复未完成', {
+          description: (
+            <OperationNotice message="查看来源修复结果">
+              {details}
+            </OperationNotice>
+          ),
+        });
     } catch (error) {
       if (!cancelSubscriptions.current) {
         const message =
@@ -327,7 +349,14 @@ const Feeds = () => {
             ? error.message
             : '来源修复未完成，旧数据保留。';
         setRepairMessages([message]);
-        toast.error('来源修复未完成', { description: message });
+        toast.error('来源修复未完成', {
+          description: (
+            <FailureNotice
+              error={message}
+              fallback="来源修复未完成，已有内容保留。"
+            />
+          ),
+        });
       }
     } finally {
       addingSubscriptions.current = false;
@@ -439,16 +468,51 @@ const Feeds = () => {
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const batchExporting = useRef(false);
   const exportCancelled = useRef(false);
+  const exportController = useRef<AbortController | null>(null);
   const [exportResult, setExportResult] = useState('');
+  const [exportOpen, setExportOpen] = useState(false);
+  const [exportScope, setExportScope] = useState<
+    'selected' | 'filtered' | 'all'
+  >('filtered');
+  const [exportFormat, setExportFormat] = useState<'obsidian' | 'zip'>(
+    'obsidian',
+  );
+  const filteredExportSummary = trpc.article.summary.useQuery(
+    {
+      ...articleDateFilter,
+      group: folderFilter,
+      mpId: id || '',
+      search: search || undefined,
+    },
+    {
+      enabled: exportOpen && !dateError,
+      retry: false,
+      refetchOnWindowFocus: false,
+    },
+  );
+  const allExportSummary = trpc.article.summary.useQuery(
+    { mpId: id || '' },
+    { enabled: exportOpen, retry: false, refetchOnWindowFocus: false },
+  );
+  const exportSummary =
+    exportScope === 'all' ? allExportSummary : filteredExportSummary;
+  const exportCount =
+    exportScope === 'selected'
+      ? articleSelectedIds.size
+      : exportSummary.data?.articles;
+  const zipAvailable = Boolean(id) && exportScope !== 'selected';
   useEffect(
     () => () => {
       exportCancelled.current = true;
+      exportController.current?.abort();
     },
     [],
   );
   useEffect(() => {
     exportCancelled.current = true;
+    exportController.current?.abort();
     setArticleSelectedIds(new Set());
+    setExportOpen(false);
   }, [
     id,
     search,
@@ -469,54 +533,87 @@ const Feeds = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isSearchOpen]);
 
-  const handleBatchExport = async (wholeScope = false) => {
+  const handleBatchExport = async (wholeScope = false, allArticles = false) => {
     if (
       batchExporting.current ||
       (!wholeScope && articleSelectedIds.size === 0) ||
-      dateError
+      (!allArticles && dateError)
     )
       return;
     batchExporting.current = true;
     exportCancelled.current = false;
+    const controller = new AbortController();
+    exportController.current = controller;
     setIsBatchExporting(true);
     setExportResult(wholeScope ? '正在确定导出范围…' : '正在准备导出…');
     const batchSelection = articleSelectedIds;
     const counts = { new: 0, skipped: 0, repaired: 0, failed: 0 };
     const exportNotices = new Set<string>();
     let ids = Array.from(articleSelectedIds);
+    let exportStarted = false;
     try {
       if (wholeScope)
-        ids = await queryUtils.client.article.exportIds.query({
-          ...articleDateFilter,
-          group: folderFilter,
-          mpId: id || '',
-          search: search || undefined,
-        });
+        ids = await queryUtils.client.article.exportIds.query(
+          allArticles
+            ? { mpId: id || '' }
+            : {
+                ...articleDateFilter,
+                group: folderFilter,
+                mpId: id || '',
+                search: search || undefined,
+              },
+        );
       ids = Array.from(new Set(ids));
-      for (const articleId of ids) {
-        if (exportCancelled.current) break;
-        try {
-          const result =
-            await queryUtils.client.article.saveToObsidian.mutate(articleId);
-          if (result.datePendingReason)
-            exportNotices.add(`日期待核（${result.datePendingReason}）`);
-          if (result.legacyLayoutRetained)
-            exportNotices.add('保留原有位置及编辑');
-          if (result.mediaComplete === false)
-            exportNotices.add('部分图片尚未保存，正文可能已保存；可稍后重试');
-          const status =
-            result.mediaComplete === false
-              ? 'failed'
-              : (result.status ?? (result.alreadySaved ? 'skipped' : 'new'));
-          counts[status]++;
-        } catch (error) {
-          counts.failed++;
-          exportNotices.add(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
+      setExportResult(`正在导出 ${ids.length} 篇`);
+      const recordSaved: Parameters<typeof exportArticleBatches>[2] = (
+        result,
+      ) => {
+        if (result.datePendingReason)
+          exportNotices.add(`日期待核（${result.datePendingReason}）`);
+        if (result.legacyLayoutRetained)
+          exportNotices.add('保留原有位置及编辑');
+        if (result.mediaComplete === false)
+          exportNotices.add('部分图片尚未保存，正文可能已保存；可稍后重试');
+        const status =
+          result.mediaComplete === false
+            ? 'failed'
+            : (result.status ?? (result.alreadySaved ? 'skipped' : 'new'));
+        counts[status]++;
         setExportResult(
           `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
+        );
+      };
+      exportStarted = true;
+      const receipt = await exportArticleBatches(
+        ids,
+        (batch, signal) =>
+          queryUtils.client.article.saveToObsidianBatch.mutate(
+            { ids: batch },
+            { signal },
+          ),
+        recordSaved,
+        {
+          signal: controller.signal,
+          cancelled: () => exportCancelled.current,
+          onFailed: (_error, saved, articleId) => {
+            if (saved)
+              recordSaved({ ...saved, mediaComplete: false }, articleId);
+            else {
+              counts.failed++;
+              exportNotices.add(
+                '部分文章保存失败，请重新导出重试；已有文件会校验后跳过。',
+              );
+              setExportResult(
+                `新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`,
+              );
+            }
+          },
+        },
+      );
+      if (receipt.unconfirmed) {
+        exportCancelled.current = true;
+        exportNotices.add(
+          '部分导出结果尚未确认，已停止后续导出。请先检查保存目录；已有文件会保留，不会自动重试。',
         );
       }
       const message = `${exportCancelled.current ? '已停止后续导出：' : ''}新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
@@ -532,12 +629,22 @@ const Feeds = () => {
         setArticleSelectedIds((current) =>
           current === batchSelection ? new Set() : current,
         );
-    } catch (error) {
-      setExportResult('未能取得完整导出范围，请重试');
-      toast.error('未能取得完整导出范围', {
-        description: error instanceof Error ? error.message : String(error),
-      });
+    } catch {
+      if (exportStarted) {
+        const message = `导出中断，已停止：新增 ${counts.new} · 跳过 ${counts.skipped} · 补齐 ${counts.repaired} · 失败 ${counts.failed}`;
+        setExportResult(message);
+        toast.warning(message, {
+          description: '部分结果尚未确认，请先检查保存目录；不会自动重试。',
+        });
+      } else {
+        setExportResult('未能取得完整导出范围，请重试');
+        toast.error('未能取得完整导出范围', {
+          description:
+            '请缩小范围或稍后重试；单次最多导出 5000 篇，已有文件会保留。',
+        });
+      }
     } finally {
+      exportController.current = null;
       batchExporting.current = false;
       setIsBatchExporting(false);
     }
@@ -677,7 +784,7 @@ const Feeds = () => {
       toast.error('暂不能新增订阅', {
         description: addCapabilityError
           ? '暂时无法检查订阅服务，请稍后刷新页面；链接已保留。'
-          : 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录；链接已保留。',
+          : '订阅服务暂不可用，请先检查服务设置和账号登录；链接已保留。',
       });
       return;
     }
@@ -882,7 +989,7 @@ const Feeds = () => {
             ? '部分内容已保存'
             : currentUpdate
               ? '已读取当前内容'
-              : '阅读本地存量';
+              : '查看已存目录';
 
   const handleExportOpml = async (ev) => {
     ev.preventDefault();
@@ -919,19 +1026,32 @@ const Feeds = () => {
   return (
     <>
       <div className="feed-workspace">
-        <div className="flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 md:hidden dark:border-neutral-700">
+        <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
           <label className="min-w-0 flex-1 text-xs text-neutral-500">
             当前公众号
             <select
               aria-label="手机选择公众号"
               className="bg-background mt-1 w-full min-w-0 rounded border p-2 text-sm"
               value={currentMpId}
-              disabled={folderBusy}
               onChange={(event) => {
-                if (folderOperation.current) return;
                 const selected = event.target.value;
                 setCurrentMpId(selected);
-                navigate(selected ? `/feeds/${selected}` : '/feeds');
+                const selectedFeed = orderedFeeds.find(
+                  (feed) => feed.id === selected,
+                );
+                const visibleInFolder =
+                  folderFilter === 'all' ||
+                  (folderFilter === 'ungrouped'
+                    ? !selectedFeed?.groupId
+                    : selectedFeed?.groupId === folderFilter);
+                navigate(selected ? `/feeds/${selected}` : '/feeds', {
+                  state: selected
+                    ? {
+                        feedId: selected,
+                        feedFolder: visibleInFolder ? folderFilter : 'all',
+                      }
+                    : undefined,
+                });
                 setMobileSidebarOpen(false);
               }}
             >
@@ -946,16 +1066,24 @@ const Feeds = () => {
           <Button
             size="sm"
             variant="flat"
-            isDisabled={folderBusy}
             aria-expanded={mobileSidebarOpen}
             aria-controls="wechat-management-sidebar"
             onPress={() => {
-              if (!folderOperation.current)
-                setMobileSidebarOpen(!mobileSidebarOpen);
+              setMobileSidebarOpen(!mobileSidebarOpen);
             }}
           >
-            {mobileSidebarOpen ? '收起管理' : '管理公众号'}
+            {mobileSidebarOpen ? '收起管理' : '管理与分组'}
           </Button>
+          {folderFilter !== 'all' && (
+            <span className="feed-active-group text-xs" role="status">
+              分组：
+              {folderFilter === 'ungrouped'
+                ? '未分组'
+                : folders.data?.items.find(
+                    (folder) => folder.id === folderFilter,
+                  )?.name}
+            </span>
+          )}
         </div>
         <div
           id="wechat-management-sidebar"
@@ -1078,6 +1206,11 @@ const Feeds = () => {
 
           <ManagementFolders
             folders={folders.data?.items || []}
+            members={orderedFeeds.map((feed) => ({
+              id: feed.id,
+              name: feed.mpName || '公众号信息待补全',
+              groupId: feed.groupId,
+            }))}
             filter={folderFilter}
             selectedIds={isManageMode ? selectedIds : []}
             dragType="application/x-wewe-wechat"
@@ -1088,7 +1221,6 @@ const Feeds = () => {
               !folders.data
             }
             onFilter={(filter) => {
-              if (folderOperation.current) return;
               setFolderFilter(filter);
               setSelectedIds([]);
               setArticleSelectedIds(new Set());
@@ -1101,16 +1233,57 @@ const Feeds = () => {
               setFolderBusy(value);
             }}
             onReorder={async (ids, expectedIds) => {
-              try {
-                await queryUtils.feed.groups.cancel();
-                await reorderFolders.mutateAsync({ ids, expectedIds });
-              } finally {
-                await folders.refetch({ throwOnError: true });
-              }
+              await queryUtils.feed.groups.cancel();
+              const saved = await reorderFolders.mutateAsync({
+                ids,
+                expectedIds,
+              });
+              const orders = new Map(saved.ids.map((id, order) => [id, order]));
+              queryUtils.feed.groups.setData(undefined, (previous) => {
+                if (!previous) return previous;
+                const items = previous.items
+                  .map((folder) => ({
+                    ...folder,
+                    order: orders.get(folder.id) ?? folder.order,
+                  }))
+                  .sort((a, b) => a.order - b.order);
+                return { ...previous, items };
+              });
+              void folders.refetch().then(
+                (result) => {
+                  if (result.error)
+                    toast.warning(
+                      '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                    );
+                },
+                () =>
+                  toast.warning(
+                    '文件夹排序已保存，列表刷新失败，请稍后刷新页面核对',
+                  ),
+              );
             }}
             onSave={async (input) => {
-              await saveFolder.mutateAsync(input);
-              await folders.refetch();
+              await queryUtils.feed.groups.cancel();
+              const saved = await saveFolder.mutateAsync(input);
+              // Cancel any read begun during the mutation before installing
+              // the committed row. A rename does not change membership/order.
+              await queryUtils.feed.groups.cancel();
+              queryUtils.feed.groups.setData(undefined, (previous) => {
+                if (!previous) return previous;
+                const exists = previous.items.some(
+                  (folder) => folder.id === saved.id,
+                );
+                return {
+                  ...previous,
+                  items: exists
+                    ? previous.items.map((folder) =>
+                        folder.id === saved.id ? saved : folder,
+                      )
+                    : [...previous.items, saved].sort(
+                        (a, b) => a.order - b.order || a.id.localeCompare(b.id),
+                      ),
+                };
+              });
             }}
             onRemove={async (id) => {
               await removeFolder.mutateAsync({ id });
@@ -1122,9 +1295,34 @@ const Feeds = () => {
               setDraggedItem(null);
               if (draggedItem !== null) setOrderedFeeds(dragSnapshot.current);
               await queryUtils.feed.list.cancel();
-              await moveFeeds.mutateAsync({ ids, groupId });
+              const saved = await moveFeeds.mutateAsync({
+                ids: [...new Set(ids)],
+                groupId,
+              });
+              // The mutation is authoritative. A slow list read must not keep
+              // classification locked or turn a committed move into a failure.
+              const moved = new Set(saved.ids);
+              queryUtils.feed.list.setData({}, (previous) => {
+                if (!previous) return previous;
+                const items = previous.items.map((feed) =>
+                  moved.has(feed.id)
+                    ? { ...feed, groupId: saved.groupId }
+                    : feed,
+                );
+                setOrderedFeeds(items);
+                return { ...previous, items };
+              });
               setSelectedIds([]);
-              await refetchFeedList({ throwOnError: true });
+              void refetchFeedList().then(
+                (result) => {
+                  if (result.error)
+                    toast.warning(
+                      '分类已保存，列表刷新失败，请稍后刷新页面核对',
+                    );
+                },
+                () =>
+                  toast.warning('分类已保存，列表刷新失败，请稍后刷新页面核对'),
+              );
             }}
           />
           {folders.error && (
@@ -1137,17 +1335,15 @@ const Feeds = () => {
             <div className="px-0">
               <ul className="flex w-full flex-col pb-4">
                 {orderedFeeds
+                  .map((item, index) => ({ item, index }))
                   .filter(
-                    (item) =>
+                    ({ item }) =>
                       folderFilter === 'all' ||
                       (folderFilter === 'ungrouped'
                         ? !item.groupId
                         : item.groupId === folderFilter),
                   )
-                  .map((item) => {
-                    const index = orderedFeeds.findIndex(
-                      (feed) => feed.id === item.id,
-                    );
+                  .map(({ item, index }) => {
                     const isSelected = selectedIds.includes(item.id);
                     return (
                       <li
@@ -1194,12 +1390,17 @@ const Feeds = () => {
                               : ''
                         } ${isManageMode ? 'drag-handle' : ''}`}
                         onClick={() => {
-                          if (folderOperation.current) return;
                           if (isManageMode) {
+                            if (folderOperation.current) return;
                             toggleSelect(item.id);
                           } else {
                             setCurrentMpId(item.id);
-                            navigate(`/feeds/${item.id}`);
+                            navigate(`/feeds/${item.id}`, {
+                              state: {
+                                feedId: item.id,
+                                feedFolder: folderFilter,
+                              },
+                            });
                             setMobileSidebarOpen(false);
                           }
                         }}
@@ -1255,7 +1456,7 @@ const Feeds = () => {
               全部更新进度查询失败，请刷新页面核对原批次；不会自动重新提交。
             </p>
           )}
-          <div className="mac-toolbar feed-reading-toolbar !h-auto shrink-0 !flex-wrap !gap-2 !px-3 !py-2">
+          <SubscriptionToolbar>
             <div className="flex min-w-0 basis-full flex-wrap items-center gap-x-3 gap-y-1 sm:flex-1 sm:basis-0">
               <span className="min-w-0 truncate text-[15px] font-semibold">
                 {currentMpId
@@ -1278,43 +1479,33 @@ const Feeds = () => {
               )}
             </div>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <Tooltip content={isSearchOpen ? '关闭搜索' : '搜索文章'}>
-                <Button
-                  isIconOnly
-                  size="sm"
-                  variant="light"
-                  color={isSearchOpen ? 'primary' : 'default'}
-                  aria-label={isSearchOpen ? '关闭文章搜索' : '搜索文章'}
-                  aria-expanded={isSearchOpen}
-                  aria-controls="article-search-panel"
-                  className="h-8 w-8 min-w-0"
-                  onPress={() => setIsSearchOpen(!isSearchOpen)}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="18"
-                    height="18"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="m21 21-4.3-4.3" />
-                  </svg>
-                </Button>
-              </Tooltip>
+              <SubscriptionSearch
+                open={isSearchOpen}
+                label={isSearchOpen ? '关闭文章搜索' : '搜索文章'}
+                controls="article-search-panel"
+                onToggle={() => setIsSearchOpen(!isSearchOpen)}
+              />
               {/* Batch actions appear when there is something to act on. */}
-              {!privateOnlineMode && (
+              {(!privateOnlineMode || currentMpInfo) && (
                 <Button
                   size="sm"
                   className="h-8"
-                  isDisabled={isBatchExporting || Boolean(dateError)}
-                  onPress={() => handleBatchExport(true)}
+                  isDisabled={isBatchExporting}
+                  onPress={() => {
+                    setExportScope(
+                      !privateOnlineMode && articleSelectedIds.size
+                        ? 'selected'
+                        : dateError
+                          ? 'all'
+                          : 'filtered',
+                    );
+                    setExportFormat(privateOnlineMode ? 'zip' : 'obsidian');
+                    setExportOpen(true);
+                    void filteredExportSummary.refetch();
+                    void allExportSummary.refetch();
+                  }}
                 >
-                  导出当前筛选全部到 Obsidian
+                  导出文章
                 </Button>
               )}
               {isBatchExporting && (
@@ -1323,12 +1514,13 @@ const Feeds = () => {
                   className="h-8"
                   onPress={() => {
                     exportCancelled.current = true;
+                    exportController.current?.abort();
                   }}
                 >
                   停止后续导出
                 </Button>
               )}
-              {exportResult && (
+              {isBatchExporting && exportResult && (
                 <span role="status" aria-live="polite" className="text-xs">
                   {exportResult}
                 </span>
@@ -1352,21 +1544,6 @@ const Feeds = () => {
                   >
                     清空选择
                   </Button>
-                  {!privateOnlineMode && (
-                    <Button
-                      size="sm"
-                      color="primary"
-                      variant="flat"
-                      className="mr-2 h-8 font-medium"
-                      isLoading={isBatchExporting}
-                      isDisabled={
-                        isBatchExporting || articleSelectedIds.size === 0
-                      }
-                      onPress={() => handleBatchExport()}
-                    >
-                      批量导出 Obsidian ({articleSelectedIds.size})
-                    </Button>
-                  )}
                 </>
               )}
               {currentMpInfo ? (
@@ -1419,22 +1596,29 @@ const Feeds = () => {
                               result.message,
                               result.status,
                             );
-                            if (result.complete)
-                              toast.success(result.message, {
-                                duration: 8000,
-                              });
-                            else if (
-                              result.status === 'failed' ||
-                              result.status === 'blocked'
-                            )
-                              toast.error(result.message, {
-                                duration: 10000,
-                              });
-                            else
-                              toast.warning(result.message, {
-                                duration: 10000,
-                              });
                           }
+                          const failed = results.some((result) =>
+                            ['failed', 'blocked'].includes(result.status),
+                          );
+                          const complete =
+                            results.length > 0 &&
+                            results.every((result) => result.complete);
+                          if (complete)
+                            toast.success('本号更新完成', {
+                              id: `refresh:${mpId}`,
+                              duration: 3000,
+                            });
+                          else if (failed)
+                            toast.error(
+                              '更新未完成，已有内容保留；可再次点击更新本号重试。',
+                              { id: `refresh:${mpId}` },
+                            );
+                          else
+                            toast.warning(
+                              '部分内容已保存，请查看来源与更新详情。',
+                              { id: `refresh:${mpId}` },
+                            );
+
                           refreshFeedbackTimers.current.set(
                             mpId,
                             setTimeout(() => {
@@ -1456,7 +1640,8 @@ const Feeds = () => {
                             e instanceof Error ? e.message : '更新失败',
                           );
                           toast.error(
-                            e instanceof Error ? e.message : '更新失败',
+                            '更新未完成，已有内容保留；可再次点击更新本号重试。',
+                            { id: `refresh:${mpId}` },
                           );
                         } finally {
                           finishManualRefresh(mpId, token);
@@ -1483,27 +1668,11 @@ const Feeds = () => {
                         {refreshingMpIds.includes(currentMpInfo.id)
                           ? '更新中'
                           : refreshedMpIds.includes(currentMpInfo.id)
-                            ? '缓存已同步'
+                            ? '内容已同步'
                             : '更新本号'}
                       </span>
                     </Button>
                   </Tooltip>
-                  <a
-                    title="整号完整快照，忽略日期与搜索；每次重新打包，浏览器不能检查本地下载历史"
-                    href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?scope=all`}
-                    className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                  >
-                    下载整号快照 ZIP
-                  </a>
-                  {!dateError && (
-                    <a
-                      title="包含当前日期、分组和搜索范围全部文章；完整快照，每次重新打包"
-                      href={`${serverOriginUrl}/download/feed/${currentMpInfo.id}.zip?${filteredZipQuery}`}
-                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                    >
-                      下载当前筛选 ZIP
-                    </a>
-                  )}
                 </>
               ) : (
                 <>
@@ -1532,16 +1701,20 @@ const Feeds = () => {
                         toast.info(
                           `${batch.reused ? '继续查看原批次' : '更新请求已排队'}：共 ${batch.total} 个，待发送 ${batch.queuedCount} 个`,
                           {
-                            description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}后台串行提交并查询缓存，关闭页面后仍继续。`,
+                            description: `${batch.skippedCount ? `${batch.skippedCount} 个停用或其他来源订阅未提交。` : ''}更新会依次进行，关闭页面后仍会继续。`,
                           },
                         );
                         await manualBatches.refetch();
                       } catch (e) {
                         if (!isCurrentRefresh('', token)) return;
                         toast.error(
-                          e instanceof Error
-                            ? e.message
-                            : '更新请求未确认，请查询原批次；不要重复点击。',
+                          <FailureNotice
+                            error={
+                              e instanceof Error
+                                ? e.message
+                                : '更新请求未确认，请查询原批次；不要重复点击。'
+                            }
+                          />,
                         );
                       } finally {
                         finishManualRefresh('', token);
@@ -1567,150 +1740,105 @@ const Feeds = () => {
                     <span className="text-[14px]">
                       {isRefreshAllMpArticlesRunning || isManualBatchRefreshing
                         ? isManualBatchRefreshing
-                          ? '正在受理'
+                          ? '正在开始'
                           : manualBatch?.state === 'paused'
                             ? '更新已暂停'
                             : '后台更新中'
                         : isRefreshedAll
-                          ? '缓存已同步'
+                          ? '内容已同步'
                           : '更新全部'}
                     </span>
                   </Button>
                 </>
               )}
-              <Popover
-                key={currentMpId}
-                placement="bottom-end"
-                className="feed-reading-more"
-              >
-                <PopoverTrigger>
-                  <Button
-                    size="sm"
-                    variant="light"
-                    className="mac-action-link min-w-0 shrink-0 px-2 text-sm"
-                    aria-label="更多订阅操作"
-                  >
-                    更多
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="flex max-h-[60dvh] w-80 max-w-[calc(100vw-2rem)] flex-row flex-wrap items-center gap-3 overflow-auto rounded-lg border border-neutral-200 bg-white p-4 shadow-lg dark:border-neutral-700 dark:bg-neutral-900">
-                  {currentMpInfo ? (
-                    <div className="mr-4 flex items-center gap-4">
-                      <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
-                        更新通道：{collectionChannelLabel}
-                      </div>
+              <SubscriptionMore key={currentMpId}>
+                {currentMpInfo ? (
+                  <div className="mr-4 flex items-center gap-4">
+                    <div className="hidden whitespace-nowrap text-[14px] font-light text-neutral-400 lg:block">
+                      更新通道：{collectionChannelLabel}
+                    </div>
 
+                    <Tooltip
+                      content={
+                        collectionChannel === 'wechat2rss'
+                          ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
+                          : collectionChannel === 'public-album'
+                            ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
+                            : '尚无可用的后台来源；定时任务会记录阻塞状态'
+                      }
+                    >
+                      <div className="flex items-center">
+                        <Switch
+                          size="sm"
+                          onValueChange={async (value) => {
+                            await updateMpInfo({
+                              id: currentMpInfo.id,
+                              data: { status: value ? 1 : 0 },
+                            });
+                            await refetchFeedList();
+                          }}
+                          isSelected={currentMpInfo?.status === 1}
+                        />
+                      </div>
+                    </Tooltip>
+
+                    {currentMpInfo.hasHistory === 1 && (
                       <Tooltip
                         content={
-                          collectionChannel === 'wechat2rss'
-                            ? '定时使用同一后台来源；全局定时任务仍需在服务端启用。'
-                            : collectionChannel === 'public-album'
-                              ? '定时在线刷新已绑定公开合集；不代表公众号全量采集'
-                              : '尚无可用的后台来源；定时任务会记录阻塞状态'
+                          inProgressHistoryMp?.id === currentMpInfo.id
+                            ? '停止获取'
+                            : '获取历史文章'
                         }
                       >
-                        <div className="flex items-center">
-                          <Switch
-                            size="sm"
-                            onValueChange={async (value) => {
-                              await updateMpInfo({
-                                id: currentMpInfo.id,
-                                data: { status: value ? 1 : 0 },
-                              });
-                              await refetchFeedList();
-                            }}
-                            isSelected={currentMpInfo?.status === 1}
-                          />
-                        </div>
-                      </Tooltip>
-
-                      {currentMpInfo.hasHistory === 1 && (
-                        <Tooltip
-                          content={
-                            inProgressHistoryMp?.id === currentMpInfo.id
-                              ? '停止获取'
-                              : '获取历史文章'
-                          }
-                        >
-                          <Button
-                            isIconOnly
-                            size="sm"
-                            variant="light"
-                            className="h-8 w-8 min-w-0"
-                            isLoading={isGetHistoryArticlesLoading}
-                            onPress={async () => {
-                              if (
-                                inProgressHistoryMp?.id === currentMpInfo.id
-                              ) {
-                                await getHistoryArticles({ mpId: '' });
-                              } else {
-                                try {
-                                  const result = await getHistoryArticles({
-                                    mpId: currentMpInfo.id,
-                                  });
-                                  rememberUpdate(
-                                    currentMpInfo.id,
-                                    result.source,
-                                    result.message,
-                                    result.status,
-                                  );
-                                  if (result.status === 'blocked')
-                                    toast.error(result.message);
-                                  else toast.warning(result.message);
-                                } catch (error) {
-                                  rememberUpdate(
-                                    currentMpInfo.id,
-                                    'error',
-                                    error instanceof Error
-                                      ? error.message
-                                      : '历史采集失败',
-                                  );
-                                  toast.error(
-                                    error instanceof Error
-                                      ? error.message
-                                      : '历史采集失败',
-                                  );
-                                } finally {
-                                  await refetchFeedList();
-                                  await queryUtils.article.list.reset();
-                                  await queryUtils.article.summary.invalidate();
-                                }
-                              }
-                              await refetchInProgressHistoryMp();
-                            }}
-                          >
-                            <svg
-                              xmlns="http://www.w3.org/2000/svg"
-                              width="16"
-                              height="16"
-                              viewBox="0 0 24 24"
-                              fill="none"
-                              stroke="currentColor"
-                              strokeWidth="2"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            >
-                              <path d="M12 8v4l3 3" />
-                              <circle cx="12" cy="12" r="10" />
-                            </svg>
-                          </Button>
-                        </Tooltip>
-                      )}
-
-                      <Tooltip content="删除此订阅 (保留文章)">
                         <Button
                           isIconOnly
                           size="sm"
                           variant="light"
-                          color="danger"
-                          className="h-8 w-8 min-w-0 opacity-40 hover:opacity-100"
-                          isLoading={isDeleteFeedLoading}
+                          className="h-8 w-8 min-w-0"
+                          isLoading={isGetHistoryArticlesLoading}
                           onPress={async () => {
-                            if (window.confirm('确定删除吗？')) {
-                              await deleteFeed(currentMpInfo.id);
-                              navigate('/dash/feeds');
-                              await refetchFeedList();
+                            if (inProgressHistoryMp?.id === currentMpInfo.id) {
+                              await getHistoryArticles({ mpId: '' });
+                            } else {
+                              try {
+                                const result = await getHistoryArticles({
+                                  mpId: currentMpInfo.id,
+                                });
+                                rememberUpdate(
+                                  currentMpInfo.id,
+                                  result.source,
+                                  result.message,
+                                  result.status,
+                                );
+                                if (result.status === 'blocked')
+                                  toast.error(
+                                    <FailureNotice error={result.message} />,
+                                  );
+                                else toast.warning(result.message);
+                              } catch (error) {
+                                rememberUpdate(
+                                  currentMpInfo.id,
+                                  'error',
+                                  error instanceof Error
+                                    ? error.message
+                                    : '历史采集失败',
+                                );
+                                toast.error(
+                                  <FailureNotice
+                                    error={
+                                      error instanceof Error
+                                        ? error.message
+                                        : '历史采集失败'
+                                    }
+                                  />,
+                                );
+                              } finally {
+                                await refetchFeedList();
+                                await queryUtils.article.list.reset();
+                                await queryUtils.article.summary.invalidate();
+                              }
                             }
+                            await refetchInProgressHistoryMp();
                           }}
                         >
                           <svg
@@ -1724,132 +1852,167 @@ const Feeds = () => {
                             strokeLinecap="round"
                             strokeLinejoin="round"
                           >
-                            <path d="M3 6h18" />
-                            <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-                            <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                            <line x1="10" y1="11" x2="10" y2="17" />
-                            <line x1="14" y1="11" x2="14" y2="17" />
+                            <path d="M12 8v4l3 3" />
+                            <circle cx="12" cy="12" r="10" />
                           </svg>
                         </Button>
                       </Tooltip>
-                    </div>
-                  ) : null}
-                  {currentMpInfo && !acceptanceMode && (
-                    <Tooltip content="补采成功后，将保存公开合集为后续普通更新和定时任务使用的通道；失败保留原通道。">
-                      <span className="inline-flex">
-                        <PublicAlbums
-                          mpId={currentMpInfo.id}
-                          name={currentMpInfo.mpName}
-                          albumIds={currentAlbumIds}
-                          hasLocalDirectory={!!currentMpInfo.localDirectory}
+                    )}
+
+                    <Tooltip content="删除此订阅 (保留文章)">
+                      <Button
+                        isIconOnly
+                        size="sm"
+                        variant="light"
+                        color="danger"
+                        className="h-8 w-8 min-w-0 opacity-40 hover:opacity-100"
+                        isLoading={isDeleteFeedLoading}
+                        onPress={async () => {
+                          if (window.confirm('确定删除吗？')) {
+                            await deleteFeed(currentMpInfo.id);
+                            navigate('/dash/feeds');
+                            await refetchFeedList();
+                          }
+                        }}
+                      >
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18" />
+                          <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
+                          <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                          <line x1="10" y1="11" x2="10" y2="17" />
+                          <line x1="14" y1="11" x2="14" y2="17" />
+                        </svg>
+                      </Button>
+                    </Tooltip>
+                  </div>
+                ) : null}
+
+                {currentMpInfo && !acceptanceMode && (
+                  <Tooltip content="补采成功后，将保存公开合集为后续普通更新和定时任务使用的通道；失败保留原通道。">
+                    <span className="inline-flex">
+                      <PublicAlbums
+                        mpId={currentMpInfo.id}
+                        name={currentMpInfo.mpName}
+                        albumIds={currentAlbumIds}
+                        hasLocalDirectory={!!currentMpInfo.localDirectory}
+                        isDisabled={
+                          refreshingMpIds.includes(currentMpInfo.id) ||
+                          isManualBatchRefreshing ||
+                          !!isRefreshAllMpArticlesRunning ||
+                          isCollectingAlbums
+                        }
+                        onBusyChange={setIsCollectingAlbums}
+                        onResult={(source, message) =>
+                          rememberUpdate(currentMpInfo.id, source, message)
+                        }
+                      />
+                    </span>
+                  </Tooltip>
+                )}
+
+                {!privateOnlineMode && (
+                  <LocalCollection
+                    showMetricsExport={
+                      currentMpInfo
+                        ? collectionChannel !== 'wechat2rss'
+                        : !(feedData?.items || []).some(
+                            (feed) =>
+                              feed.collectionRoute.channel === 'wechat2rss',
+                          )
+                    }
+                    mpId={currentMpInfo?.id}
+                    directory={currentMpInfo?.localDirectory}
+                    name={currentMpInfo?.mpName}
+                    search={search}
+                    articleFilter={{
+                      ...articleDateFilter,
+                      group: folderFilter,
+                    }}
+                    filterInvalid={Boolean(dateError)}
+                    selectedIds={articleSelectedIds}
+                    onImported={(message) => {
+                      if (currentMpInfo)
+                        rememberUpdate(currentMpInfo.id, 'local', message);
+                    }}
+                  />
+                )}
+
+                {currentMpInfo ? (
+                  <>
+                    {currentMpInfo.status === 1 &&
+                      (!currentMpInfo.collectionChannel ||
+                        currentMpInfo.collectionChannel === 'unavailable') && (
+                        <Button
+                          size="sm"
+                          className="mac-btn-outline"
                           isDisabled={
+                            isAddFeedLoading ||
                             refreshingMpIds.includes(currentMpInfo.id) ||
                             isManualBatchRefreshing ||
                             !!isRefreshAllMpArticlesRunning ||
                             isCollectingAlbums
                           }
-                          onBusyChange={setIsCollectingAlbums}
-                          onResult={(source, message) =>
-                            rememberUpdate(currentMpInfo.id, source, message)
-                          }
-                        />
-                      </span>
-                    </Tooltip>
-                  )}
-                  {!privateOnlineMode && (
-                    <LocalCollection
-                      showMetricsExport={
-                        currentMpInfo
-                          ? collectionChannel !== 'wechat2rss'
-                          : !(feedData?.items || []).some(
-                              (feed) =>
-                                feed.collectionRoute.channel === 'wechat2rss',
-                            )
-                      }
-                      mpId={currentMpInfo?.id}
-                      directory={currentMpInfo?.localDirectory}
-                      name={currentMpInfo?.mpName}
-                      search={search}
-                      articleFilter={{
-                        ...articleDateFilter,
-                        group: folderFilter,
-                      }}
-                      filterInvalid={Boolean(dateError)}
-                      selectedIds={articleSelectedIds}
-                      onImported={(message) => {
-                        if (currentMpInfo)
-                          rememberUpdate(currentMpInfo.id, 'local', message);
-                      }}
-                    />
-                  )}
-                  {currentMpInfo ? (
-                    <>
-                      {currentMpInfo.status === 1 &&
-                        (!currentMpInfo.collectionChannel ||
-                          currentMpInfo.collectionChannel ===
-                            'unavailable') && (
-                          <Button
-                            size="sm"
-                            className="mac-btn-outline"
-                            isDisabled={
-                              isAddFeedLoading ||
-                              refreshingMpIds.includes(currentMpInfo.id) ||
-                              isManualBatchRefreshing ||
-                              !!isRefreshAllMpArticlesRunning ||
-                              isCollectingAlbums
-                            }
-                            onPress={() => handleOpenRepair(currentMpInfo)}
-                          >
-                            修复本号来源
-                          </Button>
-                        )}
-                      <a
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
-                        className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
-                      >
-                        RSS
-                      </a>
-                    </>
-                  ) : (
-                    <>
-                      <Button
-                        size="sm"
-                        className="mac-btn-outline h-8"
-                        onPress={handleExportOpml}
-                      >
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
+                          onPress={() => handleOpenRepair(currentMpInfo)}
                         >
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                          <polyline points="7 10 12 15 17 10" />
-                          <line x1="12" y1="15" x2="12" y2="3" />
-                        </svg>
-                        <span className="text-[14px]">导出 OPML</span>
-                      </Button>
-                      <a
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        href={`${serverOriginUrl}/feeds/all.atom`}
-                        className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                          修复本号来源
+                        </Button>
+                      )}
+                    <a
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      href={`${serverOriginUrl}/feeds/${currentMpInfo.id}.atom`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      RSS
+                    </a>
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      size="sm"
+                      className="mac-btn-outline h-8"
+                      onPress={handleExportOpml}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.5"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
                       >
-                        RSS
-                      </a>
-                    </>
-                  )}
-                </PopoverContent>
-              </Popover>
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      <span className="text-[14px]">导出 OPML</span>
+                    </Button>
+                    <a
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      href={`${serverOriginUrl}/feeds/all.atom`}
+                      className="mac-action-link ml-1 flex h-8 items-center px-2 text-[14px]"
+                    >
+                      RSS
+                    </a>
+                  </>
+                )}
+              </SubscriptionMore>
             </div>
-          </div>
+          </SubscriptionToolbar>
           {cacheUnavailable && (
             <p
               role="status"
@@ -1859,11 +2022,14 @@ const Feeds = () => {
             </p>
           )}
           {currentMpInfo && collectionChannel === 'wechat2rss' && (
-            <CacheSyncStatus key={currentMpId} feedId={currentMpId} />
+            <CacheSyncStatus
+              key={`cache-status:${currentMpId}`}
+              feedId={currentMpId}
+            />
           )}
           {currentMpInfo && (
             <details
-              key={currentMpId}
+              key={`source-details:${currentMpId}`}
               className="feed-reading-details shrink-0 border-b border-neutral-200 text-xs dark:border-neutral-700"
             >
               <summary className="cursor-pointer px-3 py-1 text-neutral-500">
@@ -1921,7 +2087,10 @@ const Feeds = () => {
                   <div className="px-4 pb-3">
                     {searchCandidatesError ? (
                       <p role="alert" className="text-red-600">
-                        {searchCandidatesError.message}
+                        <FailureNotice
+                          error={searchCandidatesError}
+                          fallback="候选文章暂时无法读取，请稍后重试。"
+                        />
                       </p>
                     ) : searchCandidates ? (
                       <>
@@ -2000,7 +2169,10 @@ const Feeds = () => {
                     )}
                     {candidateScanError && (
                       <p role="alert" className="mt-2 text-red-600">
-                        {candidateScanError.message}
+                        <FailureNotice
+                          error={candidateScanError}
+                          fallback="检查未完成，请稍后重试。"
+                        />
                       </p>
                     )}
                   </div>
@@ -2071,7 +2243,6 @@ const Feeds = () => {
             className="flex flex-wrap items-center gap-2 px-3 py-1 text-xs"
             role="status"
           >
-            <span>筛选与排序在本次浏览中记住</span>
             <button
               type="button"
               className="hover:bg-default-100 rounded px-2 py-1 text-sm"
@@ -2092,7 +2263,7 @@ const Feeds = () => {
               setArticleSelectedIds(new Set());
             }}
           />
-          <div className="feed-article-scroll flex-1 overflow-auto">
+          <div className="feed-article-scroll flex-1 overflow-hidden">
             <ArticleList
               key={JSON.stringify([
                 id,
@@ -2124,6 +2295,112 @@ const Feeds = () => {
         </div>
       </div>
       <Modal
+        isOpen={exportOpen}
+        onClose={() => setExportOpen(false)}
+        scrollBehavior="inside"
+      >
+        <ModalContent>
+          <ModalHeader>导出文章</ModalHeader>
+          <ModalBody>
+            <p aria-label="导出对象" className="text-sm">
+              {id
+                ? `公众号：${currentMpInfo?.mpName || '当前公众号'}`
+                : '公众号：全部订阅'}
+            </p>
+            <ContentExportScope
+              name="article-export-scope"
+              value={exportScope}
+              options={[
+                {
+                  value: 'selected',
+                  label: `选中文章（${articleSelectedIds.size} 篇）`,
+                  disabled: privateOnlineMode || !articleSelectedIds.size,
+                },
+                {
+                  value: 'filtered',
+                  label: `当前筛选（${filteredExportSummary.data?.articles ?? '读取中'} 篇）`,
+                  disabled: Boolean(dateError),
+                },
+                {
+                  value: 'all',
+                  label: `${id ? '本号全部' : '全部文章'}（${allExportSummary.data?.articles ?? '读取中'} 篇）`,
+                },
+              ]}
+              onChange={(scope) => {
+                setExportScope(scope);
+                if (scope === 'selected') setExportFormat('obsidian');
+              }}
+            />
+
+            <label className="flex flex-col gap-2 text-sm">
+              导出方式
+              <select
+                aria-label="导出方式"
+                className="bg-background rounded border p-2"
+                value={exportFormat}
+                onChange={(event) =>
+                  setExportFormat(event.target.value as 'obsidian' | 'zip')
+                }
+              >
+                <option value="obsidian" disabled={privateOnlineMode}>
+                  保存到 Obsidian 目录
+                </option>
+                <option value="zip" disabled={!zipAvailable}>
+                  下载 ZIP 文件
+                </option>
+              </select>
+            </label>
+            <ArticleExportGuidance
+              singleFeed={Boolean(id)}
+              scope={exportScope}
+              format={exportFormat}
+              zipAvailable={zipAvailable}
+            />
+            {exportScope !== 'selected' && exportSummary.isError && (
+              <div role="alert" className="text-sm text-red-600">
+                范围篇数读取失败，请重试。
+                <Button
+                  size="sm"
+                  variant="light"
+                  onPress={() => void exportSummary.refetch()}
+                >
+                  重试读取篇数
+                </Button>
+              </div>
+            )}
+          </ModalBody>
+          <ModalFooter>
+            <Button variant="flat" onPress={() => setExportOpen(false)}>
+              取消
+            </Button>
+            <Button
+              color="primary"
+              isDisabled={
+                isBatchExporting ||
+                !exportCount ||
+                (exportScope !== 'selected' &&
+                  (exportSummary.isFetching || exportSummary.isError)) ||
+                (exportFormat === 'zip' && !zipAvailable)
+              }
+              onPress={() => {
+                if (exportFormat === 'zip') {
+                  window.location.assign(
+                    `${serverOriginUrl}/download/feed/${id}.zip?${exportScope === 'all' ? 'scope=all' : filteredZipQuery}`,
+                  );
+                } else
+                  void handleBatchExport(
+                    exportScope !== 'selected',
+                    exportScope === 'all',
+                  );
+                setExportOpen(false);
+              }}
+            >
+              开始导出 {exportCount ?? ''} 篇
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
+      <Modal
         isOpen={!!repairTarget}
         onOpenChange={(open) => {
           if (!open) handleCancelRepair();
@@ -2134,19 +2411,19 @@ const Feeds = () => {
           <ModalBody>
             <p>本次公众号：{repairTarget?.mpName}</p>
             <p className="text-default-600 text-sm">
-              使用已有订阅身份验证目录，无需重新提供单篇原文。所选账号验证成功后更新最近10篇正文和图片，后续使用原更新本号入口；失败保留历史数据和停止记录，不自动重试或切换账号。
+              使用所选账号修复当前订阅并更新最近10篇正文和图片。已有文章会保留；遇到限制会停止，不会自动重试或更换账号。
             </p>
             {!defaultAddCapability?.existingRepairAvailable && (
               <p role="status">
                 {addCapabilityError
-                  ? '来源状态读取失败，本次未发目录请求。'
+                  ? '来源状态读取失败，请稍后重试。'
                   : '正在核对来源；不可用时不能开始修复。'}
               </p>
             )}
             <label className="flex flex-col gap-2 text-sm">
-              用于本号来源修复的正常Web账号
+              用于修复的网页登录账号
               <select
-                aria-label="用于本号来源修复的正常Web账号"
+                aria-label="用于修复的网页登录账号"
                 value={addAccountId}
                 onChange={(event) => {
                   if (!addingSubscriptions.current)
@@ -2155,7 +2432,7 @@ const Feeds = () => {
                 disabled={isAddFeedLoading}
                 className="bg-content1 rounded-md border p-2"
               >
-                <option value="">请选择正常Web登录账号</option>
+                <option value="">请选择已登录且可用的账号</option>
                 {addAccounts?.items.map((account) => (
                   <option
                     key={account.id}
@@ -2163,7 +2440,7 @@ const Feeds = () => {
                     disabled={account.status !== 1 || !account.nativeLoginAt}
                   >
                     {account.platformName || account.name}
-                    {!account.nativeLoginAt ? '（需正常Web登录）' : ''}
+                    {!account.nativeLoginAt ? '（需在网页完成登录）' : ''}
                   </option>
                 ))}
               </select>
@@ -2171,11 +2448,16 @@ const Feeds = () => {
             {addAccountsError && (
               <p role="alert">账号列表读取失败，请在账号页核对正常登录。</p>
             )}
-            {repairMessages.map((message, index) => (
-              <p key={index} role="status">
-                {message}
-              </p>
-            ))}
+            {repairMessages.length > 0 && (
+              <details>
+                <summary>查看修复结果详情</summary>
+                {repairMessages.map((message, index) => (
+                  <p key={index} role="status">
+                    {message}
+                  </p>
+                ))}
+              </details>
+            )}
           </ModalBody>
           <ModalFooter>
             <Button variant="flat" onPress={handleCancelRepair}>
@@ -2196,24 +2478,10 @@ const Feeds = () => {
           </ModalFooter>
         </ModalContent>
       </Modal>
-      <Modal
+      <SubscriptionDialog
         isOpen={isOpen}
         onOpenChange={(open) => (open ? handleOpenAdd() : handleCancelAdd())}
-        portalContainer={
-          typeof document === 'undefined' ? undefined : document.body
-        }
-        placement="center"
-        scrollBehavior="inside"
         isKeyboardDismissDisabled={false}
-        classNames={{
-          backdrop: 'subscription-dialog-backdrop',
-          wrapper: 'subscription-dialog-overlay',
-          base: 'subscription-dialog',
-          header: 'subscription-dialog-header',
-          body: 'subscription-dialog-body',
-          footer: 'subscription-dialog-footer',
-          closeButton: 'subscription-dialog-close',
-        }}
       >
         <ModalContent>
           {() => (
@@ -2237,7 +2505,7 @@ const Feeds = () => {
                     {addCapabilityError
                       ? '服务状态读取失败，请刷新页面后重试。'
                       : defaultAddCapability
-                        ? 'Wechat2RSS 暂不可用，请先检查实例配置与账号登录。'
+                        ? '订阅服务暂不可用，请先检查服务设置和账号登录。'
                         : '正在检查订阅服务…'}
                   </p>
                 )}
@@ -2279,7 +2547,7 @@ const Feeds = () => {
             </>
           )}
         </ModalContent>
-      </Modal>
+      </SubscriptionDialog>
     </>
   );
 };

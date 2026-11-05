@@ -1,4 +1,4 @@
-import { load } from 'cheerio';
+import { load, CheerioAPI } from 'cheerio';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
@@ -18,6 +18,47 @@ import { metricsMarkdown } from './collection/collection-format';
 import { TRPCError } from '@trpc/server';
 import { Article } from '@prisma/client';
 
+/** Inspect only body media; a failed historical retry does not erase a cache. */
+export function cachedMediaUnconfirmed(
+  article: Pick<Article, 'contentHtml' | 'lastBodyStatus'>,
+) {
+  if (!article.contentHtml) return false;
+  const $ = load(article.contentHtml);
+  return mediaUnconfirmedInDocument($, article.lastBodyStatus);
+}
+
+/** Same predicate for an already parsed, unmodified body; no DOM is retained. */
+function mediaUnconfirmedInDocument(
+  $: CheerioAPI,
+  lastBodyStatus: string | null,
+) {
+  const content = $('.rich_media_content').length
+    ? $('.rich_media_content')
+    : $('#js_content');
+  return (
+    lastBodyStatus === 'images-pending' ||
+    content.is('[data-wewe-image-pending]') ||
+    content.find('[data-wewe-image-pending]').length > 0 ||
+    content
+      .find('img')
+      .toArray()
+      .some((img) => {
+        const src = $(img).attr('src') || '';
+        const source = src.startsWith('data:')
+          ? src
+          : $(img).attr('data-src') || src;
+        if (!source.trim()) return true;
+        try {
+          if (source.startsWith('data:')) decodeInlineImage(source);
+          else allowedImageUrl(source);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+  );
+}
+
 /** Shared existing Markdown/attachments exporter, used by subscriptions and the link tool. */
 export async function buildArticleMarkdown(
   article: Pick<
@@ -36,14 +77,12 @@ export async function buildArticleMarkdown(
   imageDirectory: 'attachments' | 'image' = 'attachments',
   limits?: { maxImages: number; maxBytes: number },
   allowPartialImages = false,
+  rendering: { includeTitle?: boolean; includeSourceLink?: boolean } = {},
 ) {
   const id = article.id;
   const url = article.sourceUrl || `https://mp.weixin.qq.com/s/${id}`;
 
   let html = article.contentHtml || '';
-  let mediaComplete =
-    article.lastBodyStatus !== 'images-pending' &&
-    !html.includes('data-wewe-image-pending=');
   if (!html && article.lastBodyStatus === 'unavailable')
     throw new TRPCError({
       code: 'PRECONDITION_FAILED',
@@ -82,6 +121,94 @@ export async function buildArticleMarkdown(
     );
   }
 
+  // Sanitization may retain an image element while dropping an unsafe source.
+  // Removing that element for Markdown is not evidence that all media is saved.
+  const mediaUnconfirmed = mediaUnconfirmedInDocument(
+    $,
+    article.lastBodyStatus,
+  );
+  let mediaComplete = !mediaUnconfirmed;
+  const missingSources = new Set<string>();
+
+  // Provider pages may retain a standalone WeChat launcher after the article.
+  // Match only this exact trailing control; author links and body images stay.
+  const launcherLabel = '跳转微信打开';
+  const launcherTarget = (href: string) => {
+    if (!href || href === '#' || /^javascript:(?:;|void\(0\);?)?$/i.test(href))
+      return true;
+    if (/^weixin:\/\//i.test(href)) return true;
+    try {
+      const target = new URL(href);
+      const source = new URL(url);
+      if (
+        target.protocol !== 'https:' ||
+        target.hostname !== 'mp.weixin.qq.com' ||
+        target.username ||
+        target.password ||
+        target.port ||
+        target.origin !== source.origin ||
+        target.pathname !== source.pathname
+      )
+        return false;
+      if (target.pathname.startsWith('/s/')) return true;
+      return (
+        target.pathname === '/s' &&
+        ['__biz', 'mid', 'idx'].every(
+          (key) =>
+            !!target.searchParams.get(key) &&
+            target.searchParams.get(key) === source.searchParams.get(key),
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+  for (const element of contentEl
+    .find('p, div, section, button, a, span')
+    .toArray()) {
+    const candidate = $(element);
+    if (
+      candidate.text().trim() !== launcherLabel ||
+      candidate.find(
+        'img, picture, video, audio, iframe, svg, canvas, object, embed, blockquote, ul, ol, table, pre, code',
+      ).length ||
+      (candidate.is('a, span') && !candidate.parent().is(contentEl))
+    )
+      continue;
+    const links = candidate.is('a') ? candidate : candidate.find('a');
+    if (
+      links
+        .toArray()
+        .some((link) => !launcherTarget($(link).attr('href') || ''))
+    )
+      continue;
+    let cursor = candidate;
+    let trailing = true;
+    while (!cursor.is(contentEl)) {
+      const parent = cursor.parent();
+      if (
+        !parent.length ||
+        (!parent.is(contentEl) && !parent.is('div, section, article'))
+      ) {
+        trailing = false;
+        break;
+      }
+      const siblings = parent.contents().toArray();
+      if (
+        siblings.slice(siblings.indexOf(cursor[0]) + 1).some((node) => {
+          if (node.type === 'comment') return false;
+          if (node.type === 'text') return !!node.data.trim();
+          return node.type !== 'tag' || node.name !== 'br';
+        })
+      ) {
+        trailing = false;
+        break;
+      }
+      cursor = parent;
+    }
+    if (trailing) candidate.remove();
+  }
+
   if (downloadPath) {
     const attachmentsDir = path.join(downloadPath, imageDirectory);
     if (!fs.existsSync(attachmentsDir)) {
@@ -100,6 +227,7 @@ export async function buildArticleMarkdown(
       });
     let totalImageBytes = 0;
     let mediaBlocked = false;
+    const downloads = new Map<string, Promise<boolean>>();
     await pMap(
       imgs,
       async (img) => {
@@ -129,42 +257,59 @@ export async function buildArticleMarkdown(
           const fileName = `image_${hash}.${safeExt}`;
           const localPath = path.join(attachmentsDir, fileName);
 
-          let image: Awaited<ReturnType<typeof imageFetcher>> | undefined;
-          try {
-            if (!fs.existsSync(localPath)) {
-              if (mediaBlocked && !dataSrc.startsWith('data:'))
-                throw new Error('IMAGE_REQUEST_BLOCKED');
-              image = dataSrc.startsWith('data:')
-                ? decodeInlineImage(
+          let download = downloads.get(fileName);
+          if (!download) {
+            download = (async () => {
+              // Validation failures are unknown media, not an HTTP failure.
+              let inline: ReturnType<typeof decodeInlineImage> | undefined;
+              try {
+                if (dataSrc.startsWith('data:'))
+                  inline = decodeInlineImage(
                     dataSrc,
                     allowPartialImages ? 30_000_000 : undefined,
-                  )
-                : await imageFetcher(dataSrc);
-            }
-          } catch (error) {
-            if (error instanceof TRPCError) throw error;
-            if (error instanceof ImageRequestBlockedError) mediaBlocked = true;
-            if (allowPartialImages || !mediaComplete) {
-              mediaComplete = false;
-              $img.remove();
-              return;
-            }
-            throw new Error('图片未能安全下载，离线导出未完成');
+                  );
+                else allowedImageUrl(dataSrc);
+              } catch {
+                mediaComplete = false;
+                return false;
+              }
+              if (!fs.existsSync(localPath)) {
+                let image: { bytes: Buffer; type: string } | undefined = inline;
+                if (!image) {
+                  try {
+                    if (mediaBlocked) throw new ImageRequestBlockedError(null);
+                    image = await imageFetcher(dataSrc);
+                  } catch (error) {
+                    if (error instanceof ImageRequestBlockedError)
+                      mediaBlocked = true;
+                    // Strict single-download callers must retain their error
+                    // provenance and must not publish a partial success bundle.
+                    if (!allowPartialImages && !mediaUnconfirmed) throw error;
+                    mediaComplete = false;
+                    missingSources.add(dataSrc);
+                    return false;
+                  }
+                }
+                // Disk failures remain errors; they are not missing remote media.
+                await fs.promises.writeFile(localPath, image.bytes);
+              }
+              if (limits) {
+                totalImageBytes += (await fs.promises.stat(localPath)).size;
+                if (totalImageBytes > limits.maxBytes)
+                  throw new TRPCError({
+                    code: 'PRECONDITION_FAILED',
+                    message: '正文图片总字节超过保存上限。',
+                  });
+              }
+              return true;
+            })();
+            // Share success and failure across repeated DOM references. Byte
+            // budgets charge each physical file once, including seeded files.
+            downloads.set(fileName, download);
           }
-          if (image) await fs.promises.writeFile(localPath, image.bytes);
-          if (limits) {
-            totalImageBytes += (await fs.promises.stat(localPath)).size;
-            if (totalImageBytes > limits.maxBytes)
-              throw new TRPCError({
-                code: 'PRECONDITION_FAILED',
-                message: '正文图片总字节超过保存上限。',
-              });
-          }
-          $img.attr('src', `${imageDirectory}/${fileName}`);
-        } else {
-          mediaComplete = false;
-          $img.remove();
-        }
+          if (await download) $img.attr('src', `${imageDirectory}/${fileName}`);
+          else $img.remove();
+        } else $img.remove();
       },
       { concurrency: limits || allowPartialImages ? 1 : 5 },
     );
@@ -189,6 +334,7 @@ export async function buildArticleMarkdown(
             );
           }
         } catch {
+          mediaComplete = false;
           $img.remove();
         }
       }
@@ -204,11 +350,17 @@ export async function buildArticleMarkdown(
     title: article.title,
     contentHtml,
     markdown:
-      (article.sourceUrl ? metricsMarkdown(article) : '') +
-      (mediaComplete
-        ? ''
-        : '> 媒体完整性未确认：原缓存含无源或未核图片项。已保存正文和可取得的图片，不代表原篇全部媒体已归档。\n\n') +
+      (article.sourceUrl ? metricsMarkdown(article, rendering) : '') +
+      (missingSources.size
+        ? `> 正文图片获取失败：${missingSources.size} 个已知来源未保存。已保留正文和可取得的图片。\n\n`
+        : '') +
       markdown,
     mediaComplete,
+    mediaStatus: mediaComplete
+      ? ('complete' as const)
+      : missingSources.size
+        ? ('missing' as const)
+        : ('unconfirmed' as const),
+    missingImageCount: missingSources.size,
   };
 }

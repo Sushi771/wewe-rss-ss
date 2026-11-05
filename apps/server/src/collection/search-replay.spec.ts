@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -66,8 +67,7 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
     for (const name of (await fs.readdir(migrations)).sort()) {
       if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
       const file = path.join(migrations, name, 'migration.sql');
-      for (const sql of (await fs.readFile(file, 'utf8'))
-        .split(';')
+      for (const sql of splitSqliteStatements(await fs.readFile(file, 'utf8'))
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(sql);
@@ -140,6 +140,10 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
     ).toEqual(feed);
   });
   it('normal update persists live verified results through the same protected transaction and deduplicates', async () => {
+    await prisma.feed.update({
+      where: { id: mpId },
+      data: { collectionChannel: 'owner-web-search' },
+    });
     const prepared = await replay();
     (readOwnerSearchConfig as jest.Mock).mockResolvedValue({ mpId });
     (fetchLiveOwnerArticles as jest.Mock).mockResolvedValue(prepared.page);

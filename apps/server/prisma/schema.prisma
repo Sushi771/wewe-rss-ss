@@ -1,11 +1,23 @@
+// Independent 20-model union candidate; does not replace migration histories.
 generator client {
-  provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl"]
+  provider = "prisma-client-js"
+  binaryTargets = ["native"]
 }
 
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
+}
+
+model XhsSubscriptionTask {
+  id String @id
+  creatorId String @map("creator_id")
+  state String
+  document String
+  updatedAt BigInt @map("updated_at")
+
+  @@index([creatorId, state])
+  @@map("xhs_subscription_tasks")
 }
 
 model Account {
@@ -19,7 +31,6 @@ model Account {
   @@map("accounts")
 }
 
-// Immutable audit of opt-in pure INSERT batches; no cascading delete/recovery.
 model CacheInsertBatch {
   id String @id
   mpId String @map("mp_id")
@@ -32,6 +43,27 @@ model CacheInsertBatch {
   committedAtMs BigInt @map("committed_at_ms")
 
   @@map("cache_insert_batches")
+}
+
+model CacheRefreshCommit {
+  id String @id
+  mpId String @map("mp_id")
+  resultJson String @map("result_json")
+  committedAtMs BigInt @map("committed_at_ms")
+
+  @@index([mpId])
+  @@map("cache_refresh_commits")
+}
+
+model RefreshSubmissionClaim {
+  id String @id
+  mpId String @map("mp_id")
+  state String
+  reservedAt Int @map("reserved_at")
+  previousAt Int @map("previous_at")
+  updatedAtMs BigInt @map("updated_at_ms")
+
+  @@map("refresh_submission_claims")
 }
 
 model Feed {
@@ -50,14 +82,12 @@ model Feed {
   publicAlbumIds String? @map("public_album_ids")
   lastCollectionResult String? @map("last_collection_result")
   collectionChannel String? @map("collection_channel")
-  /// Unix seconds when a manual Wechat2RSS /add attempt was reserved, including failed requests.
   providerRefreshAttemptTime Int @default(0) @map("provider_refresh_attempt_time")
   groupId    String? @map("group_id")
   group      ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
   articles   Article[]
 
   @@index([groupId])
-
   @@map("feeds")
 }
 
@@ -69,11 +99,8 @@ model Article {
   publishTime Int       @map("publish_time")
   sourceUrl   String?   @unique @map("source_url")
   contentHtml String?   @map("content_html")
-  /// 最近一次通过元数据核验的原文正文结果；null 表示未记录，独立于已有正文缓存。
   lastBodyStatus String? @map("last_body_status")
-  /// 已通过原文核验的 biz/mid/idx 完整链接，独立保存以保护旧短链 ID 和来源。
   verifiedSourceUrl String? @map("verified_source_url")
-  /// 最近一次显式单篇正文重试结果，失败不改 lastBodyStatus 或旧正文。
   lastBodyRetry String? @map("last_body_retry")
   metrics     String?   @map("metrics")
   readCount   Int?      @map("read_count")
@@ -81,13 +108,13 @@ model Article {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime? @default(now()) @updatedAt @map("updated_at")
   feed        Feed      @relation(fields: [mpId], references: [id], onDelete: Cascade)
+  searchDocument ArticleSearchDocument?
 
   @@index([mpId])
+  @@index([publishTime, id])
   @@map("articles")
 }
 
-// Local pending creators are separate from trusted upstream author identities.
-// No WeChat Feed/Article ID or relation is changed by these additive tables.
 model XhsCreator {
   id               String    @id @default(cuid())
   profileUrl       String    @unique @map("profile_url")
@@ -100,12 +127,13 @@ model XhsCreator {
   groupId          String?   @map("group_id")
   group            ManagementGroup? @relation(fields: [groupId], references: [id], onDelete: Restrict)
   notes            XhsNote[]
+  refreshJobs      XhsRefreshJob[]
+  refreshBatchItems XhsRefreshBatchItem[]
 
   @@index([groupId])
   @@map("xhs_creators")
 }
 
-// Local organization labels are independent of upstream source bindings and paths.
 model ManagementGroup {
   id       String       @id @default(cuid())
   name     String
@@ -131,7 +159,123 @@ model XhsNote {
   videoExpectedBytes Int? @map("video_expected_bytes")
   videoSha256 String?   @map("video_sha256")
   creator     XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+  savedComments XhsSavedComment[]
+  commentWindows XhsCommentWindow[]
 
   @@index([creatorId, publishTime])
   @@map("xhs_notes")
+}
+
+model XhsMetricSnapshot {
+  ownerKind String @map("owner_kind")
+  ownerId String @map("owner_id")
+  document String
+
+  @@id([ownerKind, ownerId])
+  @@map("xhs_metric_snapshots")
+}
+
+model XhsSavedComment {
+  noteId String @map("note_id")
+  commentId String @map("comment_id")
+  rootId String? @map("root_id")
+  parentId String? @map("parent_id")
+  document String
+  note XhsNote @relation(fields: [noteId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([noteId, commentId])
+  @@index([noteId, rootId, commentId], map: "xhs_saved_comments_root")
+  @@map("xhs_saved_comments")
+}
+
+model XhsCommentWindow {
+  noteId String @map("note_id")
+  scope String
+  document String
+  note XhsNote @relation(fields: [noteId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@id([noteId, scope])
+  @@map("xhs_comment_windows")
+}
+
+model ArticleSearchDocument {
+  articleId String @id @map("article_id")
+  bodyText String @default("") @map("body_text")
+  bodyCached Boolean @default(false) @map("body_cached")
+  pending Boolean @default(true)
+  generation Int @default(0)
+  article Article @relation(fields: [articleId], references: [id], onDelete: Cascade, onUpdate: Cascade)
+
+  @@index([pending,articleId], map:"article_search_pending_idx")
+  @@index([bodyCached], map:"article_search_cached_idx")
+  @@map("article_search_documents")
+}
+
+model ArticleFailureEvent {
+  attemptId  String @map("attempt_id")
+  feedId     String @map("feed_id")
+  articleId  String @map("article_id")
+  stage      String
+  code       String
+  observedAt BigInt @map("observed_at")
+
+  @@id([attemptId, articleId, stage])
+  @@index([feedId, articleId])
+  @@map("article_failure_events")
+}
+
+model XhsRefreshJob {
+  creatorId  String @map("creator_id")
+  generation Int
+  owner      String @unique(map: "xhs_refresh_operation_id")
+  startedAt  BigInt @map("started_at")
+  state      String
+  outcome    String?
+  creator    XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Restrict)
+
+  @@id([creatorId, generation])
+  @@map("xhs_refresh_jobs")
+}
+
+model XhsRefreshFailure {
+  creatorId  String @map("creator_id")
+  generation Int
+  noteId     String @map("note_id")
+  code       String
+
+  @@id([creatorId, generation, noteId])
+  @@map("xhs_refresh_failures")
+}
+
+model XhsRefreshBatch {
+  id String @id
+  state String
+  createdAt BigInt @map("created_at")
+  items XhsRefreshBatchItem[]
+
+  @@map("xhs_refresh_batches")
+}
+
+model XhsRefreshBatchItem {
+  batchId String @map("batch_id")
+  position Int
+  creatorId String @map("creator_id")
+  operationId String? @unique @map("operation_id")
+  state String
+  outcome String?
+  batch XhsRefreshBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+  creator XhsCreator @relation(fields: [creatorId], references: [id], onDelete: Restrict)
+
+  @@id([batchId, position])
+  @@unique([batchId, creatorId])
+  @@map("xhs_refresh_batch_items")
+}
+
+model Wechat2RssSourceGate {
+  id     Int     @id
+  state  String
+  token  String?
+  status Int?
+
+
 }

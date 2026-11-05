@@ -2,7 +2,11 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { access, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { createRequire } from 'node:module';
+import { resolveSqliteBackupRoot } from './sqlite-backup-root';
 import { createInterface } from 'node:readline';
+import { sqliteWrites } from './sqlite-write-coordinator';
+import { activeVerifiedBackupReferences } from './sqlite-backup-reuse';
 
 export interface FastInsertSnapshotLease {
   token: string;
@@ -46,6 +50,155 @@ const fallback = (reason: string): FastInsertSnapshotHealth => ({
   reason,
 });
 
+export function safePeriodicSnapshotFailure(value: unknown) {
+  const codes = new Set([
+    'SQLITE_BACKUP_LAYOUT_REQUIRES_REVIEW',
+    'SQLITE_BACKUP_LAYOUT_REGISTRATION_INVALID',
+    'SQLITE_BACKUP_LAYOUT_REGISTRATION_CHANGED',
+    'SQLITE_BACKUP_LAYOUT_AMBIGUOUS_REGISTRATION',
+    'SQLITE_BACKUP_LAYOUT_IDENTITY_UNPROVED',
+    'SQLITE_BACKUP_LAYOUT_SCAN_LIMIT',
+    'SQLITE_SPACE_BUDGET_EXCEEDED',
+    'SQLITE_PERIODIC_RETENTION_HELD',
+    'SQLITE_PERIODIC_RETENTION_PROOF_LIMIT',
+    'SQLITE_PERIODIC_RETENTION_RESERVE_EXCEEDED',
+    'SQLITE_PERIODIC_RETENTION_POLICY_INVALID',
+    'SQLITE_PERIODIC_NOT_DUE',
+    'SQLITE_PERIODIC_PENDING_CONFIRMATION',
+    'SQLITE_PERIODIC_LIFECYCLE_HELD',
+    'SQLITE_PERIODIC_EVIDENCE_INVALID',
+    'SQLITE_PERIODIC_CONFIRMATION_REQUIRED',
+    'SQLITE_PERIODIC_POLICY_INVALID',
+    'SQLITE_PERIODIC_NATIVE_RELEASE_REQUIRED',
+    'SQLITE_PERIODIC_UNIQUE_HISTORY_HELD',
+    'SQLITE_BACKUP_VERIFICATION_FAILED',
+    'SQLITE_BACKUP_SOURCE_CHANGED',
+    'SQLITE_BACKUP_BUSY',
+    'SQLITE_BACKUP_TIMEOUT',
+    'SQLITE_BACKUP_FAILED',
+  ]);
+  if (!value || typeof value !== 'object') return undefined;
+  const { code, stage } = value as Record<string, unknown>;
+  if (typeof code !== 'string' || !codes.has(code)) return undefined;
+  if (
+    typeof stage !== 'string' ||
+    ![
+      'layout',
+      'budget',
+      'lock',
+      'snapshot',
+      'copy',
+      'verify',
+      'hash',
+      'rotation',
+      'unknown',
+    ].includes(stage)
+  )
+    return undefined;
+  return { code, stage };
+}
+
+export function safePeriodicLifecycleStatus(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (
+    ![
+      'ready',
+      'pending-confirmation',
+      'copy-intent',
+      'retirement-started',
+      'releasing',
+      'held',
+    ].includes(String(input.status))
+  )
+    return undefined;
+  const count = (key: string, maximum: number) =>
+    typeof input[key] === 'number' &&
+    Number.isSafeInteger(input[key]) &&
+    (input[key] as number) >= 0 &&
+    (input[key] as number) <= maximum
+      ? (input[key] as number)
+      : null;
+  const time = (key: string) => count(key, 8640000000000000);
+  const paused = input.status !== 'ready';
+  return {
+    status: String(input.status),
+    normalCopies: count('normalCopies', 48),
+    pendingCopies: count('pendingCopies', 1),
+    intervalSeconds: count('intervalSeconds', 86400),
+    automaticDeletion: false,
+    generationPaused: paused,
+    generationPauseReason:
+      input.status === 'pending-confirmation'
+        ? 'pending-confirmation'
+        : paused
+          ? 'lifecycle-held'
+          : null,
+    lastGeneratedAtMs: time('lastGeneratedAtMs'),
+    lastVerifiedAtMs: time('lastVerifiedAtMs'),
+    coverageAtMs: time('coverageAtMs'),
+    verificationBasis: ['creation-receipt', 'current-owner-hash'].includes(
+      String(input.verificationBasis),
+    )
+      ? String(input.verificationBasis)
+      : 'unknown',
+    coverageBasis: ['copy-start', 'verified-unchanged'].includes(
+      String(input.coverageBasis),
+    )
+      ? String(input.coverageBasis)
+      : 'unknown',
+  };
+}
+
+export function safePeriodicRetentionStatus(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (!['complete', 'held', 'disabled'].includes(String(input.status)))
+    return undefined;
+  const codes = new Set([
+    'COMPLETE',
+    'DISABLED',
+    'UNIQUE_HISTORY_RETAINED',
+    'PROTECTED_WINDOWS_RETAINED',
+    'CANDIDATES_HELD',
+    'AUTO_DELETE_UNCERTAIN',
+    'AUTO_RETENTION_HELD',
+    'HISTORY_MAINTENANCE_ACTIVE',
+    'TWO_VERIFIED_RECOVERY_POINTS_REQUIRED',
+    'PREEXISTING_PROTECTION_MANIFEST_REQUIRED',
+    'UNSUPPORTED_REFERENCE_PUBLISHER',
+    'BOUND_REFERENCE_RECORDS_CHANGED',
+    'REFERENCE_PIN_LIMIT',
+    'VERIFIED_ROTATION_REQUIRES_WINDOWS',
+    'SQLITE_SPACE_BUDGET_EXCEEDED',
+    'EXCLUSIVE_OBJECT_PIN_FAILED',
+    'SQLITE_PERIODIC_RETENTION_PROOF_LIMIT',
+    'READ_BUDGET_EXCEEDED',
+    'SCAN_DEADLINE',
+  ]);
+  const code =
+    typeof input.code === 'string' && codes.has(input.code)
+      ? input.code
+      : 'AUTO_RETENTION_HELD';
+  const count = (name: string) => {
+    const value = input[name];
+    return typeof value === 'number' &&
+      Number.isSafeInteger(value) &&
+      value >= 0 &&
+      value <= 8192
+      ? value
+      : null;
+  };
+  return {
+    status: input.status as string,
+    code,
+    deletedCopies: count('deletedCopies'),
+    heldUnique: count('heldUnique'),
+    heldOther: count('heldOther'),
+    protectedOrUnknown: count('protectedOrUnknown'),
+  };
+}
+
 /** Private stdio to one OS-locked owner; no persisted receipt grants a lease. */
 export class SqliteSnapshotGuard {
   private child?: ChildProcessWithoutNullStreams;
@@ -58,9 +211,21 @@ export class SqliteSnapshotGuard {
   >();
   private id = 0;
   private reason = 'snapshot-owner-not-started';
+  private periodicFailed = false;
+  private periodicFailureKey = '';
+  private retentionStatusKey = '';
+  private lifecycleStatus?: ReturnType<typeof safePeriodicLifecycleStatus>;
+  private lifecycleObservedAtMs?: number;
+  /** Display-only cached owner event: no query, lease, scan or backup work. */
+  publicStatus() {
+    return this.lifecycleStatus && this.child
+      ? { ...this.lifecycleStatus, observedAtMs: this.lifecycleObservedAtMs }
+      : null;
+  }
   private starting?: Promise<void>;
   private generation?: string;
   private databasePath?: string;
+  private historyRuntimePath?: string;
   private nodeIdentity?: [string, string];
   private readonly issued = new Map<string, FastInsertSnapshotLease>();
 
@@ -118,6 +283,11 @@ export class SqliteSnapshotGuard {
       )
         throw new Error();
       this.reason = 'startup-backup-required';
+      this.historyRuntimePath = path.join(
+        root,
+        'scripts',
+        'article-history-runtime.cjs',
+      );
       const child = spawn(
         python,
         [
@@ -125,13 +295,18 @@ export class SqliteSnapshotGuard {
           '--database',
           database,
           '--backup-root',
-          path.join(path.dirname(database), 'backups'),
+          resolveSqliteBackupRoot(database),
           '--interval-seconds',
           interval,
           '--max-age-seconds',
           maxAge,
         ],
-        { windowsHide: true, shell: false, stdio: ['pipe', 'pipe', 'pipe'] },
+        {
+          windowsHide: true,
+          shell: false,
+          env: { ...process.env },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
       );
       this.child = child;
       // Python stderr may contain private paths: drain without forwarding it.
@@ -139,8 +314,54 @@ export class SqliteSnapshotGuard {
       const lines = createInterface({ input: child.stdout });
       lines.on('line', (line) => {
         try {
-          if (Buffer.byteLength(line) > 8192) throw new Error();
-          const { id, result } = JSON.parse(line);
+          const limit =
+            process.env.SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED === '1'
+              ? 256 * 1024
+              : 8192;
+          if (Buffer.byteLength(line) > limit) throw new Error();
+          const message = JSON.parse(line);
+          if (message.event === 'periodic-snapshot-status') {
+            if (typeof message.ok !== 'boolean') throw new Error();
+            const failure = safePeriodicSnapshotFailure(message.failure);
+            const key = failure ? `${failure.code}:${failure.stage}` : '';
+            if (
+              !message.ok &&
+              (!this.periodicFailed || key !== this.periodicFailureKey)
+            ) {
+              if (failure)
+                console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]', failure);
+              else console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+            }
+            if (message.ok && this.periodicFailed)
+              console.info('[SQLITE_PERIODIC_SNAPSHOT_RECOVERED]');
+            this.periodicFailed = !message.ok;
+            this.periodicFailureKey = message.ok ? '' : key;
+            const retention = safePeriodicRetentionStatus(message.retention);
+            const lifecycle = safePeriodicLifecycleStatus(message.lifecycle);
+            this.lifecycleStatus = lifecycle;
+            this.lifecycleObservedAtMs = Date.now();
+            if (lifecycle) {
+              const lifecycleKey = JSON.stringify(lifecycle);
+              if (this.retentionStatusKey !== lifecycleKey)
+                console.info('[SQLITE_PERIODIC_LIFECYCLE]', lifecycle);
+              this.retentionStatusKey = lifecycleKey;
+            }
+            if (retention) {
+              const retentionKey = JSON.stringify(retention);
+              if (retentionKey !== this.retentionStatusKey) {
+                if (retention.status === 'held')
+                  console.warn('[SQLITE_PERIODIC_RETENTION_HELD]', retention);
+                else if (this.retentionStatusKey)
+                  console.info(
+                    '[SQLITE_PERIODIC_RETENTION_COMPLETE]',
+                    retention,
+                  );
+              }
+              this.retentionStatusKey = retentionKey;
+            }
+            return;
+          }
+          const { id, result } = message;
           const pending = this.pending.get(id);
           if (!pending) return;
           if (
@@ -188,7 +409,7 @@ export class SqliteSnapshotGuard {
       child.stdin.on('error', () => this.stop('snapshot-owner-unavailable'));
       child.once('close', () => {
         lines.close();
-        this.stop('snapshot-owner-stopped');
+        if (this.child === child) this.stop('snapshot-owner-exited');
       });
     } catch {
       this.stop('snapshot-owner-unavailable');
@@ -196,6 +417,19 @@ export class SqliteSnapshotGuard {
   }
 
   stop(reason = 'snapshot-owner-stopped') {
+    this.lifecycleStatus = undefined;
+    this.lifecycleObservedAtMs = undefined;
+    if (
+      [
+        'snapshot-owner-unavailable',
+        'snapshot-owner-protocol-failed',
+        'snapshot-owner-exited',
+      ].includes(reason) &&
+      !this.periodicFailed
+    ) {
+      this.periodicFailed = true;
+      console.warn('[SQLITE_PERIODIC_SNAPSHOT_FAILED]');
+    }
     this.reason = reason;
     const child = this.child;
     this.child = undefined;
@@ -207,6 +441,36 @@ export class SqliteSnapshotGuard {
       pending.resolve(fallback(reason));
     }
     this.pending.clear();
+  }
+
+  /** Explicit internal maintenance API. No timer, route or delete operation. */
+  async historyReview(
+    operation:
+      | 'history-review'
+      | 'history-validate-approval'
+      | 'history-pin'
+      | 'history-unpin',
+    payload: Record<string, unknown>,
+  ) {
+    if (
+      process.env.SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED !== '1' ||
+      process.env.SQLITE_ARTICLE_HISTORY_MAINTENANCE_WINDOW !== '1' ||
+      !this.historyRuntimePath ||
+      !this.child
+    )
+      throw new Error('Article history maintenance disabled');
+    // Loaded only after opt-in; never accepts caller-supplied recovery proofs.
+    const runtime = createRequire(__filename)(this.historyRuntimePath);
+    return runtime.withRuntimeReferences(
+      {
+        coordinator: sqliteWrites,
+        activeBackupReferences: activeVerifiedBackupReferences,
+        request: (op: string, args: Record<string, unknown>) =>
+          runtime.exchange(this.child, op, args),
+      },
+      operation,
+      payload,
+    );
   }
 
   private request(operation: string, token?: string) {
@@ -313,6 +577,7 @@ export class SqliteSnapshotGuard {
 const owner = new SqliteSnapshotGuard();
 export const startSqliteSnapshotGuard = () => owner.start();
 export const stopSqliteSnapshotGuard = () => owner.stop();
+export const periodicSnapshotPublicStatus = () => owner.publicStatus();
 export const queryFastInsertSnapshotGuard = () => owner.query();
 export const assertFastInsertSnapshotLease = (
   transaction: RawTransaction,
@@ -320,6 +585,17 @@ export const assertFastInsertSnapshotLease = (
 ) => owner.assertLease(transaction, lease);
 export const markFastInsertSnapshotDirty = (lease: FastInsertSnapshotLease) =>
   owner.markDirty(lease);
+
+export const reviewArticleHistory = (sources: string[]) =>
+  owner.historyReview('history-review', { sources });
+export const validateArticleHistoryApproval = (
+  plan: unknown,
+  approval: unknown,
+) => owner.historyReview('history-validate-approval', { plan, approval });
+export const pinArticleHistoryReference = (token: string, path: string) =>
+  owner.historyReview('history-pin', { token, path });
+export const unpinArticleHistoryReference = (token: string) =>
+  owner.historyReview('history-unpin', { token });
 
 export async function recentVerifiedSqliteSnapshot(): Promise<InsertOnlySnapshot | null> {
   const health = await owner.query();

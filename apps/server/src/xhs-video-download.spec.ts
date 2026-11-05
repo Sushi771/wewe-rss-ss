@@ -273,6 +273,15 @@ describe('server-only MP4 cache contract and original local saver, zero network'
       videoCount: 1,
     });
     const markdown = await fs.readFile(saved.markdownPath, 'utf8');
+    expect(markdown.match(/^# 视频笔记$/gm)).toHaveLength(1);
+    expect(
+      markdown.match(
+        /https:\/\/www\.xiaohongshu\.com\/explore\/verified-video/g,
+      ),
+    ).toHaveLength(1);
+    expect(markdown).toContain(
+      '[原文](https://www.xiaohongshu.com/explore/verified-video)',
+    );
     expect(markdown).toContain('完整视频说明');
     expect(markdown).not.toContain('mutated');
     const filename = 'video_' + hash(original) + '.mp4';

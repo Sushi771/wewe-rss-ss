@@ -1,0 +1,76 @@
+{
+  "apps/server/src/prisma/prisma.service.ts": [
+    {
+      "before": "import { AsyncLocalStorage } from 'node:async_hooks';\nimport { Injectable, OnModuleInit } from '@nestjs/common';\nimport { Prisma, PrismaClient } from '@prisma/client';\n",
+      "after": "import {projectWriterGate} from '../collection/project-writer-boundary';\nimport { AsyncLocalStorage } from 'node:async_hooks';\nimport { Injectable, OnModuleInit } from '@nestjs/common';\nimport { Prisma, PrismaClient } from '@prisma/client';\n"
+    },
+    {
+      "before": "export class PrismaService extends PrismaClient implements OnModuleInit {\n  private readonly recoveryOwner = new AsyncLocalStorage<boolean>();\n  private recovery: Promise<void> | undefined;\n\n  recoverFailedMediaTransaction(): Promise<void> {\n    if (this.recovery) return this.recovery;\n    setDatabaseRecovery('recovering');\n    this.recovery = this.recoveryOwner.run(true, async () => {\n",
+      "after": "export class PrismaService extends PrismaClient implements OnModuleInit {\n  private readonly recoveryOwner = new AsyncLocalStorage<boolean>();\n  private recovery: Promise<void> | undefined;\n  private writerLease: { check(): void } | undefined;\n\n  recoverFailedMediaTransaction(): Promise<void> {\n    this.writerLease?.check();\n    if (this.recovery) return this.recovery;\n    setDatabaseRecovery('recovering');\n    this.recovery = this.recoveryOwner.run(true, async () => {\n"
+    },
+    {
+      "before": "        ? { log: [{ emit: 'event', level: 'query' }] }\n        : undefined,\n    );\n    if (articleListReadTimingEnabled())\n      (\n        this as unknown as {\n",
+      "after": "        ? { log: [{ emit: 'event', level: 'query' }] }\n        : undefined,\n    );\n    this.writerLease = projectWriterGate().writerForUrl(process.env.DATABASE_URL, require('node:path').join(process.cwd(), 'prisma'));\n    if (articleListReadTimingEnabled())\n      (\n        this as unknown as {\n"
+    },
+    {
+      "before": "        databaseRecoveryStatus() !== 'ready'\n      )\n        throw Error('SQLITE_RECOVERY_UNAVAILABLE');\n      return transaction(...args);\n    };\n    // Preserve both transaction forms; defer engine admission, not individual\n",
+      "after": "        databaseRecoveryStatus() !== 'ready'\n      )\n        throw Error('SQLITE_RECOVERY_UNAVAILABLE');\n      this.writerLease?.check();\n      return transaction(...args);\n    };\n    // Preserve both transaction forms; defer engine admission, not individual\n"
+    },
+    {
+      "before": "      );\n    }) as typeof this.$transaction;\n    this.$use(async (params, next) => {\n      // Only the fixed reconnect probe may use the client during recovery.\n      if (this.recoveryOwner.getStore()) return next(params);\n      if (databaseRecoveryStatus() !== 'ready')\n",
+      "after": "      );\n    }) as typeof this.$transaction;\n    this.$use(async (params, next) => {\n      this.writerLease?.check();\n      // Only the fixed reconnect probe may use the client during recovery.\n      if (this.recoveryOwner.getStore()) return next(params);\n      if (databaseRecoveryStatus() !== 'ready')\n"
+    }
+  ],
+  "scripts/local-release/runtime.cjs": [
+    {
+      "before": "    throw new Error('必须明确指定已有数据库的绝对路径');\n  const database = fs.realpathSync(values.database);\n  if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');\n  const server = path.join(release, 'server');\n  const compact = manifest.executionLayout === 'compact-cjs-v1';\n  if (manifest.executionLayout && !compact)\n",
+      "after": "    throw new Error('必须明确指定已有数据库的绝对路径');\n  const database = fs.realpathSync(values.database);\n  if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');\n  if (command === 'start') require('./project-writer-gate.cjs').acquireWriter(database);\n  const server = path.join(release, 'server');\n  const compact = manifest.executionLayout === 'compact-cjs-v1';\n  if (manifest.executionLayout && !compact)\n"
+    }
+  ],
+  "scripts/local-release/restart.cjs": [
+    {
+      "before": "  unusedPort,\n  waitReady,\n  stopOwned,\n  loadProductionEnvironment,\n} = require('./switch.cjs');\nconst { writeActiveReleaseAsync } = require('./active-release.cjs');\n",
+      "after": "  unusedPort,\n  waitReady,\n  stopOwned,\n  observeProjectWriters,\n  loadProductionEnvironment,\n} = require('./switch.cjs');\nconst { writeActiveReleaseAsync } = require('./active-release.cjs');\n"
+    },
+    {
+      "before": "  const owners = portOwners(port);\n  assert.deepEqual(owners, [], `端口 ${port} 已有监听进程，拒绝启动`);\n}\n\nfunction commandLine(release, database, port, verifiedManifest) {\n  const node = path.join(release, 'runtime/node.exe');\n",
+      "after": "  const owners = portOwners(port);\n  assert.deepEqual(owners, [], `端口 ${port} 已有监听进程，拒绝启动`);\n}\nfunction launchCommandLine(executable,args){\n  return [executable,...args].map(value=>/[\\s\"]/.test(value)?'\"'+value.replace(/(\\\\*)\"/g,'$1$1\\\\\"').replace(/(\\\\+)$/,'$1$1')+'\"':value).join(' ');\n}\n\nconst {loadLegacyMaintenance}=require('./legacy-maintenance-loader.cjs');\n\nfunction commandLine(release, database, port, verifiedManifest) {\n  const node = path.join(release, 'runtime/node.exe');\n"
+    },
+    {
+      "before": "}\nasync function controlledRestartInner(options) {\n  if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');\n  if (options.production === options.rehearsal)\n    throw new Error('须且只能选择 --production 或 --rehearsal');\n  if (options.mode !== 'start' && options.mode !== 'restart')\n",
+      "after": "}\nasync function controlledRestartInner(options) {\n  if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');\n  if (options.legacyMaintenanceCheckpoint !== undefined && (typeof options.legacyMaintenanceCheckpoint !== 'function' || options.mode !== 'restart' || !require('./release-scope.cjs').session()?.policy?.preservingUpdate)) throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');\n  if (options.production === options.rehearsal)\n    throw new Error('须且只能选择 --production 或 --rehearsal');\n  if (options.mode !== 'start' && options.mode !== 'restart')\n"
+    },
+    {
+      "before": "      : await verifyReleaseAsync(previous, {\n          reuseVerified: options.reuseVerified === true,\n        });\n  let schemaProof;\n  const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;\n  if (preserving) {\n",
+      "after": "      : await verifyReleaseAsync(previous, {\n          reuseVerified: options.reuseVerified === true,\n        });\n  if(options.legacyJobId!==undefined){\n    if(options.legacyMaintenanceCheckpoint!==undefined||options.mode!=='restart')throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');\n    options={...options,legacyMaintenanceCheckpoint:loadLegacyMaintenance(release,manifest,options.legacyJobId)};\n  }\n  let schemaProof;\n  const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;\n  if (preserving) {\n"
+    },
+    {
+      "before": "  for (const item of [manifest, previousManifest]) {\n    assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');\n    assert.equal(typeof item.desktopHelperIncluded, 'boolean');\n  }\n  if (options.production) {\n    assert.equal(source, fs.realpathSync(productionDatabase));\n",
+      "after": "  for (const item of [manifest, previousManifest]) {\n    assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');\n    assert.equal(typeof item.desktopHelperIncluded, 'boolean');\n  }\n  if (options.legacyMaintenanceCheckpoint) {\n    const boundaryHash=fileHash(path.join(__dirname,'project-writer-gate.cjs'));\n    if (!preserving || [manifest,previousManifest].some(item=>item.schemaCompatibility!=='current'||item.desktopHelperIncluded!==false||item.executionLayout!=='compact-cjs-v1') ||\n        manifest.files?.['project-writer-gate.cjs']!==boundaryHash || manifest.files?.['runtime.cjs']!==fileHash(path.join(__dirname,'runtime.cjs')))\n      throw Error('LEGACY_MAINTENANCE_CANDIDATE_BOUNDARY_UNAVAILABLE');\n  }\n  if (options.production) {\n    assert.equal(source, fs.realpathSync(productionDatabase));\n"
+    },
+    {
+      "before": "        stdio: ['ignore', log, log],\n      });\n      fs.closeSync(log);\n      if (preserving) {\n        const snapshot = processIdentity('Snapshot', child.pid, port);\n        try {\n          scopeLease?.bindPreservingChild?.(snapshot, bundle.id, commandLine(bundlePath, database, port, bundle));\n        } catch (error) {\n          child.kill();\n          throw error;\n        }\n      }\n      return child;\n    };\n    let oldChild;\n    let newChild;\n    let fallbackChild;\n    let stopped = false;\n    let finalBackup;\n    const baseline = path.join(audit, 'final-baseline.json');\n",
+      "after": "        stdio: ['ignore', log, log],\n      });\n      fs.closeSync(log);\n      if(label==='new')newChild=child;\n      if (preserving) {\n        const expectedCommand=launchCommandLine(path.join(bundlePath,'runtime/node.exe'),args);\n        const snapshot = processIdentity('OwnedSnapshot', child.pid, port,{executable:path.join(bundlePath,'runtime/node.exe'),commandLine:expectedCommand});\n        ownedIdentities.set(child.pid,{identity:snapshot,packageId:bundle.id,commandLine:expectedCommand});\n        scopeLease?.bindPreservingChild?.(snapshot, bundle.id, expectedCommand);\n      }\n      return child;\n    };\n    let oldChild;\n    let newChild;\n    let fallbackChild;\n    const ownedIdentities=new Map();\n    let oldStopCheckpoint;\n    let stopped = false;\n    let finalBackup;\n    const baseline = path.join(audit, 'final-baseline.json');\n"
+    },
+    {
+      "before": "        }\n        const result = processIdentity('Stop', identity.pid, port, identity);\n        assert.equal(result.stopped, true);\n        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });\n        stopped = true;\n        finalBackup = backup(database, 'after-stop');\n      } else {\n        if (backgroundPreparation) {\n          require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(\n",
+      "after": "        }\n        const result = processIdentity('Stop', identity.pid, port, identity);\n        assert.equal(result.stopped, true);\n        stopped = true;\n        oldStopCheckpoint={identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()};\n        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });\n        finalBackup = backup(database, 'after-stop');\n        if (!options.legacyMaintenanceCheckpoint) require('./project-writer-gate.cjs').retireStoppedWriter(database, {identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()});\n        if (options.legacyMaintenanceCheckpoint) {\n          const scopeLease=require('./release-scope.cjs').requireSession();\n          const roots=scopeLease.legacyMaintenanceRoots(identity);\n          await options.legacyMaintenanceCheckpoint({ identity, stopReceipt: result, stoppedAt: Date.now(), scopeLease, backup: finalBackup, database,observeProjectWriters:()=>observeProjectWriters(roots,port) });\n        }\n      } else {\n        if (backgroundPreparation) {\n          require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(\n"
+    },
+    {
+      "before": "      if (options.production) newChild.unref();\n      return summary;\n    } catch (error) {\n      await stopOwned(newChild);\n      if (preserving && newChild) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid, { pid: newChild.pid, stopped: newChild.exitCode !== null || typeof newChild.signalCode === 'string' });\n      if (stopped) {\n        try {\n          fallbackChild = start(\n",
+      "after": "      if (options.production) newChild.unref();\n      return summary;\n    } catch (error) {\n      if(newChild){\n        const owned=ownedIdentities.get(newChild.pid);\n        const receipt=await stopOwned(newChild,owned?.identity);\n        if(preserving)require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid,receipt||{pid:newChild.pid,stopped:newChild.exitCode!==null||typeof newChild.signalCode==='string'},owned);\n        if(owned)require('./project-writer-gate.cjs').retireStoppedWriter(database,{identity:owned.identity,stopReceipt:receipt,scopeLease:require('./release-scope.cjs').session()});\n        else if(fs.existsSync(require('./project-writer-gate.cjs').binding(database).file))throw Error('PROJECT_WRITER_BOUNDARY_UNPROVEN');\n      }\n      if(oldStopCheckpoint)require('./project-writer-gate.cjs').retireStoppedWriter(database,oldStopCheckpoint);\n      if (stopped) {\n        try {\n          fallbackChild = start(\n"
+    },
+    {
+      "before": "      'expected-command-line': { type: 'string' },\n      'prepared-rehearsal': { type: 'boolean', default: false },\n      'cold-launch-rehearsal': { type: 'boolean', default: false },\n    },\n  });\n  if (!values.release || (values.production && !values.database))\n",
+      "after": "      'expected-command-line': { type: 'string' },\n      'prepared-rehearsal': { type: 'boolean', default: false },\n      'cold-launch-rehearsal': { type: 'boolean', default: false },\n      'legacy-job-id': {type:'string'},\n    },\n  });\n  if (!values.release || (values.production && !values.database))\n"
+    },
+    {
+      "before": "    injectFailure: values['inject-new-start-failure'],\n    preparedRehearsal: values['prepared-rehearsal'],\n    coldLaunchRehearsal: values['cold-launch-rehearsal'],\n    expected:\n      values.production && values.mode === 'restart'\n        ? {\n",
+      "after": "    injectFailure: values['inject-new-start-failure'],\n    preparedRehearsal: values['prepared-rehearsal'],\n    coldLaunchRehearsal: values['cold-launch-rehearsal'],\n    legacyJobId:values['legacy-job-id'],\n    expected:\n      values.production && values.mode === 'restart'\n        ? {\n"
+    },
+    {
+      "before": "    console.error(error.stack || error.message);\n    process.exitCode = 1;\n  });\nmodule.exports = { controlledRestart, commandLine, requireFreePort };\n",
+      "after": "    console.error(error.stack || error.message);\n    process.exitCode = 1;\n  });\nmodule.exports = { controlledRestart, commandLine, requireFreePort, loadLegacyMaintenance,launchCommandLine };\n"
+    }
+  ]
+}

@@ -1,3 +1,5 @@
+import { ArticlePreparation } from '../article-local-save';
+import { xhsOriginalLink } from './xhs-original-link';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
 import { PrismaService } from '../prisma/prisma.service';
@@ -9,18 +11,37 @@ import {
   XhsNormalizedCandidate,
 } from './xiaohongshu-contract';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
+import {
+  assertIncrementalTransaction,
+  assertIncrementalWriteAdmission,
+  incrementalWrite,
+} from './incremental-write';
+import { sqliteWrites } from './sqlite-write-coordinator';
 import { buildArticleMarkdown } from '../article-export';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { safeXhsAvatarUrl } from './xhs-profile';
 import { load } from 'cheerio';
-import { decodeInlineImage } from './image-fetch';
+import { articlePublicationRange, XhsNoteFilter } from '@wewe-rss/shared';
+import { visibleBodyText } from '../article-body-search';
 import {
   buildCompleteArticleDownload,
   verifiedDownloadBody,
 } from '../article-verified-download';
 import { ArticleDownloadError } from '../article-download';
+import {
+  XhsCreatorFilter,
+  XhsMetricSnapshot,
+  xhsMetricSelection,
+} from '@wewe-rss/shared';
+import { readXhsMetrics, readXhsComments } from './xhs-engagement-store';
+import { xhsEngagementMarkdown } from './xhs-engagement-export';
+import {
+  withXhsLocalSnapshot,
+  xhsLocalSnapshotPublisher,
+} from './xhs-local-snapshot';
 import {
   inspectCachedMp4,
   prepareXhsVideoDownload,
@@ -88,6 +109,7 @@ function cachedVideoMetadata(
 }
 const cachedNoteMetadataSelect = {
   id: true,
+  creatorId: true,
   title: true,
   publishTime: true,
   status: true,
@@ -96,6 +118,22 @@ const cachedNoteMetadataSelect = {
   videoExpectedBytes: true,
   videoSha256: true,
 } satisfies Prisma.XhsNoteSelect;
+
+/** Literal visible-text search, shared by cache listing and ZIP selection. */
+export function xhsNoteMatchesSearch(
+  note: { title: string; creatorName: string; contentHtml?: string | null },
+  search?: string | null,
+) {
+  const term = (search ?? '').trim().toLowerCase();
+  return (
+    !term ||
+    note.title.toLowerCase().includes(term) ||
+    note.creatorName.toLowerCase().includes(term) ||
+    visibleBodyText(note.contentHtml ?? null)
+      .toLowerCase()
+      .includes(term)
+  );
+}
 
 type ManagementPlatform = 'wechat' | 'xiaohongshu';
 // Shared process lock protects both platform namespaces while checking membership.
@@ -110,6 +148,24 @@ async function mutateManagement<T>(action: () => Promise<T>) {
   } finally {
     managementMutationActive = false;
   }
+}
+/** Ordinary classification edits share PR39's admission and durable transaction. */
+function mutateManagementIncremental<T>(
+  db: PrismaService,
+  expectedBytes: number,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+) {
+  return mutateManagement(() =>
+    incrementalWrite(db, expectedBytes, () =>
+      sqliteWrites.write(async () => {
+        await assertIncrementalWriteAdmission();
+        return db.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return action(tx);
+        });
+      }),
+    ),
+  );
 }
 export function managementMemberIds(ids: string[], maxIdLength = 128) {
   if (
@@ -149,9 +205,10 @@ export async function saveManagementGroup(
   const name = input.name.trim();
   if (!name || name.length > 80 || /[\x00-\x1f\x7f]/.test(name))
     return fail('分组名称须为 1–80 个字符，不能含控制字符。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(name, 'utf8') + 4096,
+    async (tx) => {
       if (input.id) {
         await getManagementGroup(tx, platform, input.id);
         return tx.managementGroup.update({
@@ -173,8 +230,8 @@ export async function saveManagementGroup(
             )._max.order ?? -1) + 1,
         },
       });
-    });
-  });
+    },
+  );
 }
 /** Compare the saved order inside the transaction; stale clients cannot overwrite it. */
 export async function reorderManagementGroups(
@@ -193,9 +250,10 @@ export async function reorderManagementGroups(
     )
   )
     return fail('分组排序必须包含完整且不重复的 ID。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const saved = await tx.managementGroup.findMany({
         where: { platform },
         orderBy: [{ order: 'asc' }, { id: 'asc' }],
@@ -210,8 +268,8 @@ export async function reorderManagementGroups(
       for (const [order, id] of input.ids.entries())
         await tx.managementGroup.update({ where: { id }, data: { order } });
       return { ids: input.ids };
-    });
-  });
+    },
+  );
 }
 
 /** Feed sorting only writes the complete membership of one group, preserving other groups. */
@@ -230,9 +288,10 @@ export async function reorderManagementFeeds(
     input.some((f) => !Number.isSafeInteger(f.order) || f.order < 0)
   )
     return fail('公众号排序 ID 或顺序无效。', 'BAD_REQUEST');
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify(input), 'utf8'),
+    async (tx) => {
       const rows = await tx.feed.findMany({
         where: { id: { in: input.map((f) => f.id) } },
       });
@@ -269,8 +328,8 @@ export async function reorderManagementFeeds(
           Prisma.sql`UPDATE feeds SET "order" = ${order} WHERE id = ${id}`,
         );
       return true;
-    });
-  });
+    },
+  );
 }
 
 export async function removeManagementGroup(
@@ -299,9 +358,10 @@ export async function moveManagementMembers(
   groupId: string | null,
 ) {
   const unique = managementMemberIds(ids);
-  return mutateManagement(async () => {
-    await createVerifiedSqliteBackup();
-    return db.$transaction(async (tx) => {
+  return mutateManagementIncremental(
+    db,
+    Buffer.byteLength(JSON.stringify({ ids: unique, groupId }), 'utf8'),
+    async (tx) => {
       if (groupId !== null) await getManagementGroup(tx, platform, groupId);
       const where = { id: { in: unique } };
       const count =
@@ -317,8 +377,8 @@ export async function moveManagementMembers(
         );
       else await tx.xhsCreator.updateMany({ where, data: { groupId } });
       return { moved: unique.length, ids: unique, groupId };
-    });
-  });
+    },
+  );
 }
 
 /** Store the supplied public page as a pending link, never derive a trusted ID. */
@@ -363,20 +423,38 @@ export class XiaohongshuService {
         : '待接入数据源；可以管理待接入博主，尚不能读取新笔记。',
     };
   }
-  async list(input?: { groupId?: string | null }) {
+  async list(input?: XhsCreatorFilter) {
     if (typeof input?.groupId === 'string')
       await getManagementGroup(this.prisma, 'xiaohongshu', input.groupId);
+    const metrics = await readXhsMetrics(this.prisma, 'creator');
+    const items = await this.prisma.xhsCreator.findMany({
+      where: input?.groupId === undefined ? {} : { groupId: input.groupId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      include: { _count: { select: { notes: true } } },
+    });
+    const avatars = await this.prisma.$queryRaw<
+      Array<{ id: string; avatar_url: string | null }>
+    >`SELECT s.owner_id AS id, CASE WHEN json_valid(s.document) THEN json_extract(s.document, '$.avatarUrl') ELSE NULL END AS avatar_url FROM xhs_metric_snapshots s INNER JOIN xhs_creators c ON c.id=s.owner_id WHERE s.owner_kind='creator-avatar'`;
+    const avatarById = new Map(
+      avatars.map((a) => [a.id, safeXhsAvatarUrl(a.avatar_url) ?? null]),
+    );
     return {
       platform: 'xiaohongshu' as const,
-      items: await this.prisma.xhsCreator.findMany({
-        where: input?.groupId === undefined ? {} : { groupId: input.groupId },
-        orderBy: { createdAt: 'asc' },
-        include: { _count: { select: { notes: true } } },
-      }),
+      items: xhsMetricSelection(
+        items.map((c) => ({
+          ...c,
+          avatarUrl: avatarById.get(c.id) ?? null,
+          metrics: metrics.get(c.id) ?? null,
+        })),
+        input,
+      ),
     };
   }
   groups() {
     return managementGroups(this.prisma, 'xiaohongshu');
+  }
+  reorderGroups(input: { ids: string[]; expectedIds: string[] }) {
+    return reorderManagementGroups(this.prisma, 'xiaohongshu', input);
   }
   saveGroup(input: { id?: string; name: string }) {
     return saveManagementGroup(this.prisma, 'xiaohongshu', input);
@@ -415,13 +493,17 @@ export class XiaohongshuService {
         creator: old,
         message: '此主页已在待接入列表中。',
       };
-    await createVerifiedSqliteBackup();
     const proposedId = randomUUID();
-    const creator = await this.prisma.xhsCreator.upsert({
-      where: { profileUrl },
-      create: { id: proposedId, profileUrl, displayName: name },
-      update: {},
-    });
+    const creator = await incrementalWrite(this.prisma, 4096, () =>
+      this.prisma.$transaction(async (tx) => {
+        await assertIncrementalTransaction(tx);
+        return tx.xhsCreator.upsert({
+          where: { profileUrl },
+          create: { id: proposedId, profileUrl, displayName: name },
+          update: {},
+        });
+      }),
+    );
     return {
       created: creator.id === proposedId,
       subscribed: false,
@@ -435,11 +517,12 @@ export class XiaohongshuService {
     this.active.add(id);
     try {
       await this.getCreator(id);
-      await createVerifiedSqliteBackup();
-      return await this.prisma.xhsCreator.update({
-        where: { id },
-        data: { enabled },
-      });
+      return await incrementalWrite(this.prisma, 4096, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          return tx.xhsCreator.update({ where: { id }, data: { enabled } });
+        }),
+      );
     } finally {
       this.active.delete(id);
     }
@@ -453,7 +536,15 @@ export class XiaohongshuService {
       if (await this.prisma.xhsNote.count({ where: { creatorId: id } }))
         return fail('此博主已有本地归档，请使用暂停保留内容。');
       await createVerifiedSqliteBackup();
-      await this.prisma.xhsCreator.delete({ where: { id: creator.id } });
+      await this.prisma.$transaction(async (tx) => {
+        const jobs = await tx.$queryRaw<
+          Array<{ n: bigint }>
+        >`SELECT COUNT(*) AS n FROM xhs_refresh_jobs WHERE creator_id = ${id}`;
+        if (Number(jobs[0]?.n || 0) > 0)
+          return fail('该博主有更新记录，请保留并排查状态。', 'CONFLICT');
+        await tx.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creator.id}`;
+        await tx.xhsCreator.delete({ where: { id: creator.id } });
+      });
       return { removed: true };
     } finally {
       this.active.delete(id);
@@ -464,32 +555,241 @@ export class XiaohongshuService {
     if (!c) return fail('找不到该博主。', 'NOT_FOUND');
     return c;
   }
-  async notes(creatorId: string) {
-    await this.getCreator(creatorId);
-    const notes = await this.prisma.xhsNote.findMany({
-      where: { creatorId },
-      orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
-      select: cachedNoteMetadataSelect,
+  /** Stop is durable even while a previously claimed source call is in flight.
+   * That call cannot commit notes after this update. Unresolved jobs remain
+   * closed for explicit recovery; stopping does not imply remote cancellation. */
+  async stopRefresh(id: string, operationId?: string) {
+    await this.getCreator(id);
+    if (operationId && !/^[a-f0-9-]{36}$/.test(operationId))
+      return fail('更新身份无效。', 'BAD_REQUEST');
+    return this.prisma.$transaction(async (tx) => {
+      const changed = operationId
+        ? await tx.$executeRaw`UPDATE xhs_refresh_jobs SET state = 'stopped' WHERE creator_id = ${id} AND owner = ${operationId} AND state = 'running'`
+        : await tx.$executeRaw`UPDATE xhs_refresh_jobs SET state = 'stopped' WHERE creator_id = ${id} AND state = 'running'`;
+      if (changed === 1) return { stopped: true };
+      if (!operationId) return { stopped: false };
+      const existing = await tx.$queryRaw<
+        Array<{ state: string }>
+      >`SELECT state FROM xhs_refresh_jobs WHERE creator_id = ${id} AND owner = ${operationId}`;
+      if (existing.length) return { stopped: existing[0].state === 'stopped' };
+      await tx.$executeRaw`INSERT INTO xhs_refresh_jobs (creator_id,generation,owner,started_at,state)
+        SELECT ${id}, COALESCE(MAX(generation),0)+1, ${operationId}, ${Date.now()}, 'stopped' FROM xhs_refresh_jobs WHERE creator_id = ${id}`;
+      return { stopped: true };
     });
-    return {
-      platform: 'xiaohongshu' as const,
-      items: notes.map((note) => ({
-        id: note.id,
+  }
+  async refreshStatus(id: string, operationId: string) {
+    if (!/^[a-f0-9-]{36}$/.test(operationId))
+      return fail('更新身份无效。', 'BAD_REQUEST');
+    await this.getCreator(id);
+    const rows = await this.prisma.$queryRaw<
+      Array<{ state: string; outcome: string | null }>
+    >`
+      SELECT state, outcome FROM xhs_refresh_jobs WHERE creator_id = ${id} AND owner = ${operationId}`;
+    if (!rows.length) return { state: 'missing' as const };
+    const row = rows[0];
+    if (row.state === 'complete' && row.outcome) {
+      const outcome = JSON.parse(row.outcome);
+      if (
+        !['complete', 'partial'].includes(outcome.status) ||
+        !Number.isSafeInteger(outcome.added) ||
+        typeof outcome.message !== 'string'
+      )
+        return fail('更新回执无效，已暂停。');
+      return { state: 'complete' as const, outcome };
+    }
+    if (row.state !== 'running' && row.state !== 'stopped')
+      return fail('更新状态无效，已暂停。');
+    return { state: row.state as 'running' | 'stopped' };
+  }
+  private async matchingNotes(
+    creatorId?: string,
+    filter?: XhsNoteFilter,
+    completeOnly = false,
+    selected?: string[],
+  ) {
+    creatorId ??= filter?.creatorId;
+    if (creatorId) await this.getCreator(creatorId);
+    if (typeof filter?.groupId === 'string')
+      await getManagementGroup(this.prisma, 'xiaohongshu', filter.groupId);
+    const candidates = await this.prisma.xhsNote.findMany({
+      where: {
+        ...(creatorId ? { creatorId } : {}),
+        ...(filter?.groupId !== undefined
+          ? { creator: { groupId: filter.groupId } }
+          : {}),
+        ...(completeOnly ? { status: 'complete' } : {}),
+        ...(selected ? { id: { in: selected } } : {}),
+        ...(filter ? { publishTime: articlePublicationRange(filter) } : {}),
+      },
+      orderBy: [{ publishTime: 'desc' }, { id: 'asc' }],
+      select: {
+        ...cachedNoteMetadataSelect,
+        creator: { select: { displayName: true, groupId: true } },
+      },
+    });
+    const matched: typeof candidates = [];
+    for (const note of candidates) {
+      const metadata = {
         title: note.title,
-        publishTime: note.publishTime,
-        status: note.status,
-        kind:
-          note.kind === 'video' ? ('video' as const) : ('image-text' as const),
-        video: cachedVideoMetadata(note),
-      })),
+        creatorName: note.creator.displayName,
+      };
+      if (xhsNoteMatchesSearch(metadata, filter?.search)) {
+        matched.push(note);
+        continue;
+      }
+      // Decode one body at a time; do not materialize all inline image payloads
+      // together or build another cache/index merely to support literal search.
+      const body = await this.prisma.xhsNote.findFirst({
+        where: { id: note.id, creatorId: note.creatorId },
+        select: { contentHtml: true },
+      });
+      if (
+        body &&
+        xhsNoteMatchesSearch(
+          { ...metadata, contentHtml: body.contentHtml },
+          filter?.search,
+        )
+      )
+        matched.push(note);
+    }
+    const metrics = await readXhsMetrics(this.prisma, 'note');
+    return xhsMetricSelection(
+      matched.map((n) => ({ ...n, metrics: metrics.get(n.id) ?? null })),
+      filter,
+    );
+  }
+  async notes(creatorId?: string, filter?: XhsNoteFilter) {
+    const notes = await this.matchingNotes(creatorId, filter);
+    const creatorIds = [...new Set(notes.map((n) => n.creatorId))];
+    const tasks: Array<{ creator_id: string; document: string }> = [];
+    const recoveries: Array<{ creator_id: string; document: string }> = [];
+    for (let offset = 0; offset < creatorIds.length; offset += 500) {
+      const batch = creatorIds.slice(offset, offset + 500);
+      tasks.push(
+        ...(await this.prisma.$queryRaw<
+          Array<{ creator_id: string; document: string }>
+        >`
+        SELECT creator_id,document FROM (
+          SELECT creator_id,document,ROW_NUMBER() OVER (PARTITION BY creator_id ORDER BY updated_at DESC,id DESC) AS rn
+          FROM xhs_subscription_tasks WHERE creator_id IN (${Prisma.join(batch)}) AND json_extract(document,'$.basicOnly')=1
+        ) WHERE rn=1`),
+      );
+      recoveries.push(
+        ...(await this.prisma.$queryRaw<
+          Array<{ creator_id: string; document: string }>
+        >`
+        SELECT creator_id,document FROM xhs_whole_creator_jobs WHERE creator_id IN (${Prisma.join(batch)})
+        AND json_extract(document,'$.reviewAttempt.state')='checkpointed'`),
+      );
+    }
+    const latest = new Map(
+      tasks.map((row) => [row.creator_id, JSON.parse(row.document)]),
+    );
+    const recovered = new Set<string>();
+    for (const row of recoveries) {
+      const attempt = JSON.parse(row.document).reviewAttempt,
+        receipt = attempt?.receipt;
+      if (
+        attempt?.state === 'checkpointed' &&
+        attempt.dispatch?.state === 'checkpointed' &&
+        receipt?.creatorId === row.creator_id &&
+        typeof receipt.noteId === 'string' &&
+        ['saved', 'retained'].includes(receipt.body)
+      )
+        recovered.add(JSON.stringify([row.creator_id, receipt.noteId]));
+    }
+    const stateOf = (note: (typeof notes)[number]) => {
+      const task = latest.get(note.creatorId);
+      if (recovered.has(JSON.stringify([note.creatorId, note.id])))
+        return note.publishTime > 0 &&
+          ['likes', 'collects', 'shares', 'comments'].every(
+            (k) =>
+              Number.isSafeInteger(note.metrics?.values?.[k]) &&
+              (note.metrics!.values[k] as number) >= 0,
+          )
+          ? ('complete' as const)
+          : ('missing' as const);
+      if (
+        task?.collectionScope === 'selected' &&
+        Array.isArray(task.selectedIds) &&
+        !task.selectedIds.includes(note.id)
+      )
+        return 'skipped' as const;
+      if (task?.items?.[note.id] === 'failed') return 'needs_review' as const;
+      if (task?.items?.[note.id] !== 'completed') return 'pending' as const;
+      if (task.basicResults?.[note.id] === 'complete')
+        return 'complete' as const;
+      if (task.basicResults?.[note.id] === 'missing') return 'missing' as const;
+      return 'pending' as const;
+    };
+    const queryVersion = this.noteQueryVersion(notes);
+    if (
+      (filter?.offset && !filter.queryVersion) ||
+      (filter?.queryVersion && filter.queryVersion !== queryVersion)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
+    return {
+      queryVersion,
+      platform: 'xiaohongshu' as const,
+      total: notes.length,
+      items: notes
+        .slice(
+          filter?.offset ?? 0,
+          filter?.limit === undefined
+            ? undefined
+            : (filter.offset ?? 0) + filter.limit,
+        )
+        .map((note) => ({
+          id: note.id,
+          creatorId: note.creatorId,
+          creatorName: note.creator.displayName,
+          groupId: note.creator.groupId,
+          title: note.title,
+          publishTime: note.publishTime,
+          status: note.status,
+          kind:
+            note.kind === 'video'
+              ? ('video' as const)
+              : ('image-text' as const),
+          video: cachedVideoMetadata(note),
+          metrics: note.metrics,
+          basicStatus: stateOf(note),
+        })),
     };
   }
-  async refresh(id: string) {
+  private noteQueryVersion(
+    rows: Array<{
+      id: string;
+      title: string;
+      status: string;
+      publishTime: number;
+      metrics: XhsMetricSnapshot | null;
+    }>,
+  ) {
+    return createHash('sha256')
+      .update(
+        JSON.stringify(
+          rows.map((n) => [n.id, n.title, n.status, n.publishTime, n.metrics]),
+        ),
+      )
+      .digest('hex');
+  }
+  async legacyRefresh(id: string, operationId?: string) {
     if (this.active.has(id))
       return fail('该博主正在处理，不会重复发送请求。', 'CONFLICT');
     this.active.add(id);
     try {
       const creator = await this.getCreator(id);
+      const owner = operationId || randomUUID();
+      if (operationId) {
+        const previous = await this.refreshStatus(id, owner);
+        if (previous.state === 'complete') return previous.outcome;
+        if (previous.state !== 'missing')
+          return fail(
+            '此前更新状态尚未确认，已暂停；不会自动重发。',
+            'CONFLICT',
+          );
+      }
       if (!creator.enabled)
         return {
           status: 'paused' as const,
@@ -502,6 +802,21 @@ export class XiaohongshuService {
           added: 0,
           message: this.capability().message,
         };
+      const startedAt = Date.now();
+      const claimed = await this.prisma.$executeRaw`
+        INSERT INTO xhs_refresh_jobs (creator_id, generation, owner, started_at, state)
+        SELECT ${id}, COALESCE(MAX(generation), 0) + 1, ${owner}, ${startedAt}, 'running'
+        FROM xhs_refresh_jobs WHERE creator_id = ${id}
+        HAVING NOT EXISTS (SELECT 1 FROM xhs_refresh_jobs WHERE creator_id = ${id} AND state IN ('running', 'stopped'))`;
+      if (claimed !== 1)
+        return fail('此前更新状态尚未确认，已暂停；不会自动重发。', 'CONFLICT');
+      const generationRows = await this.prisma.$queryRaw<
+        Array<{ generation: bigint | number }>
+      >`
+        SELECT generation FROM xhs_refresh_jobs WHERE creator_id = ${id} AND owner = ${owner} AND state = 'running'`;
+      if (generationRows.length !== 1)
+        return fail('更新身份未确认，已暂停。', 'CONFLICT');
+      const generation = Number(generationRows[0].generation);
       const result = await this.source.read(creator);
       if (
         !result.evidenceVerified ||
@@ -519,6 +834,8 @@ export class XiaohongshuService {
         }
       >();
       const timestamps = new Map<string, number>();
+      const observedTimes = new Map<string, number>();
+      const failedNotes = new Set<string>();
       for (const page of result.pages) {
         ledger = appendXhsPage(
           ledger,
@@ -526,119 +843,217 @@ export class XiaohongshuService {
           3,
         ).ledger;
         for (const item of page.items) {
-          if (item.video && !Buffer.isBuffer(item.video.bytes))
-            return fail('视频缓存须为已取得的完整字节，旧缓存保持不变。');
-          const video =
-            item.kind === 'video' && item.video
-              ? { ...item.video, bytes: Buffer.from(item.video.bytes) }
-              : null;
-          const draft = xhsArchiveDraft(
-            result.authorId,
-            video ? { ...item, kind: 'image-text' } : item,
-          );
-          if (video) {
-            // Reuse the single-note byte/identity/text/cover/hash/container gate.
-            prepareXhsVideoDownload({
-              evidenceVerified: result.evidenceVerified,
-              note: item,
-              video,
-            });
-          } else if (item.video)
-            return fail('视频缓存与笔记类型不一致，旧缓存保持不变。');
+          // Identity and author are verified by appendXhsPage; do not isolate
+          // untrusted publication times as ordinary per-note failures.
           if (
-            draft.status === 'candidate' &&
-            !draft.readyForEvidenceCheck &&
-            !video
+            !Number.isSafeInteger(item.publishedAt) ||
+            item.publishedAt <= 0 ||
+            item.publishedAt > 253402300799
           )
-            return fail('全文或图片缓存未通过核查，旧归档保持不变。');
-          const previous = drafts.get(draft.noteKey);
-          if (!previous || (previous.draft.status === 'video-skipped' && video))
-            drafts.set(draft.noteKey, { draft, video, kind: item.kind });
-          if (!timestamps.has(draft.noteKey))
-            timestamps.set(draft.noteKey, item.publishedAt);
+            throw new Error('XHS_PUBLICATION_TIME_MISSING');
+          if (
+            observedTimes.has(item.noteId) &&
+            observedTimes.get(item.noteId) !== item.publishedAt
+          )
+            throw new Error('XHS_PUBLICATION_TIME_CONFLICT');
+          observedTimes.set(item.noteId, item.publishedAt);
+          try {
+            if (item.video && !Buffer.isBuffer(item.video.bytes))
+              throw new Error('XHS_VIDEO_INVALID');
+            const video =
+              item.kind === 'video' && item.video
+                ? { ...item.video, bytes: Buffer.from(item.video.bytes) }
+                : null;
+            const draft = xhsArchiveDraft(
+              result.authorId,
+              video ? { ...item, kind: 'image-text' } : item,
+            );
+            if (video) {
+              // Reuse the single-note byte/identity/text/cover/hash/container gate.
+              prepareXhsVideoDownload({
+                evidenceVerified: result.evidenceVerified,
+                note: item,
+                video,
+              });
+            } else if (item.video) throw new Error('XHS_VIDEO_INVALID');
+            if (
+              draft.status === 'candidate' &&
+              !draft.readyForEvidenceCheck &&
+              !video
+            )
+              throw new Error('XHS_NOTE_INCOMPLETE');
+            const previous = drafts.get(draft.noteKey);
+            if (
+              !previous ||
+              (previous.draft.status === 'video-skipped' && video)
+            )
+              drafts.set(draft.noteKey, { draft, video, kind: item.kind });
+            if (!timestamps.has(draft.noteKey))
+              timestamps.set(draft.noteKey, item.publishedAt);
+          } catch (error) {
+            if (
+              !(
+                (error instanceof ArticleDownloadError &&
+                  error.diagnostic.code === 'XHS_VIDEO_CACHE_INVALID') ||
+                (error instanceof Error &&
+                  [
+                    'XHS_VIDEO_INVALID',
+                    'XHS_NOTE_INCOMPLETE',
+                    'XHS_BODY_INVALID',
+                    'XHS_IMAGE_COUNT_INVALID',
+                    'XHS_IMAGE_ORDER_INVALID',
+                    'XHS_MEDIA_BUDGET_EXCEEDED',
+                    'IMAGE_RESPONSE_INVALID',
+                  ].includes(error.message))
+              )
+            )
+              throw error;
+            failedNotes.add(
+              JSON.stringify(['xiaohongshu', 'note', item.noteId]),
+            );
+          }
         }
       }
       if (!result.pages.length) return fail('未收到可核验列表，旧归档保留。');
-      await createVerifiedSqliteBackup();
-      const added = await this.prisma.$transaction(async (tx) => {
-        let count = 0;
-        for (const { draft: d, video, kind } of drafts.values()) {
-          const old = await tx.xhsNote.findUnique({ where: { id: d.noteKey } });
-          if (old) {
-            if (old.creatorId !== id)
-              return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
-            if (old.status !== 'video-skipped' || !video) continue;
-          }
-          const contentHtml =
-            d.status === 'candidate'
-              ? '<div id="js_content">' +
-                d.text
-                  .split('\n')
-                  .map((p) => '<p>' + escape(p) + '</p>')
-                  .join('') +
-                d.images
-                  .map(
-                    (i) =>
-                      '<img src="data:' +
-                      i.type +
-                      ';base64,' +
-                      i.bytes.toString('base64') +
-                      '">',
-                  )
-                  .join('') +
-                // The shared video contract allows a real complete video with
-                // no caption/cover. Mark this local-only structural placeholder;
-                // title survives the unchanged sanitizer's attribute allowlist.
-                (video && !d.text.trim() && !d.images.length
-                  ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
-                  : '') +
-                '</div>'
-              : null;
-          const data = {
-            title:
-              d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
-            status: d.status === 'candidate' ? 'complete' : 'video-skipped',
-            contentHtml,
-            kind,
-            videoBytes: video?.bytes ?? null,
-            videoMimeType: video?.mimeType ?? null,
-            videoExpectedBytes: video?.expectedBytes ?? null,
-            videoSha256: video?.sha256 ?? null,
-          };
-          if (old) {
-            // Only a skipped video's missing archive may be filled. Keep its
-            // stable ID, creator relation, and previously trusted publication time.
-            await tx.xhsNote.update({ where: { id: old.id }, data });
-          } else {
-            await tx.xhsNote.create({
-              data: {
-                id: d.noteKey,
-                creatorId: id,
-                publishTime: timestamps.get(d.noteKey)!,
-                ...data,
-              },
+      const expectedBytes = [...drafts.values()].reduce(
+        (bytes, { draft, video }) =>
+          bytes +
+          Buffer.byteLength(JSON.stringify({ ...draft, images: undefined })) +
+          (draft.images || []).reduce(
+            (sum, image) => sum + image.bytes.length * 2,
+            0,
+          ) +
+          (video?.bytes.length || 0),
+        4096,
+      );
+      const added = await incrementalWrite(this.prisma, expectedBytes, () =>
+        this.prisma.$transaction(async (tx) => {
+          await assertIncrementalTransaction(tx);
+          const current = await tx.xhsCreator.findUniqueOrThrow({
+            where: { id },
+          });
+          if (
+            !current.enabled ||
+            current.profileUrl !== creator.profileUrl ||
+            current.externalAuthorId !== creator.externalAuthorId
+          )
+            return fail('博主身份或启用状态已变化，旧归档保留。', 'CONFLICT');
+          const claim = await tx.$queryRaw<
+            Array<{ state: string; owner: string }>
+          >`
+          SELECT state, owner FROM xhs_refresh_jobs WHERE creator_id = ${id} AND generation = ${generation}`;
+          if (
+            claim.length !== 1 ||
+            claim[0].state !== 'running' ||
+            claim[0].owner !== owner
+          )
+            throw new Error('XHS_REFRESH_STOPPED');
+          let count = 0;
+          for (const { draft: d, video, kind } of drafts.values()) {
+            const old = await tx.xhsNote.findUnique({
+              where: { id: d.noteKey },
             });
+            if (old) {
+              if (old.creatorId !== id)
+                return fail('笔记归属冲突，未覆盖旧内容。', 'CONFLICT');
+              if (old.status !== 'video-skipped' || !video) continue;
+            }
+            const contentHtml =
+              d.status === 'candidate'
+                ? '<div id="js_content">' +
+                  d.text
+                    .split('\n')
+                    .map((p) => '<p>' + escape(p) + '</p>')
+                    .join('') +
+                  d.images
+                    .map(
+                      (i) =>
+                        '<img src="data:' +
+                        i.type +
+                        ';base64,' +
+                        i.bytes.toString('base64') +
+                        '">',
+                    )
+                    .join('') +
+                  // The shared video contract allows a real complete video with
+                  // no caption/cover. Mark this local-only structural placeholder;
+                  // title survives the unchanged sanitizer's attribute allowlist.
+                  (video && !d.text.trim() && !d.images.length
+                    ? '<p data-wewe-empty-video-caption title="wewe-empty-video-caption">本条视频没有正文文字。</p>'
+                    : '') +
+                  '</div>'
+                : null;
+            const data = {
+              title:
+                d.status === 'candidate' ? d.title : '视频笔记（未归档视频）',
+              status: d.status === 'candidate' ? 'complete' : 'video-skipped',
+              contentHtml,
+              kind,
+              videoBytes: video?.bytes ?? null,
+              videoMimeType: video?.mimeType ?? null,
+              videoExpectedBytes: video?.expectedBytes ?? null,
+              videoSha256: video?.sha256 ?? null,
+            };
+            if (old) {
+              // Only a skipped video's missing archive may be filled. Keep its
+              // stable ID, creator relation, and previously trusted publication time.
+              await tx.xhsNote.update({ where: { id: old.id }, data });
+            } else {
+              await tx.xhsNote.create({
+                data: {
+                  id: d.noteKey,
+                  creatorId: id,
+                  publishTime: timestamps.get(d.noteKey)!,
+                  ...data,
+                },
+              });
+            }
+            if (d.status === 'candidate') count++;
           }
-          if (d.status === 'candidate') count++;
-        }
-        await tx.xhsCreator.update({
-          where: { id },
-          data: {
-            externalAuthorId: result.authorId,
-            lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
-            lastCheckedAt: Math.floor(Date.now() / 1000),
-          },
-        });
-        return count;
-      });
+          await tx.xhsCreator.update({
+            where: { id },
+            data: {
+              externalAuthorId: result.authorId,
+              lastStatus: ledger.supplierReportedEnd ? 'complete' : 'partial',
+              lastCheckedAt: Math.floor(Date.now() / 1000),
+            },
+          });
+          for (const noteId of failedNotes)
+            await tx.$executeRaw`INSERT INTO xhs_refresh_failures (creator_id,generation,note_id,code) VALUES (${id},${generation},${noteId},'NOTE_BODY_OR_MEDIA_INVALID')`;
+          const outcome = JSON.stringify({
+            status: failedNotes.size
+              ? 'partial'
+              : ledger.supplierReportedEnd
+                ? 'complete'
+                : 'partial',
+            added: count,
+            ...(failedNotes.size && ledger.supplierReportedEnd
+              ? { failedCount: failedNotes.size, failureScope: 'article' }
+              : {}),
+            message:
+              ledger.supplierReportedEnd && !failedNotes.size
+                ? '本次来源列表窗口处理完成；不表示全历史覆盖。'
+                : '已处理有限窗口或部分笔记失败，已有内容保留。',
+          });
+          const completed =
+            await tx.$executeRaw`UPDATE xhs_refresh_jobs SET state = 'complete', outcome = ${outcome} WHERE creator_id = ${id} AND generation = ${generation} AND owner = ${owner} AND state = 'running'`;
+          if (completed !== 1) throw new Error('XHS_REFRESH_STOPPED');
+          return count;
+        }),
+      );
       return {
-        status: ledger.supplierReportedEnd
-          ? ('complete' as const)
-          : ('partial' as const),
+        status:
+          ledger.supplierReportedEnd && !failedNotes.size
+            ? ('complete' as const)
+            : ('partial' as const),
         added,
-        message: ledger.supplierReportedEnd
-          ? '本次来源列表窗口处理完成；不表示全历史覆盖。'
-          : '已处理有限窗口，后续列表尚未完成。',
+        ...(failedNotes.size && ledger.supplierReportedEnd
+          ? { failureScope: 'article' as const, failedCount: failedNotes.size }
+          : {}),
+        message:
+          ledger.supplierReportedEnd && !failedNotes.size
+            ? '本次来源列表窗口处理完成；不表示全历史覆盖。'
+            : '已处理有限窗口或部分笔记失败，已有内容保留。',
       };
     } catch {
       return fail('本次更新未完成，请核对数据源；旧归档保留，不会自动重试。');
@@ -646,65 +1061,140 @@ export class XiaohongshuService {
       this.active.delete(id);
     }
   }
-  async body(creatorId: string, noteId: string) {
+  async engagement(input: {
+    creatorId: string;
+    noteId: string;
+    offset?: number;
+    limit?: number;
+  }) {
     const note = await this.prisma.xhsNote.findFirst({
-      where: { id: noteId, creatorId, status: 'complete' },
-      select: { ...cachedNoteMetadataSelect, contentHtml: true },
+      where: { id: input.noteId, creatorId: input.creatorId },
+      select: { id: true },
     });
-    if (!note?.contentHtml) return fail('此笔记没有已核验的完整缓存。');
-    const $ = load(note.contentHtml),
-      content = $('#js_content');
-    const images = content
-      .find('img')
-      .toArray()
-      .map((img) => {
-        const inline = $(img).attr('src') || '';
-        decodeInlineImage(inline);
-        return inline;
-      });
-    return {
-      title: note.title,
-      publishTime: note.publishTime,
-      text: content
-        .find('p')
-        .not(
-          '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
-        )
-        .toArray()
-        .map((p) => $(p).text())
-        .join('\n'),
-      images,
-      kind:
-        note.kind === 'video' ? ('video' as const) : ('image-text' as const),
-      video: cachedVideoMetadata(note),
-    };
+    if (!note) return fail('XHS_NOTE_NOT_FOUND', 'NOT_FOUND');
+    return this.prisma.$transaction(async (tx) => {
+      const [metrics, creators, comments] = await Promise.all([
+        readXhsMetrics(tx, 'note'),
+        readXhsMetrics(tx, 'creator'),
+        readXhsComments(tx, input.noteId, input.offset, input.limit),
+      ]);
+      return {
+        metrics: metrics.get(input.noteId) ?? null,
+        creatorMetrics: creators.get(input.creatorId) ?? null,
+        ...comments,
+      };
+    });
   }
-  async export(creatorId: string, noteIds?: string[]) {
-    await this.getCreator(creatorId);
+  private async exportEngagement(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
+    const initial = await this.engagement({ creatorId, noteId, limit: 200 });
+    if (initial.totalSaved <= initial.returned) {
+      const markdown = xhsEngagementMarkdown(
+        metrics === undefined ? initial : { ...initial, metrics },
+      );
+      if (Buffer.byteLength(markdown) <= 4_000_000) return markdown;
+    }
+    return this.prisma.$transaction(
+      async (tx) => {
+        const target = await tx.xhsNote.findFirst({
+          where: { id: noteId, creatorId },
+          select: { id: true },
+        });
+        if (!target) return fail('XHS_NOTE_NOT_FOUND');
+        const noteMetrics = await readXhsMetrics(tx, 'note');
+        const creatorMetrics = await readXhsMetrics(tx, 'creator');
+        const first = await readXhsComments(tx, noteId, 0, 200);
+        const parts: string[] = [];
+        let current = '',
+          currentBytes = 0;
+        for (
+          let offset = 0;
+          offset < Math.max(1, first.totalSaved);
+          offset += 200
+        ) {
+          const page =
+            offset === 0
+              ? first
+              : await readXhsComments(tx, noteId, offset, 200);
+          const markdown = xhsEngagementMarkdown({
+            ...page,
+            metrics:
+              metrics === undefined
+                ? (noteMetrics.get(noteId) ?? null)
+                : metrics,
+            creatorMetrics: creatorMetrics.get(creatorId) ?? null,
+          });
+          for (const line of markdown.split(/(?<=\n)/)) {
+            const lineBytes = Buffer.byteLength(line);
+            if (current && currentBytes + lineBytes > 4_000_000) {
+              parts.push(current);
+              current = '';
+              currentBytes = 0;
+            }
+            current += line;
+            currentBytes += lineBytes;
+          }
+        }
+        if (current) parts.push(current);
+        return parts.length <= 1
+          ? (parts[0] ?? '')
+          : parts.map(
+              (part, index) =>
+                `\n\n## 评论分段 ${index + 1}/${parts.length}\n\n仅为已保存范围，未返回与受限内容未知。\n` +
+                part,
+            );
+      },
+      { timeout: 30000 },
+    );
+  }
+  async export(creatorId?: string, noteIds?: string[], filter?: XhsNoteFilter) {
     const selected =
       noteIds === undefined ? undefined : managementMemberIds(noteIds, 300);
-    const notes = await this.prisma.xhsNote.findMany({
-      where: {
-        creatorId,
-        status: 'complete',
-        ...(selected ? { id: { in: selected } } : {}),
-      },
-      orderBy: [{ publishTime: 'asc' }, { id: 'asc' }],
-      select: { ...cachedNoteMetadataSelect, contentHtml: true },
-    });
-    if (selected && notes.length !== selected.length)
-      return fail('选中笔记必须完整且属于该博主，未导出。', 'BAD_REQUEST');
-    if (!notes.length) return fail('没有已核验完整图文，尚不能下载。');
+    const scope = await this.matchingNotes(creatorId, filter);
+    if (
+      filter?.queryVersion &&
+      filter.queryVersion !== this.noteQueryVersion(scope)
+    )
+      return fail('XHS_QUERY_STALE_RESTART', 'CONFLICT');
+    const selectedSet = selected ? new Set(selected) : undefined;
+    const matched = scope.filter(
+      (n) => n.status === 'complete' && (!selectedSet || selectedSet.has(n.id)),
+    );
+    const selectedMetrics = new Map(matched.map((n) => [n.id, n.metrics]));
+    matched.sort(
+      (a, b) =>
+        a.publishTime - b.publishTime ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
+    if (selected && matched.length !== selected.length)
+      return fail('所选笔记不完整或不属于当前筛选范围。', 'BAD_REQUEST');
+    if (!matched.length) return fail('当前范围没有匹配的完整缓存笔记。');
+    const notes: Array<
+      Prisma.XhsNoteGetPayload<{
+        select: typeof cachedNoteMetadataSelect & { contentHtml: true };
+      }>
+    > = [];
     let archiveBytes = 0;
-    for (const note of notes) {
+    for (const match of matched) {
+      const note = await this.prisma.xhsNote.findFirst({
+        where: { id: match.id, creatorId: match.creatorId, status: 'complete' },
+        select: { ...cachedNoteMetadataSelect, contentHtml: true },
+      });
+      if (!note)
+        return fail('导出期间笔记身份或缓存已变化，请重新读取。', 'CONFLICT');
       const video = cachedVideoMetadata(note);
       if (note.kind === 'video' && !video)
-        return fail('视频缓存元数据不完整，未导出。');
+        return fail('视频缓存元数据不完整，未打包。');
       archiveBytes +=
         Buffer.byteLength(note.contentHtml || '') + (video?.bytes || 0);
       if (archiveBytes > 25_000_000)
-        return fail('归档超过浏览器下载的大小限制，未生成截断数据。');
+        return fail('归档超过当前下载的大小限制，未生成截断内容。');
+      notes.push(note);
     }
+
     // Reuse cached-only original Markdown/image export and ZIP packaging. Never
     // request a signed CDN URL or pass an XHS ID to the WeChat download route.
     const root = await fs.mkdtemp(path.join(tmpdir(), 'wewe-xhs-export-'));
@@ -718,13 +1208,21 @@ export class XiaohongshuService {
             folder,
             createHash('sha256').update(note.id).digest('hex').slice(0, 24),
           );
-          const prepare = await this.prepareLocalDownload(creatorId, note.id);
+          const prepare = await this.prepareLocalDownload(
+            note.creatorId,
+            note.id,
+            selectedMetrics.get(note.id),
+          );
           await fs.mkdir(directory);
           await prepare(directory);
           await fs.rename(
             path.join(directory, 'index.md'),
             path.join(directory, '正文.md'),
           );
+          await prepare.afterSave?.({
+            directory,
+            markdownPath: path.join(directory, '正文.md'),
+          });
           continue;
         }
         const result = await buildArticleMarkdown(
@@ -738,10 +1236,31 @@ export class XiaohongshuService {
         const filename =
           createHash('sha256').update(note.id).digest('hex').slice(0, 24) +
           '.md';
+        const snapshot = await this.exportEngagement(
+          note.creatorId,
+          note.id,
+          selectedMetrics.get(note.id),
+        );
         await fs.writeFile(
           path.join(folder, filename),
-          '# ' + note.title.replace(/[\r\n]/g, ' ') + '\n\n' + result.markdown,
+          '# ' +
+            note.title.replace(/[\r\n]/g, ' ') +
+            '\n\n[原文](' +
+            xhsOriginalLink(note.id) +
+            ')\n\n' +
+            result.markdown +
+            (Array.isArray(snapshot)
+              ? '\n\n评论分段见同目录附页。\n'
+              : snapshot),
         );
+        await xhsLocalSnapshotPublisher(
+          note.id,
+          note.title,
+          snapshot,
+        )?.({
+          directory: folder,
+          markdownPath: path.join(folder, filename),
+        });
       }
       const zip = path.join(root, 'archive.zip');
       const { archiveDirectory } = await import('../offline-archive');
@@ -763,7 +1282,64 @@ export class XiaohongshuService {
   /** Snapshot only this creator's complete cached note, never accept page content
    * or a path from the caller. Original local saver grants the destination.
    */
-  async prepareLocalDownload(creatorId: string, noteId: string) {
+  async prepareLocalDownload(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ): Promise<ArticlePreparation> {
+    const note = await this.prisma.xhsNote.findFirst({
+      where: { id: noteId, creatorId, status: 'complete' },
+    });
+    if (!note)
+      throw new ArticleDownloadError('笔记缓存不存在。', 422, {
+        code: 'XHS_CACHED_ARTICLE_UNAVAILABLE',
+      });
+    const creator = await this.prisma.xhsCreator.findUnique({
+      where: { id: creatorId },
+    });
+    if (!creator) throw new ArticleDownloadError('找不到该博主。', 422);
+    const group = creator.groupId
+      ? await this.prisma.managementGroup.findUnique({
+          where: { id: creator.groupId },
+        })
+      : null;
+    const exportSource = {
+      feedId: creator.id,
+      feedName: creator.displayName,
+      groupId: group?.id,
+      groupName: group?.name,
+      platform: 'xiaohongshu' as const,
+    };
+    const prepare = await this.prepareCachedLocalDownload(
+      creatorId,
+      noteId,
+      metrics,
+    );
+    const identity = {
+      articleId: note.id,
+      title: note.title,
+      imageCount: 0,
+      videoCount: note.kind === 'video' ? 1 : 0,
+      exportSource,
+      publishTime: note.publishTime,
+      sourceUrl: xhsOriginalLink(note.id),
+    };
+    const wrapped: ArticlePreparation = async (stage) => ({
+      ...(await prepare(stage)),
+      exportSource,
+      publishTime: note.publishTime,
+      sourceUrl: identity.sourceUrl,
+    });
+    wrapped.identity = identity;
+    wrapped.afterSave = prepare.afterSave;
+    return wrapped;
+  }
+
+  private async prepareCachedLocalDownload(
+    creatorId: string,
+    noteId: string,
+    metrics?: XhsMetricSnapshot | null,
+  ) {
     const note = await this.prisma.xhsNote.findFirst({
       where: { id: noteId, creatorId, status: 'complete' },
     });
@@ -773,6 +1349,7 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_ARTICLE_UNAVAILABLE' },
       );
+    xhsOriginalLink(note.id);
     if (note.kind === 'video') {
       const creator = await this.getCreator(creatorId);
       const metadata = cachedVideoMetadata(note);
@@ -820,34 +1397,51 @@ export class XiaohongshuService {
           422,
           { code: 'XHS_CACHED_VIDEO_INVALID' },
         );
-      return prepareXhsVideoDownload({
-        evidenceVerified: true,
-        note: {
-          authorId: creator.externalAuthorId,
-          noteId: tuple[2],
-          kind: 'video',
-          publishedAt: note.publishTime,
-          title: note.title,
-          text: content
-            .find('p')
-            .not(
-              '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
-            )
-            .toArray()
-            .map((p) => $(p).text())
-            .join('\n'),
-          textStatus: 'full',
-          expectedImageCount: images.length,
-          images,
+      const prepare = prepareXhsVideoDownload(
+        {
+          evidenceVerified: true,
+          note: {
+            authorId: creator.externalAuthorId,
+            noteId: tuple[2],
+            kind: 'video',
+            publishedAt: note.publishTime,
+            title: note.title,
+            text: content
+              .find('p')
+              .not(
+                '[data-wewe-empty-video-caption], [title="wewe-empty-video-caption"]',
+              )
+              .toArray()
+              .map((p) => $(p).text())
+              .join('\n'),
+            textStatus: 'full',
+            expectedImageCount: images.length,
+            images,
+          },
+          video: {
+            complete: true,
+            mimeType: metadata.mimeType,
+            bytes,
+            expectedBytes: metadata.bytes,
+            sha256: metadata.sha256,
+          },
         },
-        video: {
-          complete: true,
-          mimeType: metadata.mimeType,
-          bytes,
-          expectedBytes: metadata.bytes,
-          sha256: metadata.sha256,
+        true,
+      );
+      const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+      return withXhsLocalSnapshot(
+        async (directory: string) => {
+          const result = await prepare(directory);
+          await fs.appendFile(
+            path.join(directory, 'index.md'),
+            Array.isArray(snapshot) ? '\n\n评论分段见同目录附页。\n' : snapshot,
+          );
+          return result;
         },
-      });
+        note.id,
+        note.title,
+        snapshot,
+      );
     }
     if (
       note.videoBytes !== null ||
@@ -860,17 +1454,32 @@ export class XiaohongshuService {
         422,
         { code: 'XHS_CACHED_VIDEO_INVALID' },
       );
+    const sourceUrl = xhsOriginalLink(note.id);
     const article = {
       ...note,
       contentHtml: verifiedDownloadBody(note.contentHtml),
       lastBodyStatus: 'available',
       metrics: null,
     };
-    return (directory: string) =>
-      buildCompleteArticleDownload(
-        article,
-        '小红书本地缓存（笔记身份：' + note.id + '）',
-        directory,
-      );
+    const snapshot = await this.exportEngagement(creatorId, noteId, metrics);
+    return withXhsLocalSnapshot(
+      async (directory: string) => {
+        const result = await buildCompleteArticleDownload(
+          article,
+          '[原文](' + sourceUrl + ')',
+          directory,
+          false,
+          true,
+        );
+        await fs.appendFile(
+          path.join(directory, 'index.md'),
+          Array.isArray(snapshot) ? '\n\n评论分段见同目录附页。\n' : snapshot,
+        );
+        return { ...result, sourceUrl: null };
+      },
+      note.id,
+      note.title,
+      snapshot,
+    );
   }
 }

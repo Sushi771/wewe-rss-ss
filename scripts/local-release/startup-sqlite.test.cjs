@@ -32,7 +32,15 @@ test('cached bodies exceeding the V8 whole-string limit retain the exact baselin
   assert.equal(digestRows(rows()), expected.digest('hex'));
 });
 
-function fixture(t, { current = false } = {}) {
+function fixture(
+  t,
+  {
+    current = false,
+    historicalFeedOrder = false,
+    localColumn = 'TEXT',
+    maximumMigration = null,
+  } = {},
+) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-startup-sqlite-'));
   t.after(() => {
     assert.equal(path.dirname(root), os.tmpdir());
@@ -42,26 +50,51 @@ function fixture(t, { current = false } = {}) {
   const database = path.join(root, 'fixture.db'),
     migrations = path.join(root, 'migrations');
   if (current) {
-    fs.cpSync(
-      path.resolve(__dirname, '../../apps/server/prisma/migrations'),
-      migrations,
-      {
-        recursive: true,
-      },
+    const sourceMigrations = path.resolve(
+      __dirname,
+      '../../apps/server/prisma/migrations',
     );
+    fs.mkdirSync(migrations);
+    for (const entry of fs.readdirSync(sourceMigrations, {
+      withFileTypes: true,
+    }))
+      if (
+        entry.isDirectory() &&
+        (!maximumMigration || entry.name <= maximumMigration)
+      )
+        fs.cpSync(
+          path.join(sourceMigrations, entry.name),
+          path.join(migrations, entry.name),
+          { recursive: true },
+        );
     const db = new sqlite.DatabaseSync(database);
     db.exec(
       'CREATE TABLE _prisma_migrations(migration_name TEXT,checksum TEXT,finished_at INT,rolled_back_at INT)',
     );
     for (const entry of fs
       .readdirSync(migrations, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .sort((a, b) => a.name.localeCompare(b.name))) {
+      .filter(
+        (entry) =>
+          entry.isDirectory() &&
+          (!maximumMigration || entry.name <= maximumMigration),
+      )
+      .sort((a, b) => {
+        const order = (n) =>
+          historicalFeedOrder && n === '20260927080000_local_collection'
+            ? '20260927040000_local_collection'
+            : n;
+        return order(a.name).localeCompare(order(b.name));
+      })) {
       const sql = fs.readFileSync(
         path.join(migrations, entry.name, 'migration.sql'),
         'utf8',
       );
-      db.exec(sql);
+      db.exec(
+        sql.replace(
+          'ADD COLUMN "local_directory" TEXT',
+          'ADD COLUMN "local_directory" ' + localColumn,
+        ),
+      );
       db.prepare('INSERT INTO _prisma_migrations VALUES(?,?,1,NULL)').run(
         entry.name,
         hash(sql),
@@ -354,4 +387,248 @@ for (const column of [
       /Required XHS video columns missing/,
     );
   });
+}
+
+test('reuse rejects a WAL commit after pinned equality even with frozen source metadata', async (t) => {
+  const f = fixture(t),
+    database = fs.realpathSync.native(f.database),
+    writer = new sqlite.DatabaseSync(database);
+  writer.exec('PRAGMA journal_mode=WAL');
+  const backups = path.join(f.root, 'backups');
+  const first = await prepareStart(
+    f.database,
+    f.migrations,
+    backups,
+    path.join(f.root, 'first.json'),
+  );
+  const saved = fs.readFileSync(first.backup.backup);
+  const openOriginal = fs.openSync,
+    statOriginal = fs.statSync;
+  const pinned = new Map();
+  for (const file of [database, database + '-wal'])
+    if (fs.existsSync(file))
+      pinned.set(file, statOriginal(file, { bigint: true }));
+  let hashes = 0,
+    injected = false;
+  fs.statSync = function (file, options) {
+    if (options?.bigint && pinned.has(file)) return pinned.get(file);
+    return statOriginal.apply(this, arguments);
+  };
+  fs.openSync = function (file, ...args) {
+    if (file === first.backup.backup && ++hashes === 2) {
+      writer.exec("UPDATE articles SET body='late reuse commit' WHERE id='a'");
+      injected = true;
+    }
+    return openOriginal.call(this, file, ...args);
+  };
+  try {
+    await assert.rejects(
+      prepareStart(
+        f.database,
+        f.migrations,
+        backups,
+        path.join(f.root, 'stale.json'),
+      ),
+      /source changed during startup reuse/,
+    );
+    assert.equal(injected, true);
+    assert.equal(fs.existsSync(path.join(f.root, 'stale.json')), false);
+    assert.deepEqual(fs.readFileSync(first.backup.backup), saved);
+  } finally {
+    fs.openSync = openOriginal;
+    fs.statSync = statOriginal;
+    writer.close();
+  }
+});
+
+const searchMigration = '20261020160000_local_body_search';
+function rollbackFixture(
+  t,
+  schema21 = true,
+  baseSourceCommit = '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+  historical = {},
+) {
+  const f = fixture(t, {
+    current: true,
+    maximumMigration: searchMigration,
+    ...historical,
+  });
+  fs.writeFileSync(
+    path.join(f.migrations, 'search-rollback.json'),
+    JSON.stringify({
+      format: 1,
+      baseSourceCommit,
+      optionalMigration: searchMigration,
+    }),
+  );
+  if (!schema21) {
+    const db = new sqlite.DatabaseSync(f.database);
+    db.exec(
+      'DROP TRIGGER article_search_insert; DROP TRIGGER article_search_body_update; DROP TRIGGER article_search_delete; DROP TABLE article_search_documents',
+    );
+    db.prepare('DELETE FROM _prisma_migrations WHERE migration_name=?').run(
+      searchMigration,
+    );
+    db.close();
+  }
+  return f;
+}
+for (const schema21 of [false, true])
+  for (const source of [
+    '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+    'f618e48f48ff0e3df1c646cb8a666a2461815732',
+  ])
+    test(
+      'strict rollback accepts schema' +
+        (schema21 ? 21 : 20) +
+        ' through native and Python gates for ' +
+        source.slice(0, 8),
+      (t) => {
+        const f = rollbackFixture(t, schema21, source),
+          before = fs.readFileSync(f.database);
+        assert.deepEqual(
+          inspectDatabase(f.database, f.migrations, { startupGate: true })
+            .pending,
+          [],
+        );
+        assert.deepEqual(pythonInspect(f.database, f.migrations).pending, []);
+        assert.deepEqual(fs.readFileSync(f.database), before);
+      },
+    );
+for (const [name, sql] of [
+  [
+    'unknown migration',
+    "INSERT INTO _prisma_migrations VALUES('future-danger','bad',1,NULL)",
+  ],
+  [
+    'changed migration',
+    "UPDATE _prisma_migrations SET checksum='bad' WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  [
+    'unfinished migration',
+    "UPDATE _prisma_migrations SET finished_at=NULL WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  [
+    'duplicate migration',
+    "INSERT INTO _prisma_migrations SELECT * FROM _prisma_migrations WHERE migration_name='20261020160000_local_body_search'",
+  ],
+  ['unknown table', 'CREATE TABLE future_business(id TEXT)'],
+  ['unknown view', 'CREATE VIEW future_view AS SELECT id FROM articles'],
+  [
+    'changed trigger',
+    'DROP TRIGGER article_search_delete; CREATE TRIGGER article_search_delete AFTER DELETE ON articles BEGIN DELETE FROM articles; END',
+  ],
+  [
+    'changed partial index',
+    'DROP INDEX article_search_cached_idx; CREATE INDEX article_search_cached_idx ON article_search_documents(body_cached) WHERE pending=0',
+  ],
+])
+  test('strict rollback rejects ' + name + ' in both inspectors', (t) => {
+    const f = rollbackFixture(t),
+      db = new sqlite.DatabaseSync(f.database);
+    db.exec(sql);
+    db.close();
+    assert.throws(
+      () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+      /migration|schema|drift/i,
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /migration|schema|drift/i,
+    );
+  });
+test('rollback cannot widen the optional extension to an unreviewed base or SQL', (t) => {
+  const f = rollbackFixture(t);
+  fs.appendFileSync(
+    path.join(f.migrations, searchMigration, 'migration.sql'),
+    '\nCREATE TABLE dangerous(id TEXT);',
+  );
+  assert.throws(
+    () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+    /search migration changed/,
+  );
+  assert.throws(
+    () => pythonInspect(f.database, f.migrations),
+    /Rollback migrations changed/,
+  );
+});
+test('rollback rejects an unreviewed source and extra marker fields in both inspectors', (t) => {
+  const f = rollbackFixture(
+    t,
+    true,
+    'f618e48f48ff0e3df1c646cb8a666a2461815732',
+  );
+  const markerPath = path.join(f.migrations, 'search-rollback.json');
+  const approved = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
+  for (const marker of [
+    { ...approved, baseSourceCommit: '0'.repeat(40) },
+    { ...approved, allowFutureMigrations: true },
+  ]) {
+    fs.writeFileSync(markerPath, JSON.stringify(marker));
+    assert.throws(() =>
+      inspectDatabase(f.database, f.migrations, { startupGate: true }),
+    );
+    assert.throws(
+      () => pythonInspect(f.database, f.migrations),
+      /Rollback marker changed/,
+    );
+  }
+});
+
+for (const schema21 of [false, true]) {
+  test(
+    'historical reversed feed additions pass both strict gates at schema' +
+      (schema21 ? 21 : 20),
+    (t) => {
+      const f = rollbackFixture(
+        t,
+        schema21,
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+        { historicalFeedOrder: true },
+      );
+      const check = new sqlite.DatabaseSync(f.database, { readOnly: true });
+      const columns = check
+        .prepare('PRAGMA table_info(feeds)')
+        .all()
+        .map((x) => x.name);
+      check.close();
+      assert(
+        columns.indexOf('local_directory') <
+          columns.indexOf('public_album_ids'),
+      );
+      const before = fs.readFileSync(f.database);
+      assert.deepEqual(
+        inspectDatabase(f.database, f.migrations, { startupGate: true })
+          .pending,
+        [],
+      );
+      assert.deepEqual(pythonInspect(f.database, f.migrations).pending, []);
+      assert.deepEqual(fs.readFileSync(f.database), before);
+    },
+  );
+}
+for (const localColumn of [
+  'INTEGER',
+  "TEXT DEFAULT 'unexpected'",
+  "TEXT NOT NULL DEFAULT ''",
+]) {
+  test(
+    'historical feed order still rejects column contract ' + localColumn,
+    (t) => {
+      const f = rollbackFixture(
+        t,
+        true,
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+        { historicalFeedOrder: true, localColumn },
+      );
+      assert.throws(
+        () => inspectDatabase(f.database, f.migrations, { startupGate: true }),
+        /schema|drift/i,
+      );
+      assert.throws(
+        () => pythonInspect(f.database, f.migrations),
+        /schema|drift/i,
+      );
+    },
+  );
 }

@@ -5,6 +5,7 @@ import {
   readMetrics,
   mergeMetrics,
   csvCell,
+  metricsMarkdown,
 } from './collection-format';
 
 describe('WeChatDownload formats', () => {
@@ -56,5 +57,33 @@ describe('WeChatDownload formats', () => {
   it('protects spreadsheet formulas while keeping quoted Unicode titles', () => {
     expect(csvCell('=HYPERLINK("bad")')).toBe('"\'=HYPERLINK(""bad"")"');
     expect(csvCell('公众号')).toBe('"公众号"');
+  });
+  it.each([null, '{}', '{"read":null}', '{"unknown":123}'])(
+    'omits an empty metric table (%s) while retaining title and original link',
+    (metrics) => {
+      const markdown = metricsMarkdown({
+        id: 'synthetic',
+        title: 'Fixture',
+        sourceUrl: 'https://example.com',
+        metrics,
+      });
+      expect(markdown).toBe('# Fixture\n\n原文：https://example.com\n\n');
+      expect(markdown).not.toContain('指标');
+      expect(markdown).not.toContain('未提供');
+    },
+  );
+  it('exports only supplied CSV metrics, preserving a real zero and lower bound', () => {
+    const markdown = metricsMarkdown({
+      id: 'synthetic',
+      title: 'Fixture',
+      metrics: JSON.stringify(
+        readMetrics({ read_num: '10万+', like_num: '0' }, '2026-01-01'),
+      ),
+    });
+    expect(markdown).toContain('| 阅读 | 10万+ | 2026-01-01 |');
+    expect(markdown).toContain('| 点赞 | 0 | 2026-01-01 |');
+    expect(markdown).toContain('指标来源：WeChatDownload CSV 导入');
+    expect(markdown).not.toMatch(/\| (分享|评论|在看|收藏) \|/);
+    expect(markdown).not.toContain('未提供');
   });
 });

@@ -1,4 +1,10 @@
 import { Wechat2RssProvider } from './wechat2rss';
+jest.mock('../wechat2rss-source-gate', () => ({
+  defaultWechat2RssSourceGate: () => ({
+    begin: async () => 'fixture',
+    finish: async () => undefined,
+  }),
+}));
 
 describe('upstream paused and final automatic submission gate (offline)', () => {
   afterEach(() => jest.restoreAllMocks());

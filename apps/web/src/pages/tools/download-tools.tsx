@@ -2,6 +2,7 @@ import { Card, CardBody, Tab, Tabs } from '@nextui-org/react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ArticleDownload from './article-download';
 import XiaohongshuDownload from './xiaohongshu-download';
+import StorageBackupStatus from '@web/components/StorageBackupStatus';
 
 export default function DownloadTools() {
   const { pathname } = useLocation();
@@ -58,6 +59,7 @@ export default function DownloadTools() {
             </Card>
           </Tab>
         </Tabs>
+        <StorageBackupStatus />
       </div>
     </div>
   );

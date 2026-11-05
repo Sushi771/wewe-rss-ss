@@ -1,1 +1,13 @@
 *.bat text eol=crlf
+scripts/local-release/*.cjs text eol=lf
+scripts/local-release/*.json text eol=lf
+apps/server/prisma/schema.prisma -text
+apps/server/prisma/migrations/**/migration.sql -text
+
+# Keep source formatting identical in Windows checkouts and staged snapshots.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf

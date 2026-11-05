@@ -7,6 +7,20 @@ const { test } = require('node:test');
 const ts = require(
   require.resolve('typescript', { paths: [path.resolve('apps/web')] }),
 );
+const batchModule = { exports: {} };
+vm.runInNewContext(
+  ts.transpileModule(
+    fs.readFileSync('apps/web/src/utils/export-article-batches.ts', 'utf8'),
+    {
+      compilerOptions: {
+        module: ts.ModuleKind.CommonJS,
+        target: ts.ScriptTarget.ES2022,
+      },
+    },
+  ).outputText,
+  { module: batchModule, exports: batchModule.exports, Set, Error },
+);
+const { exportArticleBatches } = batchModule.exports;
 const source = ts.createSourceFile(
   'feeds.tsx',
   fs.readFileSync('apps/web/src/pages/feeds/index.tsx', 'utf8'),
@@ -37,6 +51,9 @@ async function run(results, rejectAt, options = {}) {
     batchExporting: { current: false },
     exportCancelled: { current: false },
     dateError: undefined,
+    exportController: { current: null },
+    AbortController,
+    exportArticleBatches,
     articleDateFilter: { dateStart: '2026-10-11', dateEnd: '2026-10-11' },
     folderFilter: 'g',
     id: 'MP_WXS_1234567890',
@@ -58,14 +75,30 @@ async function run(results, rejectAt, options = {}) {
               return options.scopeIds || results.map((_, i) => 'fixture-' + i);
             },
           },
-          saveToObsidian: {
-            mutate: async (id) => {
-              calls.push(id);
-              if (calls.length === rejectAt)
-                throw new Error('synthetic save failure');
-              if (options.cancelAfter === calls.length)
-                context.exportCancelled.current = true;
-              return results[calls.length - 1];
+          saveToObsidianBatch: {
+            mutate: async ({ ids }) => {
+              const receipts = [];
+              for (const id of ids) {
+                if (context.exportCancelled.current) break;
+                calls.push(id);
+                if (options.cancelAfter === calls.length)
+                  context.exportCancelled.current = true;
+                if (calls.length === rejectAt)
+                  receipts.push({ id, error: 'synthetic save failure' });
+                else
+                  receipts.push({
+                    id,
+                    saved: {
+                      markdownPath: id + '.md',
+                      alreadySaved: false,
+                      ...results[calls.length - 1],
+                    },
+                  });
+              }
+              return {
+                results: receipts,
+                cancelled: context.exportCancelled.current,
+              };
             },
           },
         },
@@ -84,7 +117,10 @@ async function run(results, rejectAt, options = {}) {
   const js = ts.transpileModule('(' + initializer + ')', {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  await vm.runInContext(js, context)(options.wholeScope || false);
+  await vm.runInContext(js, context)(
+    options.wholeScope || false,
+    options.allArticles || false,
+  );
   return { calls, notifications, loading, selections, queries, progress };
 }
 test('normal publication exports keep one compact success notice', async () => {
@@ -161,6 +197,15 @@ test('whole filtered scope freezes all 25 identities with filters and de-duplica
   );
   assert.match(r.notifications[0][1], /新增 25/);
   assert.deepEqual(r.selections, []);
+});
+
+test('all articles ignores search, dates and folder but retains current feed identity', async () => {
+  const r = await run([{}, {}], undefined, {
+    wholeScope: true,
+    allArticles: true,
+  });
+  assert.deepEqual({ ...r.queries[0] }, { mpId: 'MP_WXS_1234567890' });
+  assert.equal(r.calls.length, 2);
 });
 test('cancel stops subsequent submissions and retains selection for a resumable retry', async () => {
   const r = await run([{}, {}, {}], undefined, { cancelAfter: 1 });

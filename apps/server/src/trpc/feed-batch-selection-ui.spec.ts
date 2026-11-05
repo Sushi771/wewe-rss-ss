@@ -1,3 +1,4 @@
+import { exportArticleBatches } from '../../../web/src/utils/export-article-batches';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -7,6 +8,7 @@ import axios from 'axios';
 import { TrpcRouter } from './trpc.router';
 import { TrpcService } from './trpc.service';
 import { getLoadedSelection } from '../../../web/src/utils/feed-selection';
+import { articleBodyState } from '../../../web/src/utils/article-body-state';
 
 // Execute the actual handlers and component, with offline query/hook fixtures.
 // This checks behavior and accessibility props; it is not browser visual proof.
@@ -60,7 +62,10 @@ function evaluate(
     Set,
     Array,
     Error,
+    AbortController,
+    exportArticleBatches,
     exportCancelled: { current: false },
+    exportController: { current: null },
     ...scope,
   };
   vm.runInNewContext(
@@ -81,6 +86,7 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
     articleSelectedIds: state.selected,
     batchExporting: { current: false },
     exportCancelled: { current: false },
+    exportController: { current: null },
     dateError: undefined,
     setExportResult: jest.fn(),
     setIsBatchExporting: (busy: boolean) => {
@@ -91,7 +97,38 @@ function exportFixture(ids: string[], save: (id: string) => Promise<any>) {
     ) => {
       state.selected = typeof next === 'function' ? next(state.selected) : next;
     },
-    queryUtils: { client: { article: { saveToObsidian: { mutate: save } } } },
+    queryUtils: {
+      client: {
+        article: {
+          saveToObsidianBatch: {
+            mutate: async ({ ids }: { ids: string[] }) => {
+              const results: any[] = [];
+              for (const id of ids) {
+                if (scope.exportCancelled.current) break;
+                try {
+                  const saved = await save(id);
+                  results.push({
+                    id,
+                    saved: {
+                      markdownPath: id + '.md',
+                      alreadySaved: false,
+                      ...saved,
+                    },
+                  });
+                } catch (error) {
+                  results.push({
+                    id,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  });
+                }
+              }
+              return { results, cancelled: scope.exportCancelled.current };
+            },
+          },
+        },
+      },
+    },
     toast: { success: jest.fn(), error: jest.fn(), warning: jest.fn() },
   };
   return {
@@ -139,11 +176,20 @@ function listFixture(initialItems: string[]) {
       ];
     },
     useMemo: (fn: () => any) => fn(),
+    useRef(initial: any) {
+      const i = hook++;
+      return (state[i] ||= { current: initial });
+    },
+    useCallback: (fn: (...args: any[]) => any) => fn,
     useEffect: registerEffect,
     useLayoutEffect: registerEffect,
   };
   const trpc = {
     article: {
+      searchStatus: {
+        useQuery: () => ({ data: { total: 0, pending: 0, uncached: 0 } }),
+      },
+      prepareSearch: { useMutation: () => ({ mutateAsync: jest.fn() }) },
       byId: { useQuery: () => ({}) },
       summary: { useQuery: () => ({ data: { articles: items.length } }) },
       retryBody: { useMutation: () => ({}) },
@@ -167,41 +213,43 @@ function listFixture(initialItems: string[]) {
     },
   }).outputText;
   const requireMock = (name: string) =>
-    name === 'react'
-      ? react
-      : name === 'react/jsx-runtime'
-        ? { jsx, jsxs: jsx }
-        : name === '@nextui-org/react'
-          ? Object.fromEntries(
-              [
-                'Checkbox',
-                'Button',
-                'Spinner',
-                'Modal',
-                'ModalContent',
-                'ModalHeader',
-                'ModalBody',
-              ].map((n) => [n, n]),
-            )
-          : name === '@web/utils/trpc'
-            ? { trpc }
-            : name === '@web/utils/feed-selection'
-              ? { getLoadedSelection }
-              : name === '@web/utils/use-article-list-position'
-                ? {
-                    useArticleListPosition: () => ({
-                      scrollRef: { current: null },
-                      capturePosition() {},
-                      cancelRestore() {},
-                      rememberForReader() {},
-                      restoreAfterReader() {},
-                    }),
-                  }
-                : name === 'react-router-dom'
-                  ? { useParams: () => params }
-                  : name === '@wewe-rss/shared'
-                    ? { formatShanghaiPublicationTime: () => 'fixture-time' }
-                    : {};
+    name === '@web/utils/article-body-state'
+      ? { articleBodyState }
+      : name === 'react'
+        ? react
+        : name === 'react/jsx-runtime'
+          ? { jsx, jsxs: jsx }
+          : name === '@nextui-org/react'
+            ? Object.fromEntries(
+                [
+                  'Checkbox',
+                  'Button',
+                  'Spinner',
+                  'Modal',
+                  'ModalContent',
+                  'ModalHeader',
+                  'ModalBody',
+                ].map((n) => [n, n]),
+              )
+            : name === '@web/utils/trpc'
+              ? { trpc }
+              : name === '@web/utils/feed-selection'
+                ? { getLoadedSelection }
+                : name === '@web/utils/use-article-list-position'
+                  ? {
+                      useArticleListPosition: () => ({
+                        scrollRef: { current: null },
+                        capturePosition() {},
+                        cancelRestore() {},
+                        rememberForReader() {},
+                        restoreAfterReader() {},
+                      }),
+                    }
+                  : name === 'react-router-dom'
+                    ? { useParams: () => params }
+                    : name === '@wewe-rss/shared'
+                      ? { formatShanghaiPublicationTime: () => 'fixture-time' }
+                      : {};
   new Function('require', 'exports', 'module', compiled)(
     requireMock,
     mod.exports,
@@ -352,6 +400,7 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     const cleared = jest.fn();
     evaluate(reset!.arguments[0].getText(index.ast), {
       setArticleSelectedIds: cleared,
+      setExportOpen: jest.fn(),
     })();
     expect(cleared.mock.calls[0][0].size).toBe(0);
     const child = index.elements.find(
@@ -373,6 +422,7 @@ describe('feed batch selection actual UI and export handlers, offline', () => {
     )!;
     evaluate(reset.arguments[0].getText(index.ast), {
       setArticleSelectedIds: f.setSelected,
+      setExportOpen: jest.fn(),
     })();
     f.setProps({ direction: 'asc' });
     f.render();

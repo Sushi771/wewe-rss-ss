@@ -90,6 +90,13 @@ export class ImageRequestBlockedError extends Error {
   }
 }
 
+/** Temporary availability failures are distinct from policy denials and bad bytes. */
+export class ImageRequestTransientError extends Error {
+  constructor() {
+    super('IMAGE_REQUEST_TRANSIENT');
+  }
+}
+
 export async function fetchAllowedImage(
   raw: string,
   maxBytes = MAX_IMAGE_BYTES,
@@ -115,6 +122,10 @@ export async function fetchAllowedImage(
       await response.body?.cancel().catch(() => undefined);
       throw new ImageRequestBlockedError(response.status);
     }
+    if (response.status === 408 || response.status >= 500) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new ImageRequestTransientError();
+    }
     const type = (response.headers.get('content-type') || '')
       .split(';')[0]
       .toLowerCase();
@@ -124,6 +135,7 @@ export async function fetchAllowedImage(
       !response.body
     ) {
       ordinaryOutcome = true;
+      await response.body?.cancel().catch(() => undefined);
       throw new Error('IMAGE_RESPONSE_INVALID');
     }
     let length = 0;

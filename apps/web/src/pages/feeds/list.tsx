@@ -1,19 +1,25 @@
-import { FC, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import {
-  Button,
-  Spinner,
-  Checkbox,
-  Modal,
-  ModalContent,
-  ModalHeader,
-  ModalBody,
-} from '@nextui-org/react';
+  ContentLoadMore,
+  ContentSortControls,
+  ContentSelectionHeader,
+} from '@web/components/SubscriptionPrimitives';
+import { READING_CACHE_TIME } from '@web/utils/reading-query-cache';
+import {
+  FC,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Button, Spinner, Checkbox } from '@nextui-org/react';
 import { trpc } from '@web/utils/trpc';
 import { ArticleSort } from '@web/utils/feed-browse-state';
 import { useArticleListPosition } from '@web/utils/use-article-list-position';
 import { getLoadedSelection } from '@web/utils/feed-selection';
-import dayjs from 'dayjs';
-import ArticleReader from '@web/components/ArticleReader';
+import { articleBodyState } from '@web/utils/article-body-state';
+import { wechatOriginalUrl } from '@web/utils/wechat-original-url';
 import { useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArticleFilter, formatShanghaiPublicationTime } from '@wewe-rss/shared';
@@ -57,13 +63,63 @@ const ArticleList: FC<ArticleListProps> = ({
   const { id } = useParams();
 
   const mpId = id || '';
-  const [readingId, setReadingId] = useState<string | null>(null);
-  const [readerFindOpen, setReaderFindOpen] = useState(false);
-  useEffect(() => setReaderFindOpen(false), [readingId]);
-  const reading = trpc.article.byId.useQuery(readingId || '', {
-    enabled: Boolean(readingId),
-  });
   const queryUtils = trpc.useUtils();
+  const searchStatus = trpc.article.searchStatus.useQuery(undefined, {
+    enabled: Boolean(search.trim()),
+    retry: false,
+    refetchInterval: search.trim() ? 5000 : false,
+  });
+  const { mutateAsync: prepareSearchBatch } =
+    trpc.article.prepareSearch.useMutation();
+  const [preparingSearch, setPreparingSearch] = useState(false);
+  const [searchPaused, setSearchPaused] = useState(false);
+  const searchActive = useRef(false);
+  useEffect(
+    () => () => {
+      searchActive.current = false;
+    },
+    [],
+  );
+  const buildSearch = useCallback(async () => {
+    if (searchActive.current) return;
+    searchActive.current = true;
+    setPreparingSearch(true);
+    try {
+      while (searchActive.current) {
+        const status = await prepareSearchBatch();
+        queryUtils.article.searchStatus.setData(undefined, status);
+        if (!status.pending) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await Promise.all([
+        queryUtils.article.list.invalidate(),
+        queryUtils.article.summary.invalidate(),
+      ]);
+    } catch (error) {
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : '正文搜索整理失败，可以稍后继续',
+      );
+    } finally {
+      searchActive.current = false;
+      setPreparingSearch(false);
+    }
+  }, [prepareSearchBatch, queryUtils]);
+  useEffect(() => {
+    setSearchPaused(false);
+    if (!search.trim()) searchActive.current = false;
+  }, [search]);
+  useEffect(() => {
+    if (
+      search.trim() &&
+      searchStatus.data?.pending &&
+      !searchPaused &&
+      !searchActive.current
+    )
+      void buildSearch();
+  }, [search, searchStatus.data?.pending, searchPaused, buildSearch]);
+
   const bodyRetry = trpc.article.retryBody.useMutation();
   const retryBody = async (articleId: string, title: string) => {
     try {
@@ -78,7 +134,6 @@ const ArticleList: FC<ArticleListProps> = ({
       await Promise.all([
         queryUtils.article.list.invalidate(),
         queryUtils.article.summary.invalidate(),
-        queryUtils.article.byId.invalidate(articleId),
       ]);
     }
   };
@@ -88,7 +143,7 @@ const ArticleList: FC<ArticleListProps> = ({
       mpId,
       search: search || undefined,
     },
-    { enabled: !filterInvalid, cacheTime: 0 },
+    { enabled: !filterInvalid, cacheTime: READING_CACHE_TIME },
   );
 
   useEffect(() => {
@@ -103,6 +158,7 @@ const ArticleList: FC<ArticleListProps> = ({
     isError,
     refetch,
     isFetching,
+    isFetchingNextPage,
   } = trpc.article.list.useInfiniteQuery(
     {
       limit: 20,
@@ -115,10 +171,37 @@ const ArticleList: FC<ArticleListProps> = ({
     {
       getNextPageParam: (lastPage) => lastPage.nextCursor,
       enabled: !filterInvalid,
-      cacheTime: 0,
+      cacheTime: READING_CACHE_TIME,
       keepPreviousData: false,
+      retry: false,
     },
   );
+  const listViewKey = JSON.stringify([
+    mpId,
+    search,
+    articleFilter,
+    sort,
+    direction,
+  ]);
+  const activeView = useRef(listViewKey);
+  activeView.current = listViewKey;
+  const [nextPageFailed, setNextPageFailed] = useState(false);
+  useEffect(() => {
+    activeView.current = listViewKey;
+    setNextPageFailed(false);
+    return () => {
+      activeView.current = '';
+    };
+  }, [listViewKey]);
+  const loadNext = useCallback(async () => {
+    try {
+      const result = await fetchNextPage({ cancelRefetch: false });
+      if (activeView.current === listViewKey) setNextPageFailed(result.isError);
+      return result;
+    } catch {
+      if (activeView.current === listViewKey) setNextPageFailed(true);
+    }
+  }, [fetchNextPage, listViewKey]);
 
   const items = useMemo(() => {
     return filterInvalid ? [] : data?.pages.flatMap((page) => page.items) || [];
@@ -150,15 +233,15 @@ const ArticleList: FC<ArticleListProps> = ({
   ]);
 
   const position = useArticleListPosition({
-    viewKey: JSON.stringify([mpId, search, articleFilter, sort, direction]),
+    paused: false,
+    viewKey: listViewKey,
     pageCount: data?.pages.length || 0,
     itemCount: items.length,
     loading: isLoading && !filterInvalid,
     fetching: isFetching,
     hasNext: Boolean(hasNextPage),
     failed: isError || filterInvalid,
-    loadNext: fetchNextPage,
-    paused: Boolean(readingId),
+    loadNext,
   });
 
   const handleSelectAll = (isSelected: boolean) => {
@@ -184,48 +267,80 @@ const ArticleList: FC<ArticleListProps> = ({
   }, [selection, selectedIds, onSelectionChange]);
 
   return (
-    <div className="flex h-full flex-col">
-      {
-        <label className="text-default-500 flex flex-wrap items-center gap-2 px-3 py-1 text-xs">
-          排序
-          {
-            <select
-              aria-label="文章排序"
-              className="bg-background rounded border px-2 py-1"
-              value={sort}
-              onChange={(e) => {
-                setSort(e.target.value as typeof sort);
-                onSelectionChange(new Set());
-              }}
-            >
-              <option value="publishTime">发布时间</option>
-              {readSortingAvailable && (
-                <option value="readCount">阅读量从高到低</option>
-              )}
-              {likeSortingAvailable && (
-                <option value="likeCount">点赞量从高到低</option>
-              )}
-            </select>
-          }
-          {sort === 'publishTime' && (
-            <select
-              aria-label="发布时间顺序"
-              className="bg-background rounded border px-2 py-1"
-              value={direction}
-              onChange={(event) => {
-                onDirectionChange(event.target.value as 'asc' | 'desc');
-                onSelectionChange(new Set());
-              }}
-            >
-              <option value="desc">最新在前</option>
-              <option value="asc">最早在前</option>
-            </select>
+    <div className="flex h-full min-h-0 flex-col">
+      {search.trim() && (
+        <div className="shrink-0 border-b px-3 py-2 text-xs" role="status">
+          本地字面搜索：标题、公众号及已整理的缓存正文；不联网取文。
+          {searchStatus.data ? (
+            <>
+              全库 {searchStatus.data.total} 篇，未缓存正文{' '}
+              {searchStatus.data.uncached} 篇，待整理{' '}
+              {searchStatus.data.pending} 篇。
+              {searchStatus.data.pending > 0 && '结果尚未覆盖全部缓存正文。'}
+            </>
+          ) : (
+            '正文覆盖范围读取中。'
           )}
+          {searchStatus.error && (
+            <span role="alert">
+              覆盖范围读取失败：{searchStatus.error.message}
+            </span>
+          )}
+          {preparingSearch ? (
+            <Button
+              size="sm"
+              onPress={() => {
+                searchActive.current = false;
+                setSearchPaused(true);
+              }}
+            >
+              停止整理
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              onPress={() => {
+                setSearchPaused(false);
+                void buildSearch();
+              }}
+            >
+              整理本地正文搜索
+            </Button>
+          )}
+        </div>
+      )}
+
+      {
+        <ContentSortControls
+          sort={sort}
+          onSortChange={(next) => {
+            setSort(next as typeof sort);
+            onSelectionChange(new Set());
+          }}
+          direction={direction}
+          onDirectionChange={(next) => {
+            onDirectionChange(next);
+            onSelectionChange(new Set());
+          }}
+          options={[
+            { value: 'publishTime', label: '发布时间' },
+            ...(readSortingAvailable
+              ? [{ value: 'readCount', label: '阅读量从高到低' }]
+              : []),
+            ...(likeSortingAvailable
+              ? [{ value: 'likeCount', label: '点赞量从高到低' }]
+              : []),
+          ]}
+        >
           {!hasWechat2Rss && (readSortingAvailable || likeSortingAvailable) && (
             <span>带“+”为下限。收藏仅显示源数据，不以分享或在看代替。</span>
           )}
-        </label>
+        </ContentSortControls>
       }
+      <p className="px-3 py-1 text-xs text-neutral-500">
+        全选仅勾选已加载的 {items.length} 篇；新增行需另行勾选。
+      </p>
+
       {isError && (
         <div role="alert" className="px-3 py-2 text-sm text-red-600">
           文章列表读取失败，请重试。
@@ -238,41 +353,34 @@ const ArticleList: FC<ArticleListProps> = ({
       <div
         ref={position.scrollRef}
         onScroll={position.capturePosition}
-        className="mt-2 flex-1 overflow-y-auto"
+        role="region"
+        aria-label="文章列表"
+        tabIndex={0}
+        className="mt-2 min-h-0 flex-1 overflow-y-auto"
       >
         <div className="compact-list">
-          <div className="compact-list-header">
-            <div className="compact-col-check">
-              <Checkbox
-                aria-label="全选已加载"
-                size="sm"
-                isSelected={selection.allSelected}
-                isIndeterminate={selection.isIndeterminate}
-                isDisabled={isSelectionDisabled || items.length === 0}
-                onValueChange={handleSelectAll}
-              />
-            </div>
-            <div className="compact-col-title min-w-0 whitespace-nowrap">
-              <span className="mr-2 text-xs">全选已加载</span>
-              文章标题
-              {!filterInvalid &&
-                summary.data &&
-                ` · ${summary.data.articles} 篇`}
-            </div>
-            <div className="compact-col-metadata !hidden md:!flex">信息</div>
-          </div>
+          <ContentSelectionHeader
+            selected={selection.allSelected}
+            indeterminate={selection.isIndeterminate}
+            disabled={isSelectionDisabled || items.length === 0}
+            onChange={handleSelectAll}
+            title={
+              <>
+                文章标题
+                {!filterInvalid &&
+                  summary.data &&
+                  ` · ${summary.data.articles} 篇`}
+              </>
+            }
+          />
 
           {items?.map((item) => (
             <div
               key={item.id}
               data-article-id={item.id}
               className={`compact-row article-row ${
-                item.bodyCached &&
-                !item.bodyRetryResult &&
-                item.lastBodyStatus !== 'unavailable'
-                  ? 'article-row-ready'
-                  : ''
-              } !grid grid-cols-[24px_minmax(0,1fr)] !items-start md:!flex md:!items-center`}
+                item.bodyCached ? 'article-row-ready' : ''
+              } content-article-row`}
             >
               <div className="compact-col-check">
                 <Checkbox
@@ -290,35 +398,50 @@ const ArticleList: FC<ArticleListProps> = ({
                 />
               </div>
               <a
-                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] md:!whitespace-nowrap dark:hover:text-[#0A84FF]"
+                className="compact-title min-w-0 !whitespace-normal break-words text-[15px] hover:text-[#007AFF] dark:hover:text-[#0A84FF]"
                 target="_blank"
                 rel="noopener noreferrer"
                 title={
-                  item.bodyCached
-                    ? '点击标题阅读缓存正文'
-                    : '打开原文；本地正文未缓存'
+                  wechatOriginalUrl(item.sourceUrl)
+                    ? '在新标签页打开公众号原文'
+                    : '未保存有效的公众号原文链接'
                 }
-                aria-label={`${item.bodyCached ? '阅读缓存正文' : '打开原文'}：${item.title}`}
-                onClick={(event) => {
-                  position.rememberForReader();
-                  if (item.bodyCached) {
-                    event.preventDefault();
-                    setReadingId(item.id);
-                  }
-                }}
-                href={item.sourceUrl || `https://mp.weixin.qq.com/s/${item.id}`}
+                aria-label={
+                  (wechatOriginalUrl(item.sourceUrl)
+                    ? '打开原文：'
+                    : '原文链接不可用：') + item.title
+                }
+                aria-disabled={!wechatOriginalUrl(item.sourceUrl)}
+                onClick={position.capturePosition}
+                href={wechatOriginalUrl(item.sourceUrl)}
+                tabIndex={wechatOriginalUrl(item.sourceUrl) ? undefined : 0}
               >
                 {item.title}
+                {!wechatOriginalUrl(item.sourceUrl) && (
+                  <span className="ml-2 text-xs font-normal text-neutral-500">
+                    原文链接未保存或不可用
+                  </span>
+                )}
+                {item.searchSnippet && (
+                  <span
+                    className="mt-1 block whitespace-normal break-words text-xs font-normal text-neutral-500"
+                    data-search-snippet
+                  >
+                    正文：{item.searchSnippet.before}
+                    <mark>{item.searchSnippet.match}</mark>
+                    {item.searchSnippet.after}
+                  </span>
+                )}
               </a>
-              <div className="col-start-2 flex w-auto min-w-0 shrink-0 flex-col items-start gap-0.5 text-neutral-500 md:w-[300px] md:items-end">
+              <div className="content-article-metadata text-neutral-500">
                 <div
                   className="flex flex-wrap items-center gap-2 text-xs md:flex-nowrap"
                   aria-live="polite"
                 >
-                  {!item.bodyCached && <span>正文未缓存</span>}
-                  {(!item.bodyCached ||
-                    item.lastBodyStatus === 'unavailable' ||
-                    item.bodyRetryResult?.status === 'failed') && (
+                  <span className={item.bodyCached ? 'sr-only' : undefined}>
+                    {articleBodyState(item.bodyCached).current}
+                  </span>
+                  {!item.bodyCached && (
                     <Button
                       size="sm"
                       variant="light"
@@ -345,35 +468,18 @@ const ArticleList: FC<ArticleListProps> = ({
                     正文暂不可重试
                   </span>
                 )}
-                {item.bodyRetryResult && (
-                  <span
-                    className="text-left text-xs md:text-right"
-                    title={`${dayjs(item.bodyRetryResult.attemptedAt * 1e3).format('YYYY-MM-DD HH:mm:ss')} ${item.bodyRetryResult.message}`}
-                  >
-                    最近重试：
-                    {item.bodyRetryResult.status === 'available'
-                      ? '正文可用'
-                      : item.bodyRetryResult.status === 'unavailable'
-                        ? '未取得正文'
-                        : '失败'}
-                    {item.bodyRetryResult.filled
-                      ? '，已补入正文'
-                      : item.bodyRetryResult.cached
-                        ? '，已有缓存保留'
-                        : ''}
-                  </span>
-                )}
-                {(collectionChannels[item.mpId] ||
-                  item.feed?.collectionChannel) !== 'wechat2rss' && (
-                  <span
-                    className="whitespace-normal break-words text-xs md:whitespace-nowrap"
-                    title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
-                  >
-                    阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
-                    {metricDisplay(item.metrics, 'like')} · 收藏{' '}
-                    {metricDisplay(item.metrics, 'favorite')}
-                  </span>
-                )}
+                {item.metrics &&
+                  (collectionChannels[item.mpId] ||
+                    item.feed?.collectionChannel) !== 'wechat2rss' && (
+                    <span
+                      className="whitespace-normal break-words text-xs md:whitespace-nowrap"
+                      title="指标来自采集源数据，可能不是实时值；未获取不代表 0"
+                    >
+                      阅读 {metricDisplay(item.metrics, 'read')} · 点赞{' '}
+                      {metricDisplay(item.metrics, 'like')} · 收藏{' '}
+                      {metricDisplay(item.metrics, 'favorite')}
+                    </span>
+                  )}
                 <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs md:flex-nowrap md:justify-end">
                   <span className="truncate">
                     {item.feed?.mpName || '未知'}
@@ -398,13 +504,36 @@ const ArticleList: FC<ArticleListProps> = ({
             </div>
           )}
 
-          {hasNextPage && !isLoading && !filterInvalid && (
-            <div className="flex justify-center p-4">
-              <Button size="sm" variant="light" onPress={() => fetchNextPage()}>
-                加载更多
-              </Button>
-            </div>
-          )}
+          {!isLoading &&
+            !filterInvalid &&
+            (hasNextPage || (isError && items.length > 0)) && (
+              <ContentLoadMore
+                loading={isFetchingNextPage}
+                disabled={isFetching}
+                error={isError}
+                onLoad={() =>
+                  void (isError && !nextPageFailed
+                    ? refetch({ cancelRefetch: false })
+                    : loadNext())
+                }
+              />
+            )}
+
+          {!isLoading &&
+          !isFetching &&
+          !isError &&
+          !filterInvalid &&
+          data?.pages.length &&
+          hasNextPage === false &&
+          items.length > 0 ? (
+            <p
+              data-article-pagination
+              role="status"
+              className="p-4 text-center text-xs text-neutral-500"
+            >
+              已显示当前筛选的全部 {items.length} 篇文章
+            </p>
+          ) : null}
 
           {!isLoading && !isError && items?.length === 0 && (
             <div className="p-10 text-center text-sm text-neutral-400">
@@ -413,41 +542,6 @@ const ArticleList: FC<ArticleListProps> = ({
           )}
         </div>
       </div>
-      <Modal
-        isOpen={Boolean(readingId)}
-        onClose={() => {
-          position.restoreAfterReader();
-          setReaderFindOpen(false);
-          setReadingId(null);
-        }}
-        isKeyboardDismissDisabled={readerFindOpen}
-        size="4xl"
-        scrollBehavior="inside"
-        classNames={{ wrapper: 'z-[200]', backdrop: 'z-[190]' }}
-      >
-        <ModalContent>
-          <ModalHeader>{reading.data?.title || '读取已保存正文'}</ModalHeader>
-          <ModalBody>
-            <p className="text-sm text-neutral-500">
-              读取本地已保存正文与图片；本次没有联网取文。
-            </p>
-            {reading.isLoading ? (
-              <Spinner />
-            ) : reading.error ? (
-              <p role="alert">正文读取失败：{reading.error.message}</p>
-            ) : reading.data?.contentHtml ? (
-              <ArticleReader
-                key={readingId}
-                contentHtml={reading.data.contentHtml}
-                findOpen={readerFindOpen}
-                onFindOpenChange={setReaderFindOpen}
-              />
-            ) : (
-              <p role="alert">尚无已保存正文；没有自动请求腾讯原文。</p>
-            )}
-          </ModalBody>
-        </ModalContent>
-      </Modal>
     </div>
   );
 };

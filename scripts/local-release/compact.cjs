@@ -1,10 +1,11 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { packageDir, readJson, inside } = require('./lib.cjs');
 
 // Compile TypeScript with the existing tsc step first: Nest's emitted decorator
 // metadata is required. This packages its CommonJS output, not TypeScript.
 function bundleServer(target, packageSource, builderSource) {
+  require('./lib.cjs').hostEffects.assertWritable();
   const esbuildDirectory = packageDir(
     'esbuild',
     packageDir('vite', builderSource),
@@ -27,6 +28,8 @@ function bundleServer(target, packageSource, builderSource) {
     'dist/apps/server/src/collection/cache-recovery-runtime.js',
   );
   if (fs.existsSync(recovery)) entries['cache-recovery'] = recovery;
+  const maintenance=path.join(target,'dist/apps/server/src/collection/legacy-project-adapter.js');
+  if(fs.existsSync(maintenance))entries['legacy-maintenance']=maintenance;
   const inputs = new Set();
   const versions = new Map();
   const licenses = new Map();
@@ -125,6 +128,7 @@ function bundleServer(target, packageSource, builderSource) {
     tool: 'esbuild',
     version: readJson(path.join(esbuildDirectory, 'package.json')).version,
     inputFiles: inputs.size,
+    legacyMaintenance: entries['legacy-maintenance']?'legacy-maintenance.cjs':undefined,
     dependencies: [...versions.values()].sort((a, b) =>
       a.name.localeCompare(b.name),
     ),

@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sqlite3
 import sys
 import threading
@@ -34,6 +35,15 @@ def fingerprint(path):
 
 
 OwnerLock = backup_module.FileLock
+_retention_module = None
+
+
+def automatic_retention(owner):
+    global _retention_module
+    if _retention_module is None:
+        spec=importlib.util.spec_from_file_location('periodic_retention',Path(__file__).with_name('sqlite-retention-plan.py'))
+        _retention_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(_retention_module)
+    return _retention_module.automatic_after_snapshot(owner)
 
 
 class SnapshotGuard:
@@ -62,6 +72,9 @@ class SnapshotGuard:
         self.generation = uuid.uuid4().hex
         self.receipt = self.backup_root / f"snapshot-owner-{lock_name}.json"
         self.record = None
+        self.failure = None
+        self.lifecycle_status = None
+        self.lifecycle_point = None
         self.reason = "startup-backup-required"
         self.fatal = False
         self.leases = {}
@@ -125,6 +138,7 @@ class SnapshotGuard:
 
     def tick(self):
         """Serialized startup/periodic work. No backup in query/validate/dirty."""
+        stage='snapshot'
         try:
             wall, mono = self.clock()
             self.next_check = mono + self.interval
@@ -137,6 +151,7 @@ class SnapshotGuard:
                         and not self.record["dirty"]):
                     # Rehash existing verified backup periodically. Full integrity
                     # was performed on creation; its exact bytes must still match.
+                    stage='hash'
                     if backup_module.sha256(Path(self.record["backup"])) != self.record["sha256"]:
                         raise ValueError("snapshot-checksum-failed")
                     after, after_schema, after_hash = self.database_state()
@@ -145,14 +160,22 @@ class SnapshotGuard:
                         # can commit immediately after the last read; never claim
                         # the later time as a proven unchanged boundary.
                         self.record["coverageAtMs"] = int(wall * 1000)
+                        self.record["lastVerifiedAtMs"] = int(self.clock()[0] * 1000)
                         self.record["coverageMono"] = mono
                         self.persist()
+                        self.failure=None
                         return
             # Invalidate before any IO: failure cannot leave a previously usable
             # record active. Backup API handles ordinary concurrent source writes.
             self.invalidate("snapshot-in-progress")
             start_wall, start_mono = self.clock()
-            report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot")
+            stage='copy'
+            report = self.backup(self.database, self.backup_root, prefix="periodic-snapshot",
+                                 **({'periodic_now':start_wall} if self.backup is backup_module.create_backup else {}))
+            self.lifecycle_status=report.get('periodicLifecycleStatus')
+            self.lifecycle_point=report.get('periodicLifecyclePoint')
+            self.retention_lease_identity=report.get('retentionLeaseIdentity')
+            stage='verify'
             completed_wall, completed_mono = self.clock()
             after, after_schema, after_hash = self.database_state()
             backup = Path(report["backup"]).resolve(strict=True)
@@ -182,6 +205,12 @@ class SnapshotGuard:
                 "schemaVersion": after_schema, "schemaSha256": after_hash,
                 "backup": str(backup), "sha256": report["sha256"],
                 "backupFingerprint": fingerprint(backup),
+                # These original copy times remain distinct from this guard's
+                # fresh verification/coverage interval, including after restart.
+                "backupReused": report.get("reused") is True,
+                "copyStartedAtUtc": report.get("startedAtUtc"),
+                "copySucceededAtUtc": report.get("createdAtUtc"),
+                "lastVerifiedAtMs": int(completed_wall * 1000),
                 "backupStartedAtMs": int(start_wall * 1000),
                 "backupSucceededAtMs": int(completed_wall * 1000),
                 "backupStartedMono": start_mono, "backupSucceededMono": completed_mono,
@@ -191,7 +220,20 @@ class SnapshotGuard:
             }
             self.persist()
             self.reason = None
+            self.failure = None
+            if backup_module.periodic_retention_policy() is not None:
+                try:
+                    self.record['automaticRetention']=automatic_retention(self)
+                except Exception:
+                    # The new recovery point remains valid even when cleanup
+                    # cannot be proved. Its existing generation lease stays held.
+                    self.record['automaticRetention']={'status':'held','code':'AUTO_RETENTION_HELD','deletedCopies':None}
+                self.persist()
         except Exception as error:
+            self.failure=backup_module.safe_backup_failure(error,stage)
+            self.lifecycle_status=backup_module.periodic_lifecycle().read_status(self.database,self.backup_root)
+            if self.failure['code']=='SQLITE_PERIODIC_NOT_DUE' and self.lifecycle_status:
+                self.next_check=mono+max(1,min(self.interval,self.lifecycle_status.get('nextGenerationAtEpoch',wall+self.interval)-wall))
             reason = str(error)
             safe = reason if reason in {
                 "clock-rollback", "database-replaced", "owner-lock-replaced",
@@ -201,6 +243,19 @@ class SnapshotGuard:
                 "snapshot-schema-mismatch",
             } else "snapshot-io-or-verification-failed"
             self.invalidate(safe, fatal=safe in {"database-replaced", "owner-lock-replaced"})
+
+    def status(self):
+        lifecycle = dict(self.lifecycle_status) if self.lifecycle_status else None
+        if (lifecycle and self.record and self.lifecycle_point ==
+                {'backup': self.record['backup'], 'sha256': self.record['sha256']}):
+            lifecycle.update(lastVerifiedAtMs=self.record['lastVerifiedAtMs'],
+                             verificationBasis='current-owner-hash',
+                             coverageAtMs=self.record['coverageAtMs'],
+                             coverageBasis='verified-unchanged' if not self.record['dirty'] else 'copy-start')
+        return {'event':'periodic-snapshot-status','ok':self.record is not None,
+                **({'lifecycle':lifecycle} if lifecycle else {}),
+                **({'failure':self.failure} if self.record is None and self.failure else {}),
+                **({'retention':self.record['automaticRetention']} if self.record and 'automaticRetention' in self.record else {})}
 
     def query(self):
         try:
@@ -274,10 +329,12 @@ def main():
     guard = SnapshotGuard(args.database, args.backup_root,
                           args.interval_seconds, args.max_age_seconds)
     requests = queue.Queue()
+    history_host = None  # explicit opt-in private IPC; never an automatic task
 
     def read_requests():
         for line in sys.stdin:
-            if len(line) > 8192:
+            limit = 256 * 1024 if os.environ.get('SQLITE_ARTICLE_HISTORY_REVIEW_ENABLED') == '1' else 8192
+            if len(line.encode('utf-8')) > limit:
                 requests.put(None)
                 return
             try:
@@ -292,6 +349,7 @@ def main():
         while True:
             if guard.monotonic() >= guard.next_check:
                 guard.tick()
+                print(json.dumps(guard.status()),flush=True)
             try:
                 request = requests.get(timeout=min(1, max(0, guard.next_check - guard.monotonic())))
             except queue.Empty:
@@ -305,6 +363,35 @@ def main():
                 result = guard.validate(request.get("token"))
             elif operation == "dirty":
                 result = guard.dirty(request.get("token"))
+            elif operation in {"history-review", "history-pin", "history-unpin", "history-sync", "history-validate-approval"}:
+                try:
+                    import article_history_host
+                    if history_host is None:
+                        history_host = article_history_host.from_environment(guard)
+                    if operation == "history-sync":
+                        history_host.registry.sync_runtime(request.get('runtime', {}))
+                        result = {'verified': False, 'fresh': False, 'runtimeReferencesSynced': True}
+                    elif operation == "history-pin":
+                        history_host.registry.pin(request.get('token', ''), request.get('path', ''))
+                        result = {'verified': False, 'fresh': False, 'referencePinned': True}
+                    elif operation == "history-unpin":
+                        history_host.registry.unpin(request.get('token', ''))
+                        result = {'verified': False, 'fresh': False, 'referenceUnpinned': True}
+                    elif operation == "history-validate-approval":
+                        result = history_host.validate_approval(request.get('plan', {}), request.get('approval', {}))
+                    else:
+                        result = {'verified': False, 'fresh': False,
+                                  'review': history_host.review(request.get('sources'))}
+                except Exception as error:
+                    # Never echo raw SQL, account values, exceptions or paths.
+                    code = str(error) if type(error).__name__ == 'HostError' else 'HISTORY_REVIEW_FAILED'
+                    if not re.fullmatch('[A-Z_]{1,80}', code):
+                        code = 'HISTORY_REVIEW_FAILED'
+                    result = {'verified': False, 'fresh': False, 'eligible': [],
+                              'reason': code, 'permanentDeletionPerformed': False,
+                              'diagnostic': article_history_host.safe_diagnostic(error) if 'article_history_host' in locals() else
+                                  {'format': 'article-history-diagnostic-v1', 'stage': 'owner-request',
+                                   'errorType': 'UnknownError', 'code': 'UNCLASSIFIED'}}
             else:
                 result = {"verified": False, "fresh": False, "reason": "unknown-operation"}
             print(json.dumps({"id": request.get("id"), "result": result}), flush=True)

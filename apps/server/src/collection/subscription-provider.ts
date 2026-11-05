@@ -25,6 +25,11 @@ export type ProviderPage = {
   upstreamCount: number;
   bodyMissing: number;
   imageBlocked: number;
+  /** Sanitizer failures tied to verified article identities, not raw errors. */
+  bodyFailures?: Array<{
+    id: string;
+    code: 'BODY_PARSE_FAILED' | 'BODY_TOO_LARGE' | 'BODY_MISSING';
+  }>;
   mediaRequestBlocked?: boolean;
   pages?: number;
   albums?: Array<{
@@ -105,6 +110,26 @@ export function assertProviderPage(
       typeof article.picUrl !== 'string'
     )
       throw new Error('PROVIDER_ARTICLE_METADATA_INVALID');
+  }
+  if (page.bodyFailures !== undefined) {
+    if (!Array.isArray(page.bodyFailures))
+      throw new Error('PROVIDER_PAGE_INVALID');
+    const failures = new Set<string>();
+    for (const failure of page.bodyFailures) {
+      if (
+        !failure ||
+        !['BODY_PARSE_FAILED', 'BODY_TOO_LARGE', 'BODY_MISSING'].includes(
+          failure.code,
+        ) ||
+        failures.has(failure.id) ||
+        !page.articles.some(
+          (article) =>
+            article.id === failure.id && article.contentHtml === null,
+        )
+      )
+        throw new Error('PROVIDER_PAGE_INVALID');
+      failures.add(failure.id);
+    }
   }
   return page;
 }

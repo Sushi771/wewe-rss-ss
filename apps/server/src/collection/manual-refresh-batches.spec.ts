@@ -6,6 +6,18 @@ import {
   Wechat2RssSubscriptionBatches,
 } from './wechat2rss-subscription-batches';
 
+function refreshCalls(run: { mock: { calls: unknown[][] } }) {
+  return run.mock.calls.map((call) => {
+    if (call[1] === 'submit')
+      expect(call[3]).toEqual(
+        expect.objectContaining({
+          claimKey: expect.stringMatching(/^[a-f0-9-]{36}$/),
+        }),
+      );
+    return call[2] === false ? call.slice(0, 2) : call.slice(0, 3);
+  });
+}
+
 describe('manual refresh through the original batch scheduler (offline)', () => {
   let directory: string, clock: number;
   const managers: Wechat2RssSubscriptionBatches[] = [];
@@ -65,10 +77,10 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
     await manager.enqueueRefresh(ids);
     await manager.runDue();
     await manager.runDue();
-    expect(run.mock.calls).toEqual([[ids[0], 'submit']]);
+    expect(refreshCalls(run)).toEqual([[ids[0], 'submit']]);
     clock += 30000;
     await manager.runDue();
-    expect(run.mock.calls).toEqual([
+    expect(refreshCalls(run)).toEqual([
       [ids[0], 'submit'],
       [ids[1], 'submit'],
     ]);
@@ -78,24 +90,31 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
       true,
     );
   });
-  it('a submitted request with an unknown result pauses, and resume/click/restart never sends it again', async () => {
+  it('an unknown result blocks only its item and restart never sends it again', async () => {
     const { manager, run } = make(
-      jest.fn().mockRejectedValue(new Error('synthetic secret URL')),
+      jest
+        .fn()
+        .mockRejectedValueOnce(new Error('synthetic secret URL'))
+        .mockResolvedValue({
+          state: 'succeeded',
+          accepted: true,
+          message: 'ready',
+        }),
     );
     const batch = await manager.enqueueRefresh(ids);
     await manager.runDue();
     expect((await manager.list())[0]).toMatchObject({
-      state: 'paused',
+      state: 'running',
       items: [{ state: 'blocked', accepted: false }, { state: 'queued' }],
     });
     await manager.resume(batch.batchId);
     clock += 60000;
     await manager.runDue();
-    expect((await manager.enqueueRefresh(ids)).batchId).toBe(batch.batchId);
     const second = make();
     await second.manager.init();
     await second.manager.runDue();
-    expect(run).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls.map((call) => call[0])).toEqual(ids);
     expect(second.run).not.toHaveBeenCalled();
     expect(JSON.stringify(await manager.list())).not.toContain('secret');
   });
@@ -117,7 +136,10 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
     await work;
     const second = make();
     await second.manager.runDue();
-    expect((await second.manager.list())[0].state).toBe('paused');
+    expect((await second.manager.list())[0]).toMatchObject({
+      state: 'running',
+      items: [{ state: 'blocked', accepted: false }, { state: 'queued' }],
+    });
     expect(second.run).not.toHaveBeenCalled();
   });
   it('stop during submission cancels only unsent items; confirmed accepted work continues as cache reads', async () => {
@@ -144,7 +166,7 @@ describe('manual refresh through the original batch scheduler (offline)', () => 
     });
     clock += 30000;
     await manager.runDue();
-    expect(run.mock.calls).toEqual([
+    expect(refreshCalls(run)).toEqual([
       [ids[0], 'submit'],
       [ids[0], 'cache'],
     ]);

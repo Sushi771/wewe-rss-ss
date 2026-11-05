@@ -1,8 +1,9 @@
+import { Modal } from '@web/components/AppOverlays';
+import { FailureNotice } from '@web/components/OperationNotice';
 import { useState } from 'react';
 import {
   Button,
   Input,
-  Modal,
   ModalBody,
   ModalContent,
   ModalFooter,
@@ -84,7 +85,9 @@ export default function LocalCollection({
               setTimeout(() => URL.revokeObjectURL(url), 1000);
               toast.success(`已导出 ${result.count} 篇文章的指标`);
             } catch (e) {
-              toast.error(e instanceof Error ? e.message : String(e));
+              toast.error('操作未完成，请查看详情。', {
+                description: <FailureNotice error={e} />,
+              });
             }
           }}
         >
@@ -110,14 +113,14 @@ export default function LocalCollection({
                 正文。填写文件所在的本机目录，可包含下三级子目录。
               </li>
               <li>
-                先预览，再导入。本次导入不改变在线采集来源，也不会绑定目录或开启定时读取。
+                先预览并核对文章，再确认导入。已有订阅的更新方式保持不变。
               </li>
             </ol>
             <p className="text-warning-700 text-sm">
-              此入口只导入已有文件，不会登录微信或发起公众号批量采集。导入成功不代表历史、翻页及次条已完整获取。
+              仅导入所选目录中的文件；请在预览中核对文章范围和缺失正文。
             </p>
             <Input
-              label="采集目录完整路径"
+              label="已有文件所在目录"
               placeholder="D:\公众号采集\某公众号"
               value={directory}
               isDisabled={busy}
@@ -143,6 +146,14 @@ export default function LocalCollection({
             <p className="text-default-500 text-sm">
               阅读、点赞、分享、评论、在看、收藏分别保存。源文件未提供的指标留空；分享不是收藏。“10万+”保留下限标记，数据文件时间不等于精确采集时间。
             </p>
+            {(preview.error || importer.error) && (
+              <div role="alert" className="text-sm text-red-600">
+                <FailureNotice
+                  error={preview.error || importer.error}
+                  fallback="文件处理未完成，请核对目录后重试。"
+                />
+              </div>
+            )}
             {preview.data && (
               <div
                 className="bg-default-100 rounded-lg p-3 text-sm"
@@ -193,7 +204,9 @@ export default function LocalCollection({
                     mpName,
                   });
                 } catch (e) {
-                  toast.error(e instanceof Error ? e.message : String(e));
+                  toast.error('操作未完成，请查看详情。', {
+                    description: <FailureNotice error={e} />,
+                  });
                 }
               }}
             >
@@ -223,7 +236,9 @@ export default function LocalCollection({
                   onImported?.(result.message);
                   setOpen(false);
                 } catch (e) {
-                  toast.error(e instanceof Error ? e.message : String(e));
+                  toast.error('操作未完成，请查看详情。', {
+                    description: <FailureNotice error={e} />,
+                  });
                 }
               }}
             >

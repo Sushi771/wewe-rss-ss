@@ -1,3 +1,4 @@
+import { projectWriterGate } from './collection/project-writer-boundary';
 import { NestFactory } from '@nestjs/core';
 import { TrpcRouter } from '@server/trpc/trpc.router';
 import { ConfigService } from '@nestjs/config';
@@ -7,7 +8,11 @@ import { ConfigurationType } from './configuration';
 import { join } from 'path';
 import { readFileSync } from 'fs';
 import { assertPrivateConfig, privateAccessGuard } from './private-access';
-import { startupAudit, startupAuditHttpGuard } from './startup-audit';
+import {
+  startSnapshotsAfterStartupAudit,
+  startupAuditHttpGuard,
+} from './startup-audit';
+import { recoveryHoldHttp } from './recovery-hold-http';
 import {
   startSqliteSnapshotGuard,
   stopSqliteSnapshotGuard,
@@ -17,6 +22,7 @@ import {
   browserTaskApplication,
   mountBrowserTaskTransport,
 } from './browser-task.opt-in';
+import { startSqliteRetentionMaintenance } from './collection/sqlite-retention-maintenance';
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -35,6 +41,10 @@ console.log('appVersion: v' + appVersion);
 
 async function bootstrap() {
   assertPrivateConfig();
+  projectWriterGate().writerForUrl(
+    process.env.DATABASE_URL,
+    join(process.cwd(), 'prisma'),
+  ); // Before Nest can initialize DB or schedules.
   const browserOptIn = readBrowserTaskOptIn();
   const app = await NestFactory.create<NestExpressApplication>(
     browserTaskApplication(browserOptIn),
@@ -46,6 +56,7 @@ async function bootstrap() {
     configService.get<ConfigurationType['server']>('server')!;
 
   app.use(privateAccessGuard);
+  app.use(recoveryHoldHttp);
   app.use(startupAuditHttpGuard);
   mountBrowserTaskTransport(app, { host, port }, browserOptIn);
   if (process.env.WEWE_ACCEPTANCE_MODE === '1')
@@ -79,11 +90,26 @@ async function bootstrap() {
   trpc.applyMiddleware(app);
 
   await app.listen(port, host);
-  startupAudit()?.start();
-  // Local-only optional snapshots never dispatch subscription/media work.
-  await startSqliteSnapshotGuard();
-  app.getHttpServer().once('close', stopSqliteSnapshotGuard);
+  // Review planning stays independent of startup/backup capacity write gates.
+  let stopRetention: () => void = () => undefined;
+  try {
+    stopRetention = startSqliteRetentionMaintenance();
+  } catch {
+    console.warn('[SQLITE_RETENTION_CONFIGURATION_REQUIRES_REVIEW]');
+  }
+  let closed = false;
+  app.getHttpServer().once('close', () => {
+    closed = true;
+    stopSqliteSnapshotGuard();
+    stopRetention();
+  });
   process.once('exit', stopSqliteSnapshotGuard);
+  process.once('exit', stopRetention);
+  // HTTP cached reads remain available while the audit finishes. Only then
+  // may the periodic owner establish its new recovery generation at this root.
+  await startSnapshotsAfterStartupAudit(async () => {
+    if (!closed) await startSqliteSnapshotGuard();
+  });
 
   console.log(`Server is running at http://${host}:${port}`);
 }

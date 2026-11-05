@@ -84,7 +84,12 @@ export class Wechat2RssSubscriptionTasks {
       task: SubscriptionTask,
     ) => Promise<SubscriptionTaskResult>,
     private readonly now: () => number = Date.now,
+    private readonly recoveryHold = false,
   ) {}
+
+  private assertNotHeld() {
+    if (this.recoveryHold) throw new Error('SUBSCRIPTION_TASK_RECOVERY_HELD');
+  }
 
   private async storage() {
     if (this.directory) return this.directory;
@@ -169,6 +174,7 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   private async write(task: SubscriptionTask) {
+    this.assertNotHeld();
     const file = path.join(await this.storage(), task.taskId + '.json');
     const temporary = file + '.' + randomUUID() + '.tmp';
     try {
@@ -215,6 +221,7 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async setResult(id: string, result: SubscriptionTaskResult) {
+    this.assertNotHeld();
     return this.mutate(async () => {
       const task = await this.read(id);
       if (!task) throw new Error('SUBSCRIPTION_TASK_INVALID');
@@ -249,6 +256,7 @@ export class Wechat2RssSubscriptionTasks {
     feedId?: string;
     phase: 'identity' | 'cache' | 'metadata';
   }) {
+    this.assertNotHeld();
     const url = new URL(subscriptionArticleUrl(input.articleUrl));
     url.hash = '';
     url.searchParams.sort();
@@ -283,6 +291,7 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async resume(id: string) {
+    this.assertNotHeld();
     const task = await this.read(id);
     if (!task) return null;
     if (
@@ -294,6 +303,7 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async init() {
+    if (this.recoveryHold) return;
     this.stopped = false;
     this.initialized = true;
     // Validate persisted records before scheduling; no network on construction.
@@ -302,7 +312,8 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   private schedule() {
-    if (!this.initialized || this.stopped || this.timer) return;
+    if (this.recoveryHold || !this.initialized || this.stopped || this.timer)
+      return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
       void this.runDue().catch(() => console.warn('[WECHAT2RSS_TASK_STOPPED]'));
@@ -311,7 +322,7 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async runDue() {
-    if (this.busy || this.stopped) return;
+    if (this.recoveryHold || this.busy || this.stopped) return;
     this.busy = true;
     try {
       const views = await this.list();

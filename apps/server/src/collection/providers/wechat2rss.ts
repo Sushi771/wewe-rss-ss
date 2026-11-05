@@ -1,4 +1,18 @@
 import { isIP } from 'node:net';
+import { createHash } from 'node:crypto';
+import type { ValidatedRefreshResponse } from '../refresh-response-receipt';
+import {
+  readWechat2RssResponse,
+  waitForWechat2RssResponse,
+  Wechat2RssResponseError,
+  WECHAT2RSS_CACHE_RESPONSE_LIMIT,
+  WECHAT2RSS_CONTROL_RESPONSE_LIMIT,
+} from './wechat2rss-response';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  defaultWechat2RssSourceGate,
+  Wechat2RssSourceGate,
+} from '../wechat2rss-source-gate';
 import { parseWechat2RssJsonFeed } from '../provider-article';
 import { ProviderPage, SubscriptionProvider } from '../subscription-provider';
 import { canonicalArticleUrl } from '../collection-format';
@@ -27,6 +41,46 @@ export type Wechat2RssListedFeed = {
 type IdentityRead = { deadline: number; remainingListRequests: number };
 const IDENTITY_CHECK_EXPIRED = 'WECHAT2RSS_IDENTITY_CHECK_EXPIRED';
 
+type SourceOperation = {
+  token?: string;
+  pending?: Promise<string>;
+  closing?: boolean;
+  inFlight?: boolean;
+  inFlightDone?: Promise<void>;
+  requestFailed: boolean;
+  restriction?: 401 | 403 | 429;
+  gate: Wechat2RssSourceGate;
+};
+const sourceOperations = new AsyncLocalStorage<SourceOperation>();
+
+function guardedSource(
+  _target: object,
+  _name: string,
+  descriptor: PropertyDescriptor,
+) {
+  const original = descriptor.value as (...args: unknown[]) => Promise<unknown>;
+  descriptor.value = function (this: Wechat2RssProvider, ...args: unknown[]) {
+    return (
+      this as unknown as {
+        runSourceOperation<T>(operation: () => Promise<T>): Promise<T>;
+      }
+    ).runSourceOperation(() => original.apply(this, args));
+  };
+}
+
+/** Safe, bounded classification; never retain the request URL or response. */
+export class Wechat2RssRestrictionError extends Error {
+  constructor(readonly status: 401 | 403 | 429) {
+    super('WECHAT2RSS_SOURCE_RESTRICTED');
+  }
+}
+
+export class Wechat2RssSourceStoppedError extends Error {
+  constructor() {
+    super('WECHAT2RSS_SOURCE_STOPPED');
+  }
+}
+
 function privateHost(hostname: string): boolean {
   if (
     hostname === 'localhost' ||
@@ -52,6 +106,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   constructor(
     baseUrl: string,
     private readonly token: string,
+    private readonly sourceGate: Wechat2RssSourceGate = defaultWechat2RssSourceGate(),
   ) {
     const url = new URL(baseUrl);
     if (
@@ -69,6 +124,43 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     this.base = url;
   }
 
+  /** One intent covers nested calls until the complete business operation has
+   * validated its result. An unknown outcome remains pending across restarts. */
+  private async runSourceOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const existing = sourceOperations.getStore();
+    if (existing) {
+      if (existing.gate !== this.sourceGate)
+        throw new Wechat2RssSourceStoppedError();
+      return operation();
+    }
+    return sourceOperations.run(
+      { requestFailed: false, gate: this.sourceGate },
+      async () => {
+        const context = sourceOperations.getStore()!;
+        try {
+          const result = await operation();
+          context.closing = true;
+          await context.pending?.catch(() => undefined);
+          await context.inFlightDone;
+          if (context.requestFailed) {
+            if (context.restriction)
+              throw new Wechat2RssRestrictionError(context.restriction);
+            throw new Wechat2RssSourceStoppedError();
+          }
+          if (context.token) await this.sourceGate.finish(context.token, 200);
+          return result;
+        } catch (error) {
+          context.closing = true;
+          await context.pending?.catch(() => undefined);
+          await context.inFlightDone;
+          if (context.token && context.restriction)
+            await this.sourceGate.finish(context.token, context.restriction);
+          throw error;
+        }
+      },
+    );
+  }
+
   /** Never expose upstream URLs or raw responses: k is a secret query parameter. */
   private async get(
     path: string,
@@ -76,6 +168,10 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     deadline?: number,
     format: 'json' | 'text' = 'json',
   ): Promise<unknown> {
+    const context = sourceOperations.getStore();
+    if (!context) throw new Wechat2RssSourceStoppedError();
+    if (context.requestFailed || context.closing)
+      throw new Wechat2RssSourceStoppedError();
     const url = new URL(path, this.base);
     for (const [key, value] of Object.entries(params))
       url.searchParams.set(key, value);
@@ -83,35 +179,106 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     const remaining = deadline === undefined ? 10000 : deadline - Date.now();
     if (remaining <= 0) throw new Error(IDENTITY_CHECK_EXPIRED);
     const signal = AbortSignal.timeout(Math.min(10000, remaining));
+    const responseDeadline = Math.min(Date.now() + 10000, deadline ?? Infinity);
+    let phase: 'headers' | 'body' | 'json' = 'headers';
+    let httpStatus: number | undefined;
+    if (!context.token) {
+      context.pending ??= this.sourceGate.begin();
+      try {
+        context.token = await context.pending;
+      } catch {
+        throw new Wechat2RssSourceStoppedError();
+      }
+    }
+    if (context.requestFailed || context.closing || context.inFlight) {
+      context.requestFailed = true;
+      throw new Wechat2RssSourceStoppedError();
+    }
+    context.inFlight = true;
+    let releaseInFlight!: () => void;
+    context.inFlightDone = new Promise<void>((resolve) => {
+      releaseInFlight = resolve;
+    });
     try {
-      const response = await fetch(url, {
+      const pending = fetch(url, {
         redirect: 'manual',
         signal,
+      }).then((response) => {
+        if (signal.aborted) void response.body?.cancel().catch(() => undefined);
+        return response;
       });
-      if (response.status !== 200 || !response.body)
-        throw new Error('HTTP_STATUS');
-      const parts: Buffer[] = [];
-      let size = 0;
-      const reader = response.body.getReader();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const bytes = Buffer.from(value);
-        size += bytes.length;
-        if (size > 4_000_000) {
-          await reader.cancel();
-          throw new Error('RESPONSE_TOO_LARGE');
-        }
-        parts.push(bytes);
+      const response = await waitForWechat2RssResponse(pending, signal);
+      httpStatus = response.status;
+      if ([401, 403, 429].includes(response.status)) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Wechat2RssRestrictionError(
+          response.status as 401 | 403 | 429,
+        );
       }
+      if (response.status !== 200) {
+        void response.body?.cancel().catch(() => undefined);
+        throw new Wechat2RssResponseError('WECHAT2RSS_HTTP_STATUS', {
+          httpStatus: response.status,
+        });
+      }
+      const limit =
+        format === 'json' && /^\/feed\/[A-Za-z0-9_-]+\.json$/.test(path)
+          ? WECHAT2RSS_CACHE_RESPONSE_LIMIT
+          : WECHAT2RSS_CONTROL_RESPONSE_LIMIT;
+      phase = 'body';
+      const text = await readWechat2RssResponse(
+        response,
+        limit,
+        signal,
+        responseDeadline,
+      );
       if (deadline !== undefined && Date.now() >= deadline)
         throw new Error(IDENTITY_CHECK_EXPIRED);
-      const text = Buffer.concat(parts).toString('utf8');
-      return format === 'text' ? text : JSON.parse(text);
-    } catch {
-      if (deadline !== undefined && (Date.now() >= deadline || signal.aborted))
+      if (format === 'text') return text;
+      phase = 'json';
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Wechat2RssResponseError('WECHAT2RSS_INVALID_JSON');
+      }
+    } catch (error) {
+      context.requestFailed = true;
+      if (error instanceof Wechat2RssRestrictionError) {
+        context.restriction ??= error.status;
+        throw error;
+      }
+      if ((error as Error)?.message === 'WECHAT2RSS_RATE_LIMITED') throw error;
+      if (
+        deadline !== undefined &&
+        (Date.now() >= deadline ||
+          signal.aborted ||
+          (error as Error)?.message === 'WECHAT2RSS_REQUEST_TIMEOUT')
+      )
         throw new Error(IDENTITY_CHECK_EXPIRED);
-      throw new Error('WECHAT2RSS_REQUEST_FAILED');
+      if (error instanceof Wechat2RssResponseError)
+        throw new Wechat2RssResponseError(
+          error.message as ConstructorParameters<
+            typeof Wechat2RssResponseError
+          >[0],
+          {
+            phase,
+            httpStatus: error.httpStatus ?? httpStatus,
+            responseBytes: error.responseBytes,
+            responseLimitBytes: error.responseLimitBytes,
+          },
+        );
+      if (signal.aborted)
+        throw new Wechat2RssResponseError('WECHAT2RSS_REQUEST_TIMEOUT', {
+          phase,
+          httpStatus,
+        });
+      throw new Wechat2RssResponseError('WECHAT2RSS_NETWORK_ERROR', {
+        phase,
+        httpStatus,
+      });
+    } finally {
+      context.inFlight = false;
+      releaseInFlight();
     }
   }
 
@@ -128,6 +295,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
 
   /** Optional metadata from the same already-subscribed cache. Never refreshes
    * or registers a subscription, follows redirects or returns a secret URL. */
+  @guardedSource
   async fetchFeedAvatar(feedId: string): Promise<string | undefined> {
     const match = /^MP_WXS_(\d{5,15})$/.exec(feedId);
     if (!match) return undefined;
@@ -135,12 +303,22 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       return parseWechat2RssFeedAvatar(
         await this.get(`/feed/${match[1]}.xml`, {}, undefined, 'text'),
       );
-    } catch {
+    } catch (error) {
+      const context = sourceOperations.getStore();
+      if (context) context.requestFailed = true;
+      if (
+        error instanceof Wechat2RssRestrictionError ||
+        error instanceof Wechat2RssSourceStoppedError ||
+        (error instanceof Error &&
+          error.message.startsWith('WECHAT2RSS_SOURCE_STOP'))
+      )
+        throw error;
       // Avatar failures must not turn successful article imports into failures.
       return undefined;
     }
   }
 
+  @guardedSource
   async listSubscriptions(read?: IdentityRead) {
     const feeds: Wechat2RssListedFeed[] = [];
     let total: number | null = null;
@@ -200,6 +378,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return feeds;
   }
 
+  @guardedSource
   async checkAccountStatus(deadline?: number) {
     const raw = this.envelope(await this.get('/login/list', {}, deadline));
     if (!Array.isArray(raw.data))
@@ -216,6 +395,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     };
   }
 
+  @guardedSource
   async acceptSubscription(articleUrl: string) {
     const link = new URL(articleUrl);
     if (
@@ -244,6 +424,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return accepted.pathname;
   }
 
+  @guardedSource
   async resolveAcceptedSubscription(feedPath: string, read?: IdentityRead) {
     if (!/^\/feed\/[A-Za-z0-9_-]+\.(xml|json)$/.test(feedPath))
       throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
@@ -272,6 +453,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
 
   /** One foreground add: up to three list checks, six paginated GETs and 35s total.
    * No /addurl replay, detached timer or background polling. */
+  @guardedSource
   async waitForAcceptedSubscription(feedPath: string) {
     const read: IdentityRead = {
       deadline: Date.now() + 35000,
@@ -299,12 +481,15 @@ export class Wechat2RssProvider implements SubscriptionProvider {
       }
       return null;
     } catch (error) {
+      const context = sourceOperations.getStore();
+      if (context) context.requestFailed = true;
       if (error instanceof Error && error.message === IDENTITY_CHECK_EXPIRED)
         return null;
       throw error;
     }
   }
 
+  @guardedSource
   async addSubscription(articleUrl: string) {
     const path = await this.acceptSubscription(articleUrl);
     const accepted = await this.resolveAcceptedSubscription(path);
@@ -312,7 +497,24 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return accepted;
   }
 
-  async refreshSubscription(feedId: string, automatic = false) {
+  @guardedSource
+  async refreshSubscription(
+    feedId: string,
+    automatic = false,
+    accepted?: (receipt: ValidatedRefreshResponse) => Promise<void>,
+  ) {
+    return (
+      await this.prepareRefreshSubscription(feedId, automatic, accepted)
+    )();
+  }
+
+  /** List/account preparation stays outside concurrent update requests. */
+  @guardedSource
+  async prepareRefreshSubscription(
+    feedId: string,
+    automatic = false,
+    accepted?: (receipt: ValidatedRefreshResponse) => Promise<void>,
+  ) {
     if (!/^MP_WXS_\d{5,15}$/.test(feedId))
       throw new Error('WECHAT2RSS_FEED_ID_INVALID');
     const subscription = (await this.listSubscriptions()).find(
@@ -327,11 +529,47 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         !automaticSubmissionAllowed(Date.now()))
     )
       throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
-    this.envelope(await this.get(`/add/${feedId.slice(7)}`));
-    return { accepted: true as const, pending: true as const };
+    return () =>
+      this.runSourceOperation(async () => {
+        if (
+          automatic &&
+          (!activeRefreshScheduleEnabled(process.env) ||
+            !automaticSubmissionAllowed(Date.now()))
+        )
+          throw new Error('WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED');
+        const raw = this.envelope(await this.get(`/add/${feedId.slice(7)}`));
+        // A successful envelope must identify the exact subscribed feed. A200
+        // status, empty body, cache content or scheduling metadata is not proof.
+        let target: URL;
+        try {
+          target = new URL(String(raw.data), this.base);
+        } catch {
+          throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
+        }
+        if (
+          typeof raw.data !== 'string' ||
+          !['http:', 'https:'].includes(target.protocol) ||
+          target.username ||
+          target.password ||
+          typeof subscription.feedUrl !== 'string' ||
+          target.pathname.replace(/\.json$/, '.xml') !==
+            subscription.feedUrl.replace(/\.json$/, '.xml')
+        )
+          throw new Error('WECHAT2RSS_ADD_RESPONSE_INVALID');
+        await accepted?.({
+          version: 1,
+          httpStatus: 200,
+          receivedAt: Date.now(),
+          responseDigest: createHash('sha256')
+            .update(JSON.stringify(raw))
+            .digest('hex'),
+        });
+        return { accepted: true as const, pending: true as const };
+      });
   }
 
   /** Read one already-subscribed cache only. No /addurl, /add or original-page fetch. */
+  @guardedSource
   async fetchSingleCachedArticle(articleUrl: string, expectedFeedId?: string) {
     if (new URL(articleUrl).pathname.startsWith('/s/') && !expectedFeedId)
       // The documented aggregate feed is read-only. It can prove a short-link
@@ -362,6 +600,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
     return selected;
   }
 
+  @guardedSource
   async fetchArticles(
     feedId: string,
     expectedName?: string,
@@ -380,6 +619,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
   }
 
   /** Read one validated cache without replaying /list or submitting work. */
+  @guardedSource
   async fetchListedArticles(feed: Wechat2RssListedFeed, expectedName: string) {
     if (
       !/^MP_WXS_\d{5,15}$/.test(feed.feedId) ||
@@ -395,6 +635,7 @@ export class Wechat2RssProvider implements SubscriptionProvider {
 
   /** Only a persisted accepted response may supply this path. A missing display
    * name does not invalidate its numeric publisher identity or exact cache. */
+  @guardedSource
   async fetchAcceptedArticles(
     feedPath: string,
     feedId: string,

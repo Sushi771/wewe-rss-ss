@@ -38,8 +38,20 @@ function fixture(t) {
   return { database, migrations, auditRoot: root };
 }
 
-test('quick gate reports pending, then an idempotent worker verifies a pinned WAL backup without changing data', async (t) => {
+test('quick gate then read-only integrity audit starts with a full backup quota and creates no recovery copy', async (t) => {
   const f = fixture(t);
+  const previous = {
+    SQLITE_TEST_MAX_BYTES: process.env.SQLITE_TEST_MAX_BYTES,
+    SQLITE_TEST_MAX_COPIES: process.env.SQLITE_TEST_MAX_COPIES,
+  };
+  process.env.SQLITE_TEST_MAX_BYTES = '1';
+  process.env.SQLITE_TEST_MAX_COPIES = '1';
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
   const writer = new DatabaseSync(f.database);
   writer.exec('PRAGMA journal_mode=WAL');
   writer.exec("UPDATE articles SET last_body_status='cached' WHERE id='a'");
@@ -61,22 +73,15 @@ test('quick gate reports pending, then an idempotent worker verifies a pinned WA
   // Give the transient worker time to close, then prove it never restarted.
   await new Promise((resolve) => setTimeout(resolve, 100));
   state.start();
-  const backups = fs.readdirSync(path.join(f.auditRoot, 'background-backup'));
-  assert.equal(backups.length, 1);
-  const backup = new DatabaseSync(
-    path.join(f.auditRoot, 'background-backup', backups[0], 'wewe-rss.db'),
-  );
   assert.equal(
-    backup.prepare('SELECT last_body_status FROM articles').get()
-      .last_body_status,
-    'cached',
+    fs.existsSync(path.join(f.auditRoot, 'background-backup')),
+    false,
   );
   assert.equal(
     writer.prepare('SELECT last_body_status FROM articles').get()
       .last_body_status,
     'cached',
   );
-  backup.close();
   writer.close();
 });
 

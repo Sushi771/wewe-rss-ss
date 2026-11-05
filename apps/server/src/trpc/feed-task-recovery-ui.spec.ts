@@ -86,6 +86,7 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
         require(id: string) {
           if (id === 'react')
             return {
+              useEffect: () => {},
               useRef: (value: unknown) => ({ current: value }),
               useState: (value: unknown) => [value, () => {}],
             };
@@ -127,7 +128,7 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
       feeds: [],
       onChange: jest.fn(),
     });
-    expect(JSON.stringify(tree)).toContain('缓存已同步');
+    expect(JSON.stringify(tree)).toContain('内容已同步');
     expect(JSON.stringify(tree)).not.toContain(
       'SYNTHETIC_LONG_TECHNICAL_MESSAGE',
     );

@@ -1,8 +1,8 @@
 // 当前 schema 的 Windows 本机启动/重启。仅停止精确核验的本项目进程。
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { parseArgs } = require('node:util');
 const {
   verifyRelease,
@@ -21,6 +21,7 @@ const {
   unusedPort,
   waitReady,
   stopOwned,
+  observeProjectWriters,
   loadProductionEnvironment,
 } = require('./switch.cjs');
 const { writeActiveReleaseAsync } = require('./active-release.cjs');
@@ -37,6 +38,11 @@ function requireFreePort(port) {
   const owners = portOwners(port);
   assert.deepEqual(owners, [], `端口 ${port} 已有监听进程，拒绝启动`);
 }
+function launchCommandLine(executable,args){
+  return [executable,...args].map(value=>/[\s"]/.test(value)?'"'+value.replace(/(\\*)"/g,'$1$1\\"').replace(/(\\+)$/,'$1$1')+'"':value).join(' ');
+}
+
+const {loadLegacyMaintenance}=require('./legacy-maintenance-loader.cjs');
 
 function commandLine(release, database, port, verifiedManifest) {
   const node = path.join(release, 'runtime/node.exe');
@@ -59,6 +65,8 @@ function commandLine(release, database, port, verifiedManifest) {
 }
 
 async function controlledRestart(options) {
+  require('./release-scope.cjs').assertWritableSession(['restart']);
+  // Reject fixture-only flags before resolving paths or opening any release claim.
   if (
     (options.preparedRehearsal || options.coldLaunchRehearsal) &&
     !options.rehearsal
@@ -69,7 +77,26 @@ async function controlledRestart(options) {
     options.mode !== 'start'
   )
     throw new Error('Prepared/cold fixture flags only measure a cold start');
+  if (!options.production || options.startupReuse === true)
+    return controlledRestartInner(options);
+  const scope = require('./release-scope.cjs');
+  return scope.within(
+    {
+      kind: 'restart',
+      root: path.dirname(fs.realpathSync(options.release)),
+      reserveBytes: 256 * 1024 ** 2,
+      transition: true,
+    },
+    (lease) => {
+      lease.authorizePackage(options.release);
+      lease.authorizePackage(options.previous || options.release);
+      return controlledRestartInner({ ...options, reuseVerified: false });
+    },
+  );
+}
+async function controlledRestartInner(options) {
   if (process.platform !== 'win32') throw new Error('仅支持 Windows 本机');
+  if (options.legacyMaintenanceCheckpoint !== undefined && (typeof options.legacyMaintenanceCheckpoint !== 'function' || options.mode !== 'restart' || !require('./release-scope.cjs').session()?.policy?.preservingUpdate)) throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');
   if (options.production === options.rehearsal)
     throw new Error('须且只能选择 --production 或 --rehearsal');
   if (options.mode !== 'start' && options.mode !== 'restart')
@@ -89,7 +116,7 @@ async function controlledRestart(options) {
     throw new Error('演练须使用 4000 之外的有效端口');
   const release = fs.realpathSync(options.release);
   const previous = fs.realpathSync(options.previous || options.release);
-  const source = fs.realpathSync(options.database);
+  let source = options.production ? fs.realpathSync(options.database) : null;
   const manifest = await verifyReleaseAsync(release, {
     reuseVerified: options.reuseVerified === true,
   });
@@ -99,372 +126,511 @@ async function controlledRestart(options) {
       : await verifyReleaseAsync(previous, {
           reuseVerified: options.reuseVerified === true,
         });
+  if(options.legacyJobId!==undefined){
+    if(options.legacyMaintenanceCheckpoint!==undefined||options.mode!=='restart')throw Error('LEGACY_MAINTENANCE_UNSUPPORTED');
+    options={...options,legacyMaintenanceCheckpoint:loadLegacyMaintenance(release,manifest,options.legacyJobId)};
+  }
+  let schemaProof;
+  const preserving = require('./release-scope.cjs').session()?.policy?.preservingUpdate;
+  if (preserving) {
+    if (preserving.operation !== 'restart' || options.mode !== 'restart')
+      throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
+    schemaProof = require('./preserving-contract.cjs').validateSameSchema(previousManifest, manifest, {
+      oldRoot: previous, candidateRoot: release,
+      oldManifestSha256: preserving.active.currentManifestSha256,
+      candidateManifestSha256: preserving.active.candidateManifestSha256,
+    });
+  }
   for (const item of [manifest, previousManifest]) {
     assert.equal(item.schemaCompatibility, 'current', '只允许当前 schema 产物');
     assert.equal(typeof item.desktopHelperIncluded, 'boolean');
   }
+  if (options.legacyMaintenanceCheckpoint) {
+    const boundaryHash=fileHash(path.join(__dirname,'project-writer-gate.cjs'));
+    if (!preserving || [manifest,previousManifest].some(item=>item.schemaCompatibility!=='current'||item.desktopHelperIncluded!==false||item.executionLayout!=='compact-cjs-v1') ||
+        manifest.files?.['project-writer-gate.cjs']!==boundaryHash || manifest.files?.['runtime.cjs']!==fileHash(path.join(__dirname,'runtime.cjs')))
+      throw Error('LEGACY_MAINTENANCE_CANDIDATE_BOUNDARY_UNAVAILABLE');
+  }
   if (options.production) {
     assert.equal(source, fs.realpathSync(productionDatabase));
+    if (process.env.SQLITE_BACKUP_KIND === 'test')
+      throw new Error(
+        'Production control refuses inherited test backup policy',
+      );
     loadProductionEnvironment();
   }
   // Only an older rollback package needs the historical pause marker.
-  const audit = path.join(
-    root,
-    'output/playwright/local-release-audit',
-    `controlled-restart-${Date.now()}-${process.pid}`,
-  );
-  fs.mkdirSync(audit, { recursive: false });
-  const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
-  const env = cleanEnvironment({
-    NODE_ENV: 'production',
-    PYTHONUTF8: '1',
-    PYTHONIOENCODING: 'utf-8',
-    PYTHONDONTWRITEBYTECODE: '1',
-  });
-  if (options.rehearsal)
-    Object.assign(env, {
-      // Offline private rehearsals may use an ephemeral in-memory code. It is
-      // never written to the audit or sent outside the isolated loopback port.
-      AUTH_CODE:
-        env.PRIVATE_ONLINE_MODE === '1' ? process.env.AUTH_CODE || '' : '',
-      FEED_MODE: '',
-      WECHAT_DESKTOP_MP_IDS: '',
-      WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
-      DISABLE_SCHEDULED_UPDATES: '1',
-      PLATFORM_URL: 'http://127.0.0.1:1',
-    });
-  const inspect = (database, flags = []) =>
-    JSON.parse(
-      run(
-        python,
-        [
-          path.join(release, 'inspect-sqlite.py'),
-          '--database',
-          database,
-          '--migrations',
-          path.join(release, 'server/prisma/migrations'),
-          '--require-current',
-          ...flags,
-        ],
-        { env },
-      ),
+  const artifacts = options.rehearsal
+    ? require('./test-artifacts.cjs').begin({
+        outputRoot: options.outputRoot,
+        source: options.database,
+        realCopy: options.realCopy,
+        keep: options.keepTestDatabases,
+        prepared: options.preparedRehearsal,
+        migrations: path.join(release, 'server/prisma/migrations'),
+      })
+    : null;
+  if (artifacts) source = artifacts.database;
+  const audit =
+    artifacts?.audit ||
+    path.join(
+      options.outputRoot ||
+        process.env.WEWE_PRODUCTION_AUDIT_ROOT ||
+        path.join(root, 'output/playwright/local-release-audit'),
+      `controlled-restart-${Date.now()}-${process.pid}`,
     );
-  const backup = (database, folder) => {
-    const result = JSON.parse(
-      run(
-        python,
-        [
-          path.join(release, 'server/scripts/backup-sqlite.py'),
-          '--database',
-          database,
-          '--backup-root',
-          path.join(audit, folder),
-        ],
-        { env },
-      ),
-    );
-    assert.equal(result.integrityCheck, 'ok');
-    assert.equal(fileHash(result.backup), result.sha256);
-    return result;
-  };
-  const pinnedPreparation =
-    options.mode === 'start' &&
-    ['pinned-backup-v1', 'node-pinned-backup-v1'].includes(
-      manifest.startupPreparation,
-    );
-  const backgroundPreparation =
-    options.mode === 'start' &&
-    manifest.startupPreparation === 'node-background-backup-v1';
-  const sourceBefore =
-    pinnedPreparation || backgroundPreparation
-      ? null
-      : inspect(source, [
-          ...(options.mode === 'start' &&
-          manifest.startupInspection === 'schema-only-v1'
-            ? ['--schema-only']
-            : []),
-          '--output',
-          path.join(audit, 'source-before.json'),
-        ]);
-  if (sourceBefore)
-    assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
-  let database = source;
-  let port = 4000;
-  if (options.rehearsal) {
-    if (options.preparedRehearsal) {
-      assert(
-        inside(
-          fs.realpathSync(
-            path.join(root, 'output/playwright/local-release-audit'),
-          ),
-          source,
-        ),
-        'Prepared database must be an isolated audit fixture',
-      );
-      const prepared = JSON.parse(
-        fs.readFileSync(source + '.rehearsal.json', 'utf8'),
-      );
-      assert.equal(prepared.prepared, true);
-      assert.equal(prepared.releaseId, manifest.id);
-      assert.equal(fs.realpathSync(prepared.database), source);
-      assert.equal(prepared.sha256, fileHash(source));
-      assert(
-        !fs.existsSync(source + '-wal'),
-        'Prepare a consistent standalone fixture first',
-      );
-    } else {
-      const copy = backup(source, 'source-backup');
-      database = path.join(audit, 'rehearsal.db');
-      fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
-    }
-    port = options.port || (await unusedPort());
-  } else if (options.mode === 'restart') backup(source, 'before-stop');
-
-  const marker = (bundle) => {
-    if (options.rehearsal)
-      fs.writeFileSync(
-        database + '.rehearsal.json',
-        JSON.stringify({ releaseId: bundle.id, database }),
-      );
-  };
-  const start = (bundlePath, bundle, label) => {
-    requireFreePort(port);
-    marker(bundle);
-    const log = fs.openSync(path.join(audit, `${label}.log`), 'wx');
-    const args = [
-      path.join(bundlePath, 'runtime.cjs'),
-      'start',
-      '--database',
-      database,
-      '--port',
-      String(port),
-    ];
-    if (bundle.desktopHelperIncluded === true)
-      args.push('--pause-file', pauseFile);
-    if (options.rehearsal)
-      args.push(
-        '--rehearsal',
-        '--obsidian-root',
-        path.join(audit, `${label}-vault`),
-        '--guard-report',
-        path.join(audit, `${label}-guard.json`),
-      );
-    else args.push('--production');
-    const child = spawn(path.join(bundlePath, 'runtime/node.exe'), args, {
-      cwd: audit,
-      env: {
-        ...env,
-        LOCAL_RELEASE_CONTROLLED_START: bundle.id,
-        LOCAL_RELEASE_REUSE_VERIFIED: options.reuseVerified ? '1' : '0',
-        LOCAL_RELEASE_STARTUP_AUDIT_ROOT: backgroundPreparation ? audit : '',
-      },
-      windowsHide: true,
-      shell: false,
-      detached: options.production,
-      stdio: ['ignore', log, log],
-    });
-    fs.closeSync(log);
-    return child;
-  };
-  let oldChild;
-  let newChild;
-  let fallbackChild;
-  let stopped = false;
-  let finalBackup;
-  const baseline = path.join(audit, 'final-baseline.json');
-  let preparedBaseline = false;
+  if (!artifacts) {
+    const lease = require('./release-scope.cjs').session();
+    lease?.registerOutput(audit);
+    fs.mkdirSync(audit, { recursive: true });
+    lease?.createdOutput(audit);
+  }
+  let artifactError;
   try {
-    let identity;
-    if (options.mode === 'restart') {
-      if (options.rehearsal) {
-        oldChild = start(previous, previousManifest, 'old-before');
-        await waitReady(port, oldChild);
-        identity = processIdentity('Snapshot', oldChild.pid, port);
-      } else {
-        if (!options.expected || !Number.isInteger(options.expected.pid))
-          throw new Error('生产重启须提供完整的旧进程预期身份');
-        identity = processIdentity('Snapshot', options.expected.pid, port);
-        sameIdentity(identity, { ...options.expected, port });
-        assert.equal(
-          identity.commandLine,
-          commandLine(previous, database, port),
-          '旧进程不是指定的当前 schema 产物启动命令',
-        );
-        assert.equal(
-          identity.executable.toLowerCase(),
-          path.join(previous, 'runtime/node.exe').toLowerCase(),
-          '旧进程程序不属于指定产物',
-        );
-      }
-      const result = processIdentity('Stop', identity.pid, port, identity);
-      assert.equal(result.stopped, true);
-      stopped = true;
-      finalBackup = backup(database, 'after-stop');
-    } else {
-      if (backgroundPreparation) {
-        require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(
-          database,
-          path.join(release, 'server/prisma/migrations'),
-          { startupGate: true },
-        );
-      }
-      if (
-        !backgroundPreparation &&
-        manifest.startupPreparation !== 'node-pinned-backup-v1'
-      )
-        requireFreePort(port);
-      if (backgroundPreparation) {
-        // The runtime owns the gate and the transient audit worker. No mutation
-        // or task recovery can run until its pinned backup verifies successfully.
-      } else if (pinnedPreparation) {
-        const pythonPrepare = () =>
-          JSON.parse(
-            run(
-              python,
-              [
-                path.join(release, 'prepare-start.py'),
-                '--database',
-                database,
-                '--migrations',
-                path.join(release, 'server/prisma/migrations'),
-                '--backup-root',
-                path.join(audit, 'before-start'),
-                '--baseline',
-                baseline,
-              ],
-              { env },
-            ),
-          );
-        let prepared;
-        if (manifest.startupPreparation === 'node-pinned-backup-v1') {
-          const native = require(path.join(release, 'startup-sqlite.cjs'));
-          try {
-            // Both checks remain mandatory. Await both even on failure so a
-            // rejected port check cannot leave preparation running in the background.
-            const [portCheck, preparation] = await Promise.allSettled([
-              portOwnersAsync(port),
-              native.prepareStart(
-                database,
-                path.join(release, 'server/prisma/migrations'),
-                path.join(audit, 'before-start'),
-                baseline,
-              ),
-            ]);
-            if (portCheck.status === 'rejected') throw portCheck.reason;
-            assert.deepEqual(
-              portCheck.value,
-              [],
-              'Port already has a listener',
-            );
-            if (preparation.status === 'rejected') throw preparation.reason;
-            prepared = preparation.value;
-          } catch (error) {
-            if (!(error instanceof native.UnsupportedBaselineValue))
-              throw error;
-            prepared = pythonPrepare();
-          }
-        } else prepared = pythonPrepare();
-        finalBackup = prepared.backup;
-        assert.equal(finalBackup.integrityCheck, 'ok');
-        assert.equal(fileHash(finalBackup.backup), finalBackup.sha256);
-        assert.deepEqual(prepared.inspection.pending, []);
-        preparedBaseline = true;
-      } else finalBackup = backup(database, 'before-start');
-    }
-    if (!preparedBaseline && !backgroundPreparation) {
-      const finalBefore = inspect(database, ['--output', baseline]);
-      assert.deepEqual(finalBefore.pending, []);
-      inspect(finalBackup.backup, ['--baseline', baseline]);
-    }
-    if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
-    newChild = start(release, manifest, 'new');
-    const compactCold =
-      options.mode === 'start' &&
-      manifest.executionLayout === 'compact-cjs-v1' &&
-      (options.production || options.coldLaunchRehearsal);
-    const rssItems = compactCold && accepted(release) ? 1 : 20;
-    await waitReady(
-      port,
-      newChild,
-      900,
-      manifest.executionLayout === 'compact-cjs-v1' ? 50 : 300,
-      rssItems,
-    );
-    const newIdentity = processIdentity('Snapshot', newChild.pid, port);
-    assert.equal(newIdentity.pid, newChild.pid);
-    if (rssItems === 20 && manifest.executionLayout === 'compact-cjs-v1')
-      recordAcceptance(release);
-    // Advance the ignored local pointer only after the new production process is ready.
-    // The logon task has a stable action and follows this pointer after future deployments.
-    if (options.production)
-      await writeActiveReleaseAsync(release, {
-        reuseVerified: options.reuseVerified === true,
-      });
-    const summary = {
-      passed: true,
-      mode: options.production ? 'production' : 'rehearsal',
-      action: options.mode,
-      audit,
-      database,
-      finalBackup: finalBackup?.backup ?? null,
-      startupAudit: backgroundPreparation ? 'background' : 'completed',
-      oldStopped: stopped,
-      newIdentity,
-      rollbackUsed: false,
-      rssReadinessItems: rssItems,
-    };
-    writeJson(path.join(audit, 'summary.json'), summary);
-    if (options.production) newChild.unref();
-    return summary;
-  } catch (error) {
-    await stopOwned(newChild);
-    if (stopped) {
-      try {
-        fallbackChild = start(previous, previousManifest, 'previous-fallback');
-        await waitReady(port, fallbackChild);
-        const fallbackIdentity = processIdentity(
-          'Snapshot',
-          fallbackChild.pid,
-          port,
-        );
-        if (options.production) await writeActiveReleaseAsync(previous);
-        const summary = {
-          passed: options.rehearsal && options.injectFailure === true,
-          mode: options.production ? 'production' : 'rehearsal',
-          action: options.mode,
-          audit,
-          database,
-          finalBackup: finalBackup?.backup,
-          oldStopped: true,
-          rollbackUsed: true,
-          failure: error.message,
-          fallbackIdentity,
-          databaseRestored: false,
-        };
-        writeJson(path.join(audit, 'summary.json'), summary);
-        if (options.production) fallbackChild.unref();
-        if (options.production) throw error;
-        return summary;
-      } catch (fallbackError) {
-        if (fallbackError !== error)
-          writeJson(path.join(audit, 'fallback-failure.json'), {
-            failure: error.message,
-            fallbackFailure: fallbackError.message,
-            databaseRestored: false,
-          });
-        throw fallbackError;
-      }
-    }
-    writeJson(path.join(audit, 'failure.json'), {
-      failure: error.message,
-      oldStopped: false,
-      databaseRestored: false,
+    const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
+    const env = cleanEnvironment({
+      NODE_ENV: 'production',
+      SQLITE_BACKUP_KIND: options.production ? 'production' : 'test',
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONDONTWRITEBYTECODE: '1',
     });
+    if (options.rehearsal)
+      Object.assign(env, {
+        // Offline private rehearsals may use an ephemeral in-memory code. It is
+        // never written to the audit or sent outside the isolated loopback port.
+        AUTH_CODE:
+          env.PRIVATE_ONLINE_MODE === '1' ? process.env.AUTH_CODE || '' : '',
+        FEED_MODE: '',
+        WECHAT_DESKTOP_MP_IDS: '',
+        WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
+        DISABLE_SCHEDULED_UPDATES: '1',
+        PLATFORM_URL: 'http://127.0.0.1:1',
+      });
+    const inspect = (database, flags = []) =>
+      JSON.parse(
+        run(
+          python,
+          [
+            path.join(release, 'inspect-sqlite.py'),
+            '--database',
+            database,
+            '--migrations',
+            path.join(release, 'server/prisma/migrations'),
+            '--require-current',
+            ...flags,
+          ],
+          { env },
+        ),
+      );
+    const backup = (database, folder) => {
+      const result = JSON.parse(
+        run(
+          python,
+          [
+            path.join(release, 'server/scripts/backup-sqlite.py'),
+            '--database',
+            database,
+            '--backup-root',
+            options.production
+              ? require('./space-budget.cjs').productionRoot(source)
+              : path.join(audit, folder),
+          ],
+          { env },
+        ),
+      );
+      assert.equal(result.integrityCheck, 'ok');
+      assert.equal(fileHash(result.backup), result.sha256);
+      return result;
+    };
+    const pinnedPreparation =
+      options.mode === 'start' &&
+      ['pinned-backup-v1', 'node-pinned-backup-v1'].includes(
+        manifest.startupPreparation,
+      );
+    const backgroundPreparation =
+      options.mode === 'start' &&
+      manifest.startupPreparation === 'node-background-backup-v1';
+    const productionRestart = options.production && options.mode === 'restart';
+    const sourceBefore =
+      productionRestart || pinnedPreparation || backgroundPreparation
+        ? null
+        : inspect(source, [
+            ...(options.mode === 'start' &&
+            manifest.startupInspection === 'schema-only-v1'
+              ? ['--schema-only']
+              : []),
+            '--output',
+            path.join(audit, 'source-before.json'),
+          ]);
+    if (sourceBefore)
+      assert.deepEqual(sourceBefore.pending, [], '数据库仍有待应用迁移');
+    let restartSourceIdentity;
+    let database = source;
+    let port = 4000;
+    if (options.rehearsal) {
+      if (options.preparedRehearsal) {
+        assert(
+          inside(fs.realpathSync(artifacts.root), source),
+          'Prepared database must be an isolated audit fixture',
+        );
+        const prepared = JSON.parse(
+          fs.readFileSync(source + '.rehearsal.json', 'utf8'),
+        );
+        assert.equal(prepared.prepared, true);
+        assert.equal(prepared.releaseId, manifest.id);
+        assert.equal(fs.realpathSync(prepared.database), source);
+        assert.equal(prepared.sha256, fileHash(source));
+        assert(
+          !fs.existsSync(source + '-wal'),
+          'Prepare a consistent standalone fixture first',
+        );
+      } else {
+        const copy = backup(source, 'source-backup');
+        database = path.join(audit, 'rehearsal.db');
+        fs.copyFileSync(copy.backup, database, fs.constants.COPYFILE_EXCL);
+        artifacts?.checkpoint();
+      }
+      port = options.port || (await unusedPort());
+    } else if (productionRestart) {
+      // Capacity/layout is metadata-only; backup reuse can otherwise read every
+      // live row. The full protected backup remains mandatory after confirmed stop.
+      const info = fs.lstatSync(source);
+      assert(info.isFile() && !info.isSymbolicLink() && info.ino, 'RELEASE_RESTART_SOURCE_IDENTITY_UNPROVEN');
+      restartSourceIdentity = [info.dev, info.ino, info.birthtimeMs];
+      const capacity = JSON.parse(run(python, [
+        path.join(release, 'server/scripts/backup-space-status.py'), '--database', source,
+        '--backup-root', require('./space-budget.cjs').productionRoot(source),
+      ], { env }));
+      assert.equal(capacity.capacityAllowsNextBackup, true, 'RELEASE_RESTART_BACKUP_CAPACITY_UNAVAILABLE');
+    }
+
+    const marker = (bundle) => {
+      if (options.rehearsal)
+        fs.writeFileSync(
+          database + '.rehearsal.json',
+          JSON.stringify({ releaseId: bundle.id, database }),
+        );
+    };
+    const start = (bundlePath, bundle, label) => {
+      requireFreePort(port);
+      marker(bundle);
+      const log = fs.openSync(path.join(audit, `${label}.log`), 'wx');
+      const args = [
+        path.join(bundlePath, 'runtime.cjs'),
+        'start',
+        '--database',
+        database,
+        '--port',
+        String(port),
+      ];
+      if (bundle.desktopHelperIncluded === true)
+        args.push('--pause-file', pauseFile);
+      if (options.rehearsal)
+        args.push(
+          '--rehearsal',
+          '--obsidian-root',
+          path.join(audit, `${label}-vault`),
+          '--guard-report',
+          path.join(audit, `${label}-guard.json`),
+        );
+      else args.push('--production');
+      const scopeLease = require('./release-scope.cjs').session();
+      if (scopeLease) {
+        if (label === 'previous-fallback')
+          scopeLease.authorizeRecoveryPackage(bundlePath);
+        else scopeLease.check(true);
+      }
+      const child = spawn(path.join(bundlePath, 'runtime/node.exe'), args, {
+        cwd: audit,
+        env: {
+          ...env,
+          LOCAL_RELEASE_CONTROLLED_START: bundle.id,
+          LOCAL_RELEASE_REUSE_VERIFIED: options.reuseVerified ? '1' : '0',
+          LOCAL_RELEASE_STARTUP_AUDIT_ROOT: backgroundPreparation ? audit : '',
+          SQLITE_BACKUP_KIND: options.rehearsal ? 'test' : 'production',
+          SQLITE_TEST_BUDGET_ROOT: artifacts?.root || '',
+        },
+        windowsHide: true,
+        shell: false,
+        detached: options.production,
+        stdio: ['ignore', log, log],
+      });
+      fs.closeSync(log);
+      if(label==='new')newChild=child;
+      if (preserving) {
+        const expectedCommand=launchCommandLine(path.join(bundlePath,'runtime/node.exe'),args);
+        const snapshot = processIdentity('OwnedSnapshot', child.pid, port,{executable:path.join(bundlePath,'runtime/node.exe'),commandLine:expectedCommand});
+        ownedIdentities.set(child.pid,{identity:snapshot,packageId:bundle.id,commandLine:expectedCommand});
+        scopeLease?.bindPreservingChild?.(snapshot, bundle.id, expectedCommand);
+      }
+      return child;
+    };
+    let oldChild;
+    let newChild;
+    let fallbackChild;
+    const ownedIdentities=new Map();
+    let oldStopCheckpoint;
+    let stopped = false;
+    let finalBackup;
+    const baseline = path.join(audit, 'final-baseline.json');
+    let preparedBaseline = false;
+    try {
+      let identity;
+      if (options.mode === 'restart') {
+        if (options.rehearsal) {
+          oldChild = start(previous, previousManifest, 'old-before');
+          await waitReady(port, oldChild);
+          identity = processIdentity('Snapshot', oldChild.pid, port);
+        } else {
+          if (!options.expected || !Number.isInteger(options.expected.pid))
+            throw new Error('生产重启须提供完整的旧进程预期身份');
+          identity = processIdentity('Snapshot', options.expected.pid, port);
+          sameIdentity(identity, { ...options.expected, port });
+          assert.equal(
+            identity.commandLine,
+            commandLine(previous, database, port),
+            '旧进程不是指定的当前 schema 产物启动命令',
+          );
+          assert.equal(
+            identity.executable.toLowerCase(),
+            path.join(previous, 'runtime/node.exe').toLowerCase(),
+            '旧进程程序不属于指定产物',
+          );
+        }
+        if (preserving && options.production) {
+          const active = preserving.active;
+          if (fs.realpathSync(active.pointer) !== active.pointer || fs.lstatSync(active.pointer).isSymbolicLink())
+            throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
+          const pointer = JSON.parse(fs.readFileSync(active.pointer, 'utf8'));
+          require('./preserving-contract.cjs').validateActiveBinding(preserving, {
+            pointerSha256: fileHash(active.pointer), pointerId: pointer.format === 1 ? pointer.id : undefined,
+            currentId: previousManifest.id, candidateId: manifest.id,
+            currentManifestSha256: fileHash(path.join(previous, 'release.json')),
+            candidateManifestSha256: fileHash(path.join(release, 'release.json')),
+            process: { pid: identity.pid, startUtc: identity.startUtc, executableSha256: fileHash(identity.executable) },
+          });
+          require('./release-scope.cjs').session()?.check();
+        }
+        if (productionRestart) {
+          const info = fs.lstatSync(database);
+          assert(info.isFile() && !info.isSymbolicLink(), 'RELEASE_RESTART_SOURCE_IDENTITY_UNPROVEN');
+          assert.deepEqual([info.dev, info.ino, info.birthtimeMs], restartSourceIdentity, 'RELEASE_RESTART_SOURCE_IDENTITY_CHANGED');
+        }
+        const result = processIdentity('Stop', identity.pid, port, identity);
+        assert.equal(result.stopped, true);
+        stopped = true;
+        oldStopCheckpoint={identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()};
+        if (preserving) require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(identity.pid, { pid: identity.pid, stopped: result.stopped === true });
+        finalBackup = backup(database, 'after-stop');
+        if (!options.legacyMaintenanceCheckpoint) require('./project-writer-gate.cjs').retireStoppedWriter(database, {identity,stopReceipt:result,scopeLease:require('./release-scope.cjs').session()});
+        if (options.legacyMaintenanceCheckpoint) {
+          const scopeLease=require('./release-scope.cjs').requireSession();
+          const roots=scopeLease.legacyMaintenanceRoots(identity);
+          await options.legacyMaintenanceCheckpoint({ identity, stopReceipt: result, stoppedAt: Date.now(), scopeLease, backup: finalBackup, database,observeProjectWriters:()=>observeProjectWriters(roots,port) });
+        }
+      } else {
+        if (backgroundPreparation) {
+          require(path.join(release, 'startup-sqlite.cjs')).inspectDatabase(
+            database,
+            path.join(release, 'server/prisma/migrations'),
+            { startupGate: true },
+          );
+        }
+        if (
+          !backgroundPreparation &&
+          manifest.startupPreparation !== 'node-pinned-backup-v1'
+        )
+          requireFreePort(port);
+        if (backgroundPreparation) {
+          // The runtime owns the gate and the transient audit worker. No mutation
+          // or task recovery can run until its pinned backup verifies successfully.
+        } else if (pinnedPreparation) {
+          const pythonPrepare = () =>
+            JSON.parse(
+              run(
+                python,
+                [
+                  path.join(release, 'prepare-start.py'),
+                  '--database',
+                  database,
+                  '--migrations',
+                  path.join(release, 'server/prisma/migrations'),
+                  '--backup-root',
+                  options.production
+                    ? path.resolve(
+                        process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
+                          path.join(path.dirname(source), 'backups'),
+                      )
+                    : path.join(audit, 'before-start'),
+                  '--baseline',
+                  baseline,
+                ],
+                { env },
+              ),
+            );
+          let prepared;
+          if (manifest.startupPreparation === 'node-pinned-backup-v1') {
+            const native = require(path.join(release, 'startup-sqlite.cjs'));
+            try {
+              // Both checks remain mandatory. Await both even on failure so a
+              // rejected port check cannot leave preparation running in the background.
+              const [portCheck, preparation] = await Promise.allSettled([
+                portOwnersAsync(port),
+                native.prepareStart(
+                  database,
+                  path.join(release, 'server/prisma/migrations'),
+                  options.production
+                    ? path.resolve(
+                        process.env.SQLITE_PRODUCTION_BACKUP_ROOT ||
+                          path.join(path.dirname(source), 'backups'),
+                      )
+                    : path.join(audit, 'before-start'),
+                  baseline,
+                ),
+              ]);
+              if (portCheck.status === 'rejected') throw portCheck.reason;
+              assert.deepEqual(
+                portCheck.value,
+                [],
+                'Port already has a listener',
+              );
+              if (preparation.status === 'rejected') throw preparation.reason;
+              prepared = preparation.value;
+            } catch (error) {
+              if (!(error instanceof native.UnsupportedBaselineValue))
+                throw error;
+              prepared = pythonPrepare();
+            }
+          } else prepared = pythonPrepare();
+          finalBackup = prepared.backup;
+          assert.equal(finalBackup.integrityCheck, 'ok');
+          assert.equal(fileHash(finalBackup.backup), finalBackup.sha256);
+          assert.deepEqual(prepared.inspection.pending, []);
+          preparedBaseline = true;
+        } else finalBackup = backup(database, 'before-start');
+      }
+      if (!preparedBaseline && !backgroundPreparation) {
+        // The verified final SQLite backup is closed before its full baseline read.
+        // Production restart never opens a full inspection transaction on the live DB.
+        const finalBefore = inspect(productionRestart ? finalBackup.backup : database, ['--output', baseline]);
+        assert.deepEqual(finalBefore.pending, []);
+        if (!productionRestart) inspect(finalBackup.backup, ['--baseline', baseline]);
+      }
+      if (options.injectFailure) throw new Error('INJECTED_NEW_START_FAILURE');
+      newChild = start(release, manifest, 'new');
+      const compactCold =
+        options.mode === 'start' &&
+        manifest.executionLayout === 'compact-cjs-v1' &&
+        (options.production || options.coldLaunchRehearsal);
+      const rssItems = compactCold && accepted(release) ? 1 : 20;
+      await waitReady(
+        port,
+        newChild,
+        900,
+        manifest.executionLayout === 'compact-cjs-v1' ? 50 : 300,
+        rssItems,
+      );
+      const newIdentity = processIdentity('Snapshot', newChild.pid, port);
+      assert.equal(newIdentity.pid, newChild.pid);
+      if (rssItems === 20 && manifest.executionLayout === 'compact-cjs-v1')
+        recordAcceptance(
+          release,
+          require('./release-scope.cjs').session()
+            ? { receiptRoot: audit }
+            : undefined,
+        );
+      // Advance the ignored local pointer only after the new production process is ready.
+      // The logon task has a stable action and follows this pointer after future deployments.
+      if (options.production)
+        await writeActiveReleaseAsync(release, {
+          reuseVerified: options.reuseVerified === true,
+        });
+      const summary = {
+        ...(schemaProof ? { schemaProof } : {}),
+        passed: true,
+        mode: options.production ? 'production' : 'rehearsal',
+        action: options.mode,
+        audit,
+        database,
+        finalBackup: finalBackup?.backup ?? null,
+        startupAudit: backgroundPreparation ? 'background' : 'completed',
+        oldStopped: stopped,
+        newIdentity,
+        rollbackUsed: false,
+        rssReadinessItems: rssItems,
+      };
+      writeJson(path.join(audit, 'summary.json'), summary);
+      if (options.production) newChild.unref();
+      return summary;
+    } catch (error) {
+      if(newChild){
+        const owned=ownedIdentities.get(newChild.pid);
+        const receipt=await stopOwned(newChild,owned?.identity);
+        if(preserving)require('./release-scope.cjs').session()?.confirmPreservingProcessExit?.(newChild.pid,receipt||{pid:newChild.pid,stopped:newChild.exitCode!==null||typeof newChild.signalCode==='string'},owned);
+        if(owned)require('./project-writer-gate.cjs').retireStoppedWriter(database,{identity:owned.identity,stopReceipt:receipt,scopeLease:require('./release-scope.cjs').session()});
+        else if(fs.existsSync(require('./project-writer-gate.cjs').binding(database).file))throw Error('PROJECT_WRITER_BOUNDARY_UNPROVEN');
+      }
+      if(oldStopCheckpoint)require('./project-writer-gate.cjs').retireStoppedWriter(database,oldStopCheckpoint);
+      if (stopped) {
+        try {
+          fallbackChild = start(
+            previous,
+            previousManifest,
+            'previous-fallback',
+          );
+          await waitReady(port, fallbackChild);
+          const fallbackIdentity = processIdentity(
+            'Snapshot',
+            fallbackChild.pid,
+            port,
+          );
+          if (options.production)
+            await writeActiveReleaseAsync(previous, { recovery: true });
+          const summary = {
+            ...(schemaProof ? { schemaProof } : {}),
+            passed: options.rehearsal && options.injectFailure === true,
+            mode: options.production ? 'production' : 'rehearsal',
+            action: options.mode,
+            audit,
+            database,
+            finalBackup: finalBackup?.backup,
+            oldStopped: true,
+            rollbackUsed: true,
+            failure: error.message,
+            fallbackIdentity,
+            databaseRestored: false,
+          };
+          writeJson(path.join(audit, 'summary.json'), summary);
+          if (options.production) fallbackChild.unref();
+          if (options.production) throw error;
+          return summary;
+        } catch (fallbackError) {
+          if (fallbackError !== error)
+            writeJson(path.join(audit, 'fallback-failure.json'), {
+              failure: error.message,
+              fallbackFailure: fallbackError.message,
+              databaseRestored: false,
+            });
+          throw fallbackError;
+        }
+      }
+      writeJson(path.join(audit, 'failure.json'), {
+        failure: error.message,
+        oldStopped: false,
+        databaseRestored: false,
+      });
+      throw error;
+    } finally {
+      if (options.rehearsal)
+        for (const child of [oldChild, newChild, fallbackChild])
+          await stopOwned(child);
+    }
+  } catch (error) {
+    artifactError = error;
     throw error;
   } finally {
-    if (options.rehearsal)
-      for (const child of [oldChild, newChild, fallbackChild])
-        await stopOwned(child);
+    artifacts?.finish(artifactError);
   }
 }
 
@@ -472,6 +638,9 @@ async function main() {
   const { values } = parseArgs({
     options: {
       release: { type: 'string' },
+      'output-root': { type: 'string' },
+      'real-copy': { type: 'boolean', default: false },
+      'keep-test-databases': { type: 'boolean', default: false },
       previous: { type: 'string' },
       database: { type: 'string' },
       mode: { type: 'string' },
@@ -485,12 +654,16 @@ async function main() {
       'expected-command-line': { type: 'string' },
       'prepared-rehearsal': { type: 'boolean', default: false },
       'cold-launch-rehearsal': { type: 'boolean', default: false },
+      'legacy-job-id': {type:'string'},
     },
   });
-  if (!values.release || !values.database)
+  if (!values.release || (values.production && !values.database))
     throw new Error('须指定 --release 和 --database');
   const result = await controlledRestart({
     release: values.release,
+    outputRoot: values['output-root'],
+    realCopy: values['real-copy'],
+    keepTestDatabases: values['keep-test-databases'],
     previous: values.previous,
     database: values.database,
     mode: values.mode,
@@ -500,6 +673,7 @@ async function main() {
     injectFailure: values['inject-new-start-failure'],
     preparedRehearsal: values['prepared-rehearsal'],
     coldLaunchRehearsal: values['cold-launch-rehearsal'],
+    legacyJobId:values['legacy-job-id'],
     expected:
       values.production && values.mode === 'restart'
         ? {
@@ -518,4 +692,4 @@ if (require.main === module)
     console.error(error.stack || error.message);
     process.exitCode = 1;
   });
-module.exports = { controlledRestart, commandLine, requireFreePort };
+module.exports = { controlledRestart, commandLine, requireFreePort, loadLegacyMaintenance,launchCommandLine };

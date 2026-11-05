@@ -1,5 +1,6 @@
 import { dailyWechat2RssCatchup } from './daily-cache-catchup';
 import { FeedsService } from './feeds.service';
+import { CacheSyncService } from './cache-sync.service';
 
 const id = 'MP_WXS_1234567890';
 const enabled = {
@@ -144,5 +145,42 @@ describe('single-subscription missed daily cache read', () => {
     expect(consume).not.toHaveBeenCalled();
     service.onModuleDestroy();
     expect(clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovery hold suppresses startup, active, legacy and cache workers', async () => {
+    process.env.WECHAT2RSS_RECOVERY_HOLD = '1';
+    process.env.WECHAT2RSS_ACTIVE_SCHEDULE = '1';
+    process.env.WECHAT2RSS_CACHE_SYNC = '1';
+    const prisma = { feed: { findUnique: jest.fn(), findMany: jest.fn() } };
+    const trpc = {
+      refreshMpArticlesAndUpdateFeed: jest.fn(),
+      beginScheduledRefreshAll: jest.fn(),
+    };
+    const service = new FeedsService(prisma as any, trpc as any, {} as any);
+    const cache = new CacheSyncService(prisma as any, trpc as any);
+    const schedule = jest.spyOn(global, 'setImmediate');
+    try {
+      service.onApplicationBootstrap();
+      cache.onApplicationBootstrap();
+      await service.catchUpDailyWechat2Rss(afterDue);
+      await service.handleActiveRefreshSchedule(afterDue);
+      await service.handleUpdateFeedsCron();
+      expect(schedule).not.toHaveBeenCalled();
+      expect(prisma.feed.findUnique).not.toHaveBeenCalled();
+      expect(prisma.feed.findMany).not.toHaveBeenCalled();
+      expect(trpc.refreshMpArticlesAndUpdateFeed).not.toHaveBeenCalled();
+      expect(trpc.beginScheduledRefreshAll).not.toHaveBeenCalled();
+    } finally {
+      for (const key of [
+        'WECHAT2RSS_RECOVERY_HOLD',
+        'WECHAT2RSS_ACTIVE_SCHEDULE',
+        'WECHAT2RSS_CACHE_SYNC',
+      ]) {
+        if (original[key] === undefined) delete process.env[key];
+        else process.env[key] = original[key];
+      }
+      cache.onModuleDestroy();
+      service.onModuleDestroy();
+    }
   });
 });

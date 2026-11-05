@@ -1,6 +1,6 @@
 // Compile the existing Windows identity checks once, then verify the tiny tool
 // before every invocation. No service, OS setting, dependency install or network.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { fileHash, readJson, run } = require('./lib.cjs');
@@ -23,6 +23,9 @@ function identityTool({
       throw new Error('Identity tool integrity mismatch');
     return executable;
   }
+  // A shared release lease must not create an unregistered historical cache.
+  // The existing ownership-checked PowerShell implementation remains available.
+  if (require('./release-scope.cjs').session()) return undefined;
   const compiler = path.join(
     process.env.SystemRoot || 'C:\\Windows',
     'Microsoft.NET/Framework64/v4.0.30319/csc.exe',

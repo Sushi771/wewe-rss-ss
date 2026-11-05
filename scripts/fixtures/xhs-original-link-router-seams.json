@@ -1,0 +1,46 @@
+[
+  {
+    "before": "",
+    "after": "import {\n  readXhsSourceBudget,\n  configureXhsSourceBudget,\n  prepareXhsOriginalLink,\n  resolveXhsSubscriptionWithBudget,\n} from '../collection/xhs-source-request-policy';\n"
+  },
+  {
+    "before": "",
+    "after": "  }\n  private async xhsSourceOperation<T>(work: () => Promise<T>) {\n    try {\n      return await work();\n    } catch (error) {\n      throw new TRPCError({\n        code: 'PRECONDITION_FAILED',\n        message: xhsPublicCode(error, 'XHS_REQUEST_POLICY_UNAVAILABLE'),\n      });\n    }\n"
+  },
+  {
+    "before": "",
+    "after": "    sourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z.discriminatedUnion('purpose', [\n          z.object({ purpose: z.literal('resolution') }).strict(),\n          z\n            .object({\n              purpose: z.literal('original-link'),\n              creatorId: z.string().min(1).max(128),\n            })\n            .strict(),\n        ]),\n      )\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx, true);\n        return this.xhsSourceOperation(() =>\n          readXhsSourceBudget(this.prismaService, input),\n        );\n      }),\n    configureSourceRequestBudget: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            scope: z.discriminatedUnion('purpose', [\n              z.object({ purpose: z.literal('resolution') }).strict(),\n              z\n                .object({\n                  purpose: z.literal('original-link'),\n                  creatorId: z.string().min(1).max(128),\n                })\n                .strict(),\n            ]),\n            totalLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          configureXhsSourceBudget(\n            this.prismaService,\n            input.scope,\n            input.totalLimit,\n            input.intervalMs,\n          ),\n        );\n      }),\n    prepareOriginalLink: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            noteId: z.string().min(1).max(300),\n            budgetId: z.string().min(1).max(256).optional(),\n            refreshContext: z.boolean().optional(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return prepareXhsOriginalLink(\n          this.prismaService,\n          this.xhsRuntime!,\n          input,\n        );\n      }),\n    recoverSingleNote: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            url: z.string().min(1).max(8192),\n            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),\n            confirmLimitedRecovery: z.literal(true),\n            appendUnknownAttempt: z.literal(true).optional(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(async () => {\n          const result = await this.xhsRuntime!.resolveLimitedRecovery(\n            input.url,\n            input.expectedAuthorId,\n            (ctx as { isExportCancelled?: () => boolean }).isExportCancelled,\n            input.appendUnknownAttempt === true,\n          );\n          const saved =\n            await this.xhsSubscriptions!.commitLimitedRecovery(result);\n          return { ...saved, originalUrl: result.originalUrl };\n        });\n      }),\n"
+  },
+  {
+    "before": "      .input(z.object({ url: z.string().min(1).max(8192) }).strict())\n",
+    "after": "      .input(\n        z\n          .object({\n            url: z.string().min(1).max(8192),\n            budgetId: z.string().min(1).max(256).optional(),\n          })\n          .strict(),\n      )\n"
+  },
+  {
+    "before": "        this.requireLocalXhsAccess(ctx);\n        return this.xhsSubscriptions!.resolveSubscription(input);\n",
+    "after": "        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          resolveXhsSubscriptionWithBudget(\n            this.prismaService,\n            this.xhsRuntime!,\n            this.xhsSubscriptions!,\n            input,\n          ),\n        );\n"
+  },
+  {
+    "before": "",
+    "after": "          if (\n            req.url\n              .split('?')[0]\n              .split(',')\n              .some(\n                (name) =>\n                  name.endsWith('xiaohongshu.prepareOriginalLink') ||\n                  name.endsWith('xiaohongshu.recoverSingleNote'),\n              )\n          ) {\n            res.setHeader('Cache-Control', 'no-store');\n            res.setHeader('Referrer-Policy', 'no-referrer');\n          }\n"
+  },
+  {
+    "before": "",
+    "after": "import { XhsBatchSubscriptionService } from '../collection/xhs-batch-subscription.service';\n"
+  },
+  {
+    "before": "",
+    "after": "    @Optional() private readonly xhsBatch?: XhsBatchSubscriptionService,\n"
+  },
+  {
+    "before": "",
+    "after": "    startSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            clientRequestId: z.string().uuid(),\n            text: z.string().min(1).max(65536),\n            groupId: z.string().min(1).max(128).optional(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.start(input));\n      }),\n    subscriptionBatch: this.trpcService.protectedProcedure\n      .input(z.object({ batchId: z.string().uuid() }).strict())\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx, true);\n        return this.xhsSourceOperation(() => this.xhsBatch!.status(input));\n      }),\n    resumeSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            batchId: z.string().uuid(),\n            text: z.string().min(1).max(65536),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.resume(input));\n      }),\n    cancelSubscriptionBatch: this.trpcService.protectedProcedure\n      .input(z.object({ batchId: z.string().uuid() }).strict())\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() => this.xhsBatch!.cancel(input));\n      }),\n"
+  },
+  {
+    "before": "",
+    "after": "    prepareWholeCreatorHistoryGrant: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorId: z.string().min(1).max(128),\n            expectedAuthorId: z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/),\n            jobId: z.string().uuid().optional(),\n            requestLimit: z.number().int().min(1).max(100000),\n            intervalMs: z.number().int().min(1000).max(60000),\n            phaseLimits: z\n              .object({\n                profile: z.number().int().nonnegative(),\n                list: z.number().int().nonnegative(),\n                detail: z.number().int().nonnegative(),\n                media: z.number().int().nonnegative(),\n                metrics: z.number().int().nonnegative(),\n              })\n              .strict(),\n            confirmHistoryGrant: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareHistoryGrant(input),\n        );\n      }),\n"
+  },
+  {
+    "before": "",
+    "after": "    extendWholeCreatorHistoryPhase: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            id: z.string().uuid(),\n            phase: z.enum(['profile', 'list', 'detail', 'media', 'metrics']),\n            newLimit: z.number().int().min(1).max(100000),\n            confirmHistoryGrant: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.extendHistoryPhase(input),\n        );\n      }),\n"
+  }
+]

@@ -142,10 +142,7 @@ test('folder drop preserves multi-selection, ignores foreign drags and exposes e
     JSON.parse(JSON.stringify(f.calls.find((c) => c[0] === 'move'))),
     ['move', ['f1', 'f2'], 'g1'],
   );
-  assert.equal(
-    f.find('p', (p) => p.role === 'alert').props.children,
-    'Synthetic move failure',
-  );
+  assert.equal(f.find('FailureNotice').props.error, 'Synthetic move failure');
 });
 test('disabled menus and drops make no mutation; touch batch move remains available', async () => {
   const f = fixture({ disabled: true });
@@ -160,7 +157,7 @@ test('disabled menus and drops make no mutation; touch batch move remains availa
   mobile.find('select').props.onChange({ target: { value: 'g1' } });
   mobile.render();
   mobile
-    .find('Button', (p) => String(p.onPress).includes('onMove'))
+    .find('Button', (p) => p.children === '\u79fb\u52a8\u5df2\u9009')
     .props.onPress();
   await settle();
   assert.deepEqual(

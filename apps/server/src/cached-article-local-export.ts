@@ -1,3 +1,4 @@
+import { readAutomaticMediaImage } from './feeds/automatic-media-queue';
 import { load } from 'cheerio';
 import { createHash } from 'node:crypto';
 import { Article } from '@prisma/client';
@@ -5,6 +6,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { TRPCError } from '@trpc/server';
 import { buildArticleMarkdown } from './article-export';
+import { cachedArticleMediaAnalysis } from './cached-article-media-analysis';
 import { decodeInlineImage, fetchAllowedImage } from './collection/image-fetch';
 import { ArticlePreparation } from './article-local-save';
 import { ArticleExportSource } from './article-export-source';
@@ -28,10 +30,11 @@ export function prepareCachedArticleLocalExport(
   article: CachedExportArticle,
   exportSource?: ArticleExportSource,
   limits?: { maxImages: number; maxBytes: number },
+  allowPartialImages = true,
 ) {
   const snapshot = { ...article };
   const prepare: ArticlePreparation = async (directory: string) => {
-    if (!snapshot.contentHtml || snapshot.lastBodyStatus === 'unavailable')
+    if (!snapshot.contentHtml)
       throw new TRPCError({
         code: 'PRECONDITION_FAILED',
         message: '正文尚未缓存，不能完成离线导出；未重新请求原文。',
@@ -59,15 +62,17 @@ export function prepareCachedArticleLocalExport(
       snapshot,
       '',
       directory,
-      guardedFetch,
+      async (url) => (await readAutomaticMediaImage(url)) || guardedFetch(url),
       'image',
       limits,
-      true,
+      allowPartialImages,
+      // The local publisher supplies the source header; Obsidian displays the
+      // article filename as its inline title. Never filter author body headings.
+      { includeTitle: false, includeSourceLink: false },
     );
-    const markdown = snapshot.sourceUrl
-      ? exported.markdown
-      : `# ${snapshot.title.replace(/[\r\n]/g, ' ')}\n\n${exported.markdown}`;
-    await fs.writeFile(join(directory, 'index.md'), markdown, { flag: 'wx' });
+    await fs.writeFile(join(directory, 'index.md'), exported.markdown, {
+      flag: 'wx',
+    });
     return {
       articleId: snapshot.id,
       title: snapshot.title,
@@ -76,6 +81,8 @@ export function prepareCachedArticleLocalExport(
       sourceUrl: snapshot.sourceUrl,
       publishTime: snapshot.publishTime,
       mediaComplete: exported.mediaComplete,
+      mediaStatus: exported.mediaStatus,
+      missingImageCount: exported.missingImageCount,
     };
   };
   prepare.identity = {
@@ -86,25 +93,47 @@ export function prepareCachedArticleLocalExport(
     sourceUrl: snapshot.sourceUrl,
     publishTime: snapshot.publishTime,
   };
-  const html = load(snapshot.contentHtml || '');
-  prepare.canReuseLegacyImages = html('img')
-    .toArray()
-    .every((element) => {
-      const src = html(element).attr('src') || '';
-      return (
-        src.startsWith('data:image/') ||
-        (!src && !html(element).attr('data-src'))
-      );
-    });
+  let analysis: ReturnType<typeof cachedArticleMediaAnalysis> | undefined;
+  const analyze = () => (analysis ??= cachedArticleMediaAnalysis(snapshot));
+  prepare.hasUnarchivedMedia = (imageMap) => {
+    const names = Object.keys(imageMap);
+    return analyze().sourcePrefixes.some(
+      (prefix) => !names.some((name) => name.startsWith(prefix)),
+    );
+  };
+  // New exports go directly to conversion. Retained receipts need content facts,
+  // not a second DOM retained for the lifetime of every preparation.
+  Object.defineProperties(prepare.identity, {
+    mediaComplete: {
+      enumerable: true,
+      get: () => (analyze().unconfirmed ? false : undefined),
+    },
+    mediaStatus: {
+      enumerable: true,
+      get: () => (analyze().unconfirmed ? 'unconfirmed' : undefined),
+    },
+  });
+  Object.defineProperty(prepare, 'canReuseLegacyImages', {
+    get: () => analyze().canReuseLegacyImages,
+  });
   prepare.seedImages = async (stage, folder, images) => {
     // Old receipts lack URL mappings. Archived inline bytes can still identify
     // existing content hashes without requesting any media or changing names.
-    const $ = load(snapshot.contentHtml || '');
     await fs.mkdir(join(stage, 'image'), { recursive: true });
-    for (const element of $('img').toArray()) {
-      const src = $(element).attr('src') || '';
+    const html = load(snapshot.contentHtml || '');
+    const content = html('.rich_media_content').length
+      ? html('.rich_media_content')
+      : html('#js_content');
+    for (const element of content.find('img').toArray()) {
+      const src = html(element).attr('src') || '';
       if (!src.startsWith('data:image/')) continue;
-      const bytes = decodeInlineImage(src, 30_000_000).bytes;
+      let bytes: Buffer;
+      try {
+        bytes = decodeInlineImage(src, 30_000_000).bytes;
+      } catch {
+        // Invalid inline media stays unconfirmed on repeat saves too.
+        continue;
+      }
       const hash = createHash('sha256')
         .update(bytes)
         .digest('hex')

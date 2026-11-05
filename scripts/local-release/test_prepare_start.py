@@ -51,16 +51,61 @@ class PrepareTests(unittest.TestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA journal_mode=WAL")
         original = startup.audit.inspect_connection
+        injected = []
         def concurrent(connection, database, *args, **kwargs):
             result = original(connection, database, *args, **kwargs)
-            if database == self.database:
+            if Path(database).samefile(self.database):
+                injected.append(True)
                 with closing(sqlite3.connect(self.database)) as writer, writer:
                     writer.execute("UPDATE articles SET body='concurrent' WHERE id='a'")
             return result
         with patch.object(startup.audit, "inspect_connection", concurrent):
             with self.assertRaisesRegex(ValueError, "source changed"):
                 self.prepare()
+        self.assertEqual(injected, [True])
         self.assertFalse((self.root / "baseline.json").exists())
+
+    def test_frozen_metadata_wal_commit_cannot_publish_a_stale_baseline(self):
+        self.migrate()
+        writer = sqlite3.connect(self.database)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        identity = startup.source_identity(self.database)
+        api_identity = startup.backup_api.source_identity(self.database)
+        original = startup.compare_tables
+        def commit_after_copy(*args):
+            original(*args)
+            writer.execute("UPDATE articles SET body='changed under frozen metadata' WHERE id='a'")
+            writer.commit()
+        with patch.object(startup, 'source_identity', return_value=identity), patch.object(startup.backup_api, 'source_identity', return_value=api_identity), patch.object(startup, 'compare_tables', side_effect=commit_after_copy):
+            with self.assertRaisesRegex(ValueError, 'source changed'):
+                self.prepare()
+        self.assertFalse((self.root/'baseline.json').exists())
+        self.assertFalse(list((self.root/'backups').glob('.latest-*.json')))
+        self.assertFalse(list((self.root/'backups').rglob('verification.json')))
+        self.assertTrue(list((self.root/'backups').rglob('wewe-rss.db')))
+
+    def test_reuse_wal_commit_after_pinned_comparison_is_rejected_with_frozen_metadata(self):
+        self.migrate()
+        first = self.prepare()
+        (self.root/'baseline.json').unlink()
+        writer = sqlite3.connect(self.database)
+        self.addCleanup(writer.close)
+        writer.execute('PRAGMA journal_mode=WAL')
+        identity = startup.source_identity(self.database)
+        original = startup.compare_tables
+        injected = []
+        def commit_after_reuse(*args):
+            original(*args)
+            writer.execute("UPDATE articles SET body='late reuse WAL commit' WHERE id='a'")
+            writer.commit(); injected.append(True)
+        with patch.object(startup, 'source_identity', return_value=identity), patch.object(startup, 'compare_tables', side_effect=commit_after_reuse):
+            with self.assertRaisesRegex(ValueError, 'source changed'):
+                self.prepare()
+        self.assertEqual(injected, [True])
+        self.assertFalse((self.root/'baseline.json').exists())
+        self.assertEqual(len(list((self.root/'backups').rglob('wewe-rss.db'))), 1)
+        self.assertEqual(startup.backup_api.sha256(Path(first['backup']['backup'])), first['backup']['sha256'])
 
     def test_typed_values_and_signed_zero_are_distinct(self):
         self.assertFalse(startup.same_value(None, ""))

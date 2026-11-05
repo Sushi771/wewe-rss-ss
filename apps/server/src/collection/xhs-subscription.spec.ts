@@ -1,0 +1,2000 @@
+import { scheduledTaskId } from './xhs-scheduled-admission';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
+import { PrismaClient } from '@prisma/client';
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
+import {
+  XhsSubscriptionService,
+  XhsSubscriptionSource,
+  subscriptionUrl,
+} from './xhs-subscription.service';
+import { XiaohongshuService } from './xiaohongshu.service';
+import { XhsNormalizedCandidate } from './xiaohongshu-contract';
+import { LocalArticleStore } from '../article-local-save';
+import { RedbookSubscriptionAdapter } from './xhs-redbook-subscription';
+import { xhsNoteFilterSchema } from '@wewe-rss/shared';
+import { allowedRedbookMediaUrl, mapRedbookPage } from './redbook-response';
+import { TrpcService } from '../trpc/trpc.service';
+import { TrpcRouter } from '../trpc/trpc.router';
+import { ConfigService } from '@nestjs/config';
+import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { RedbookPauseError } from './redbook-client';
+import { createHash, randomUUID } from 'node:crypto';
+import { createHTTPServer } from '@trpc/server/adapters/standalone';
+import { createRequire } from 'node:module';
+const { createTRPCProxyClient, httpLink } = createRequire(
+  path.resolve(__dirname, '../../../web/package.json'),
+)('@trpc/client');
+import {
+  preferredRecoveredTask,
+  mayResumeTask,
+  watchSubscriptionTask,
+} from '../../../web/src/utils/xiaohongshu-subscription';
+
+const author = {
+  id: 'synthetic-author',
+  name: '合成作者',
+  profileUrl: 'https://www.xiaohongshu.com/user/profile/synthetic-author',
+};
+const noteKey = (id: string) => JSON.stringify(['xiaohongshu', 'note', id]);
+const png =
+  'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=';
+const detail = (noteId = 'note-a'): XhsNormalizedCandidate => ({
+  authorId: author.id,
+  noteId,
+  kind: 'image-text',
+  title: '合成笔记',
+  text: '检索正文测试',
+  textStatus: 'full',
+  publishedAt: 1760000000,
+  expectedImageCount: 1,
+  images: [{ ordinal: 1, inlineData: png }],
+});
+// This file exercises real SQLite, async task lanes and local filesystem writes.
+// Keep per-test waits bounded while allowing CI time for the integrated I/O.
+jest.setTimeout(15000);
+describe('isolated subscription workflow with synthetic SQLite and actual local saver', () => {
+  let root: string,
+    db: PrismaClient,
+    service: XhsSubscriptionService,
+    cache: XiaohongshuService,
+    source: XhsSubscriptionSource,
+    store: LocalArticleStore;
+  let creatorId: string;
+  let trackedDownloadResume: Promise<void> | undefined;
+  beforeAll(async () => {
+    root = await fs.mkdtemp(path.join(tmpdir(), 'xhs-subscription-test-'));
+    db = new PrismaClient({
+      datasources: {
+        db: {
+          url:
+            'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+        },
+      },
+    });
+    const migrations = path.resolve(__dirname, '../../prisma/migrations');
+    for (const name of (await fs.readdir(migrations)).sort()) {
+      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
+      const sql = await fs.readFile(
+        path.join(migrations, name, 'migration.sql'),
+        'utf8',
+      );
+      for (const statement of splitSqliteStatements(sql)
+        .map((s) => s.trim())
+        .filter(Boolean))
+        await db.$executeRawUnsafe(statement);
+    }
+    await db.$executeRawUnsafe('PRAGMA synchronous = FULL');
+    cache = new XiaohongshuService(db as any);
+    store = new LocalArticleStore(path.join(root, 'settings.json'), root);
+  }, 30000);
+  beforeEach(async () => {
+    // A timed-out resume test may still be using this fixture.
+    if (trackedDownloadResume) {
+      await trackedDownloadResume.catch(() => {});
+      trackedDownloadResume = undefined;
+    }
+    // Previous terminal visibility does not imply its worker/finally has released the fixture lock.
+    if (service) await (service as any).lane;
+    await db.$executeRawUnsafe('DELETE FROM xhs_subscription_tasks');
+    await db.xhsNote.deleteMany();
+    await db.xhsCreator.deleteMany();
+    source = {
+      hasAuthorContext: jest.fn(() => true),
+      resolve: jest.fn(async (url) => ({
+        inputKind: url.includes('/user/profile/')
+          ? ('profile' as const)
+          : ('note' as const),
+        author,
+      })),
+      list: jest.fn(async () => ({
+        authorId: author.id,
+        nextCursor: null,
+        notes: [
+          {
+            authorId: author.id,
+            noteId: 'note-a',
+            title: '合成列表',
+            publishedAt: 0,
+            kind: 'image-text' as const,
+          },
+        ],
+      })),
+      detail: jest.fn(async () => detail()),
+    };
+    service = new XhsSubscriptionService(db as any, source);
+    service.bindLocalSaver(
+      async () => root,
+      async (creator, noteId, directory) => {
+        const prepare = await cache.prepareLocalDownload(creator.id, noteId);
+        return store.save(
+          async (stage) => ({
+            ...(await prepare(stage)),
+            exportSource: { feedId: creator.id, feedName: creator.displayName },
+          }),
+          new Date(),
+          directory,
+        );
+      },
+    );
+    creatorId = randomUUID();
+    await db.xhsCreator.create({
+      data: {
+        id: creatorId,
+        externalAuthorId: author.id,
+        profileUrl: author.profileUrl,
+        displayName: author.name,
+        enabled: true,
+      },
+    });
+  }, 40000);
+  afterAll(async () => {
+    if (trackedDownloadResume) await trackedDownloadResume.catch(() => {});
+    if (service) await (service as any).lane;
+    await db?.$disconnect(); /* synthetic files retained in temp for diagnosis */
+  }, 40000);
+  const finish = async (taskId: string) => {
+    for (let i = 0; i < 2000; i++) {
+      const t = await service.task({ taskId });
+      if (!['queued', 'running'].includes(t.state)) return t;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('SYNTHETIC_TASK_TIMEOUT');
+  };
+  const settled = async (taskId: string) => {
+    for (let i = 0; i < 500; i++) {
+      const task = await service.task({ taskId });
+      if (task.resumable) return task;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw Error('SYNTHETIC_SETTLEMENT_TIMEOUT');
+  };
+  it.each([
+    [
+      new XhsSubscriptionError('XHS_LIST_PARSE_FAILED'),
+      'XHS_LIST_PARSE_FAILED',
+    ],
+    [new RedbookPauseError('transport'), 'XHS_SOURCE_TRANSPORT_BLOCKED'],
+    [
+      new XhsSubscriptionError('XHS_REQUEST_BUDGET_EXHAUSTED'),
+      'XHS_REQUEST_BUDGET_EXHAUSTED',
+    ],
+    [new Error('synthetic-private-error'), 'XHS_TASK_BLOCKED'],
+  ])(
+    'persists fixed listing failure classification without raw payload',
+    async (error, code) => {
+      (source.list as jest.Mock).mockRejectedValueOnce(error);
+      const task = await service.refreshFull({
+        id: creatorId,
+        scope: 'all',
+        basicOnly: true,
+      });
+      const done = await finish(task.taskId);
+      expect(done).toMatchObject({
+        state: 'blocked',
+        collectionStage: 'listing',
+        code,
+      });
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${task.taskId}`;
+      expect(JSON.parse(rows[0].document)).toMatchObject({
+        state: 'blocked',
+        collectionStage: 'listing',
+        code,
+      });
+      expect(rows[0].document).not.toContain('synthetic-private-error');
+      expect(source.list).toHaveBeenCalledTimes(1);
+    },
+    20000,
+  );
+  it('limits each submitted list run and resumes the saved cursor only after explicit continuation', async () => {
+    let page = 0;
+    const list = jest.fn(async (_author: string, _cursor: string | null) => {
+      void _author;
+      void _cursor;
+      page++;
+      return {
+        authorId: author.id,
+        nextCursor: page === 3 ? null : `cursor-${page}`,
+        notes: [
+          {
+            authorId: author.id,
+            noteId: `bounded-${page}`,
+            title: 'Synthetic bounded page',
+            publishedAt: 0,
+            kind: 'image-text' as const,
+          },
+        ],
+      };
+    });
+    source.list = list;
+    const first = await service.refresh({ id: creatorId, maxPages: 2 });
+    expect(await settled(first.taskId)).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+      completed: 2,
+      resumable: true,
+    });
+    expect(source.list).toHaveBeenCalledTimes(2);
+    const rows = await db.xhsNote.findMany({ where: { creatorId } });
+    expect(rows).toHaveLength(2);
+    const fresh = new XhsSubscriptionService(db as any, source);
+    await fresh.onModuleInit();
+    expect((await fresh.recentTasks()).items[0].taskId).toBe(first.taskId);
+    expect(source.list).toHaveBeenCalledTimes(2);
+    const child = await fresh.resumeTask(first);
+    const task = await fresh.task(child);
+    expect(task.resumedFromTaskId).toBe(first.taskId);
+    for (let i = 0; i < 500; i++) {
+      if ((await fresh.task(child)).state === 'completed') break;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    expect(await fresh.task(child)).toMatchObject({
+      state: 'completed',
+      completed: 3,
+    });
+    expect(source.list).toHaveBeenCalledTimes(3);
+    expect(list.mock.calls[2][1]).toBe('cursor-2');
+  });
+  it('joins the actual frontend recovery helpers to HTTP routes and durable SQLite without implicit replay', async () => {
+    const config = new ConfigService({
+      auth: { code: 'synthetic-auth' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const router = new TrpcRouter(
+      new TrpcService(db as any, config, {} as any, {} as any),
+      db as any,
+      config,
+      {} as any,
+      {} as any,
+      cache,
+      service,
+    ).appRouter;
+    const server = createHTTPServer({
+      router,
+      createContext: () => ({ errorMsg: null, isLocalSave: true }),
+    }).server;
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as import('node:net').AddressInfo).port;
+    const api = createTRPCProxyClient({
+      links: [httpLink({ url: `http://127.0.0.1:${port}` })],
+    }).xiaohongshu;
+    const fault = jest
+      .spyOn(service as any, 'persistIn')
+      .mockRejectedValue(Error('synthetic receipt unavailable'));
+    try {
+      await expect(api.refresh.mutate({ id: creatorId })).rejects.toThrow(
+        'XHS_TASK_RECEIPT_UNCERTAIN',
+      );
+      const unknown = (await api.recentTasks.query({ limit: 10 })).items[0];
+      expect(unknown.resumable).toBe(false);
+      expect(mayResumeTask(unknown)).toBe(false);
+      expect(source.list).not.toHaveBeenCalled();
+      fault.mockRestore();
+      // A new client/page has no task ID; discover from the actual HTTP contract.
+      const recovered = preferredRecoveredTask(
+        (await api.recentTasks.query({ limit: 10 })).items,
+      )!;
+      expect(recovered?.taskId).toBe(unknown.taskId);
+      expect(mayResumeTask(recovered)).toBe(true);
+      expect(source.list).not.toHaveBeenCalled();
+      const checkpoint = await api.task.query({ taskId: recovered.taskId });
+      expect(checkpoint.resumable).toBe(true);
+      const child = await api.resumeTask.mutate({ taskId: recovered.taskId });
+      const seen: string[] = [];
+      await watchSubscriptionTask({
+        taskId: child.taskId,
+        query: (input) => api.task.query(input),
+        signal: new AbortController().signal,
+        onTask: (task) => {
+          seen.push(task.state);
+        },
+        onError: (error) => {
+          throw error;
+        },
+        interval: 5,
+      });
+      expect(seen.at(-1)).toBe('completed');
+      expect(source.list).toHaveBeenCalledTimes(1);
+      const old = await api.task.query({ taskId: recovered.taskId });
+      expect(old.supersededByTaskId).toBe(child.taskId);
+      expect(mayResumeTask(old)).toBe(false);
+      expect((await api.recentTasks.query({ limit: 10 })).items).toEqual([]);
+      const rows = await db.$queryRawUnsafe<
+        Array<{ id: string; document: string }>
+      >('SELECT id,document FROM xhs_subscription_tasks');
+      expect(rows).toHaveLength(2);
+      expect(
+        JSON.parse(rows.find((row) => row.id === child.taskId)!.document)
+          .resumedFromTaskId,
+      ).toBe(recovered.taskId);
+      expect(source.detail).not.toHaveBeenCalled();
+      source.list = jest.fn(async (_author, _cursor, signal) => {
+        await new Promise<void>((_resolve, reject) => {
+          const abort = () => reject(Error('synthetic cancellation'));
+          if (!signal || signal.aborted) abort();
+          else signal.addEventListener('abort', abort, { once: true });
+        });
+        return { authorId: author.id, notes: [], nextCursor: null };
+      });
+      const cancelled = await api.refresh.mutate({ id: creatorId });
+      while (!(source.list as jest.Mock).mock.calls.length)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      await api.cancelTask.mutate({ taskId: cancelled.taskId });
+      await settled(cancelled.taskId);
+      const reentered = preferredRecoveredTask(
+        (await api.recentTasks.query({ limit: 10 })).items,
+      )!;
+      expect(reentered.taskId).toBe(cancelled.taskId);
+      expect(reentered.state).toBe('cancelled');
+      expect(mayResumeTask(reentered)).toBe(true);
+      expect(source.list).toHaveBeenCalledTimes(1);
+    } finally {
+      fault.mockRestore();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+  it('resolves without creating/listing; confirmation is idempotent and validates group', async () => {
+    const r = await service.resolveSubscription({
+      url: 'https://www.xiaohongshu.com/explore/note-a?xsec_token=synthetic',
+    });
+    expect(r).toMatchObject({
+      inputKind: 'note',
+      existingCreatorId: creatorId,
+      author,
+    });
+    expect(await db.xhsCreator.count()).toBe(1);
+    expect(source.list).not.toHaveBeenCalled();
+    expect(source.detail).not.toHaveBeenCalled();
+    await expect(
+      service.subscribe({
+        resolutionId: r.resolutionId,
+        groupId: 'wrong-platform',
+      }),
+    ).rejects.toThrow('XHS_GROUP_INVALID');
+    expect(
+      await service.subscribe({ resolutionId: r.resolutionId }),
+    ).toMatchObject({
+      creatorId,
+      created: false,
+      subscribed: true,
+    });
+    await expect(
+      service.subscribe({ resolutionId: 'expired' }),
+    ).rejects.toThrow('XHS_RESOLUTION_EXPIRED');
+  });
+  it('archives an eligible manual refresh using the real local saver', async () => {
+    const taskId = 'manual-archive-test',
+      noteId = noteKey('manual-archive-test');
+    await db.xhsNote.create({
+      data: {
+        id: noteId,
+        creatorId,
+        title: 'Manual synthetic',
+        publishTime: 1760000000,
+        kind: 'image-text',
+        status: 'complete',
+        contentHtml: '<div id="js_content"><p>synthetic body</p></div>',
+      },
+    });
+    const task = {
+      taskId,
+      creatorId,
+      kind: 'list',
+      state: 'partial',
+      basicOnly: true,
+      reuseCompleteCache: false,
+      noteIds: [noteId],
+      items: { [noteId]: 'completed' },
+      basicResults: { [noteId]: 'complete' },
+      scheduledMediaResults: { [noteId]: 'complete' },
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const result = await (service as any).archiveTask(taskId, creatorId);
+    expect(result).toEqual({ incomplete: false });
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(
+      Object.values(JSON.parse(rows[0].document).scheduledArchive)[0],
+    ).toMatchObject({ state: 'saved' });
+    expect(await (service as any).archiveTask(taskId, creatorId)).toEqual({
+      incomplete: false,
+    });
+  }, 40000);
+  it('retains a manual archive conflict as incomplete', async () => {
+    const taskId = 'manual-archive-conflict',
+      noteId = noteKey('manual-archive-conflict'),
+      target = path.join(root, 'synthetic-conflict-original.txt');
+    await fs.writeFile(target, 'synthetic original');
+    await db.xhsNote.create({
+      data: {
+        id: noteId,
+        creatorId,
+        title: 'Manual synthetic',
+        publishTime: 1,
+        kind: 'image-text',
+        status: 'complete',
+        contentHtml: '<div id="js_content"><p>synthetic body</p></div>',
+      },
+    });
+    const task = {
+      taskId,
+      creatorId,
+      kind: 'list',
+      state: 'partial',
+      basicOnly: true,
+      reuseCompleteCache: false,
+      noteIds: [noteId],
+      items: { [noteId]: 'completed' },
+      basicResults: { [noteId]: 'complete' },
+      scheduledMediaResults: { [noteId]: 'complete' },
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    service.bindLocalSaver(
+      async () => root,
+      async () =>
+        ({
+          mediaComplete: true,
+          supplement: { status: 'conflict-version' },
+        }) as any,
+    );
+    expect(await (service as any).archiveTask(taskId, creatorId)).toEqual({
+      incomplete: true,
+    });
+    expect(await fs.readFile(target, 'utf8')).toBe('synthetic original');
+    const rows = await db.$queryRaw<
+      Array<{ document: string }>
+    >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(
+      Object.values(JSON.parse(rows[0].document).scheduledArchive)[0],
+    ).toMatchObject({ state: 'conflict' });
+  }, 40000);
+  it('reconciles a manual archive after the saved file acknowledgement is lost', async () => {
+    const taskId = 'manual-archive-interrupt',
+      noteId = noteKey('manual-archive-interrupt');
+    await db.xhsNote.create({
+      data: {
+        id: noteId,
+        creatorId,
+        title: 'Manual interrupted synthetic',
+        publishTime: 1,
+        kind: 'image-text',
+        status: 'complete',
+        contentHtml: '<div id="js_content"><p>synthetic body</p></div>',
+      },
+    });
+    const task = {
+      taskId,
+      creatorId,
+      kind: 'list',
+      state: 'partial',
+      basicOnly: true,
+      reuseCompleteCache: false,
+      noteIds: [noteId],
+      items: { [noteId]: 'completed' },
+      basicResults: { [noteId]: 'complete' },
+      scheduledMediaResults: { [noteId]: 'complete' },
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'partial',${JSON.stringify(task)},1)`;
+    const realSave = (service as any).save;
+    let first = true,
+      receiptPath = '';
+    const save = jest.fn(async (...args: any[]) => {
+      const result = await realSave(...args);
+      if (first) {
+        first = false;
+        receiptPath = result.markdownPath;
+        throw Error('synthetic lost acknowledgement');
+      }
+      expect(result.alreadySaved).toBe(true);
+      return result;
+    });
+    service.bindLocalSaver(async () => root, save);
+    expect(await (service as any).archiveTask(taskId, creatorId)).toEqual({
+      incomplete: true,
+    });
+    expect((await fs.stat(receiptPath)).isFile()).toBe(true);
+    let rows = await db.$queryRaw<
+      Array<{ state: string; document: string }>
+    >`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(rows[0].state).toBe('partial');
+    expect(
+      Object.values(JSON.parse(rows[0].document).scheduledArchive)[0],
+    ).toMatchObject({ state: 'failed' });
+    expect(await (service as any).archiveTask(taskId, creatorId)).toEqual({
+      incomplete: false,
+    });
+    expect(save).toHaveBeenCalledTimes(2);
+    rows = await db.$queryRaw<
+      Array<{ state: string; document: string }>
+    >`SELECT state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    expect(
+      Object.values(JSON.parse(rows[0].document).scheduledArchive)[0],
+    ).toMatchObject({ state: 'saved' });
+  }, 40000);
+  it('does not acknowledge a scheduled archive if note data changes during saving', async () => {
+    const round = '2026-11-01/09:15',
+      taskId = scheduledTaskId(round, creatorId, 'basic'),
+      noteId = noteKey('archive-race');
+    await db.xhsNote.create({
+      data: {
+        id: noteId,
+        creatorId,
+        title: 'Before',
+        publishTime: 1,
+        kind: 'image-text',
+        status: 'complete',
+        contentHtml: '<p>body</p>',
+      },
+    });
+    const task = {
+      taskId,
+      creatorId,
+      state: 'completed',
+      schedule: { round, phase: 'basic' },
+      noteIds: [noteId],
+      failed: 0,
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${taskId},${creatorId},'completed',${JSON.stringify(task)},1)`;
+    try {
+      let change = true;
+      const save = jest.fn(async () => {
+        if (change) {
+          change = false;
+          await db.xhsNote.update({
+            where: { id: noteId },
+            data: { title: 'After' },
+          });
+        }
+        return { alreadySaved: false, mediaComplete: true };
+      });
+      let destination = root;
+      service.bindLocalSaver(async () => destination, save);
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: true,
+      });
+      let row = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(JSON.parse(row[0].document).scheduledArchive).toBeUndefined();
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: false,
+      });
+      expect(save).toHaveBeenCalledTimes(2);
+      row = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(
+        Object.values(JSON.parse(row[0].document).scheduledArchive)[0],
+      ).toMatchObject({ state: 'saved' });
+      destination = path.join(root, 'other-synthetic');
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: false,
+      });
+      expect(save).toHaveBeenCalledTimes(3);
+      await db.xhsNote.update({
+        where: { id: noteId },
+        data: { title: 'More' },
+      });
+      save.mockResolvedValueOnce({ alreadySaved: false, mediaComplete: false });
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: true,
+      });
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: true,
+      });
+      expect(save).toHaveBeenCalledTimes(5);
+      await db.xhsNote.update({
+        where: { id: noteId },
+        data: { title: 'Conflict' },
+      });
+      (save as any).mockResolvedValueOnce({
+        alreadySaved: true,
+        mediaComplete: true,
+        supplement: { status: 'conflict-version' },
+      });
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: true,
+      });
+      row = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+      expect(
+        Object.values(JSON.parse(row[0].document).scheduledArchive)[0],
+      ).toMatchObject({ state: 'conflict' });
+      expect((await service.task({ taskId })).archiveConflicts).toBe(1);
+      expect(await service.archiveScheduled(round, creatorId)).toEqual({
+        incomplete: true,
+      });
+      expect(save).toHaveBeenCalledTimes(6);
+    } finally {
+      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    }
+  }, 40000);
+  it('persists a checked avatar through subscription and preserves it when a later source has none', async () => {
+    (source.resolve as jest.Mock).mockResolvedValueOnce({
+      inputKind: 'profile',
+      author: {
+        ...author,
+        avatarUrl:
+          'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg?token=synthetic-secret',
+      },
+    });
+    const first = await service.resolveSubscription({ url: author.profileUrl });
+    await service.subscribe({ resolutionId: first.resolutionId });
+    const rows = await db.$queryRaw<
+      Array<{ avatar_url: string | null }>
+    >`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
+    expect(rows[0].avatar_url).toBe(
+      'https://sns-avatar-qc.xhscdn.com/avatar/synthetic.jpg',
+    );
+    const found = (await cache.list()).items.find(
+      (item) => item.id === creatorId,
+    );
+    expect(found?.avatarUrl).toBe(rows[0].avatar_url);
+    const second = await service.resolveSubscription({
+      url: author.profileUrl,
+    });
+    await service.subscribe({ resolutionId: second.resolutionId });
+    const after = await db.$queryRaw<
+      Array<{ avatar_url: string | null }>
+    >`SELECT json_extract(document,'$.avatarUrl') AS avatar_url FROM xhs_metric_snapshots WHERE owner_kind='creator-avatar' AND owner_id=${creatorId}`;
+    expect(after[0].avatar_url).toBe(rows[0].avatar_url);
+  });
+  it('exposes the agreed task API through protected routes and gates local writes', async () => {
+    const config = new ConfigService({
+      auth: { code: 'synthetic-auth' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const router = new TrpcRouter(
+      new TrpcService(db as any, config, {} as any, {} as any),
+      db as any,
+      config,
+      {} as any,
+      {} as any,
+      cache,
+      service,
+    ).appRouter;
+    await expect(
+      router
+        .createCaller({ errorMsg: 'synthetic unauthorized' })
+        .xiaohongshu.resolveSubscription({ url: author.profileUrl }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    const remote = router.createCaller({ errorMsg: null, isLocalSave: false });
+    const previousResolutions = (source.resolve as jest.Mock).mock.calls.length;
+    await expect(
+      remote.xiaohongshu.resolveSubscription({ url: author.profileUrl }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(
+      router
+        .createCaller({ errorMsg: 'synthetic unauthorized' })
+        .xiaohongshu.recentTasks(),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(await remote.xiaohongshu.recentTasks()).toEqual({ items: [] });
+    await expect(
+      remote.xiaohongshu.refresh({ id: creatorId }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(source.resolve).toHaveBeenCalledTimes(previousResolutions);
+    expect(source.list).not.toHaveBeenCalled();
+    const api = router.createCaller({ errorMsg: null, isLocalSave: true });
+    const { taskId } = await api.xiaohongshu.refresh({ id: creatorId });
+    await finish(taskId);
+    expect(await api.xiaohongshu.task({ taskId })).toMatchObject({
+      kind: 'list',
+      state: 'completed',
+    });
+    expect(
+      (await api.xiaohongshu.notes({ creatorId, search: '合成' })).items,
+    ).toHaveLength(1);
+    await expect(
+      router
+        .createCaller({ errorMsg: null, isLocal: true, isLocalSave: false })
+        .xiaohongshu.downloadNotes({ creatorId, noteIds: [noteKey('note-a')] }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('reproduces a lost receipt after actual file completion, releases the worker, fences replay and recovers locally', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    const original = (service as any).persistIn.bind(service);
+    let saved = false,
+      writes = 0;
+    service.bindLocalSaver(
+      async () => root,
+      async (creator, noteId, directory) => {
+        const prepare = await cache.prepareLocalDownload(creator.id, noteId);
+        const result = await store.save(
+          async (stage) => ({
+            ...(await prepare(stage)),
+            exportSource: { feedId: creator.id, feedName: creator.displayName },
+          }),
+          new Date(),
+          directory,
+        );
+        saved = true;
+        writes++;
+        return result;
+      },
+    );
+    const failure = jest
+      .spyOn(service as any, 'persistIn')
+      .mockImplementation(async (...args: any[]) => {
+        if (saved)
+          throw Error(
+            'synthetic disk fault https://example.invalid/?xsec_token=DO_NOT_EXPOSE',
+          );
+        return original(...args);
+      });
+    const receipt = await service.downloadNotes({
+      creatorId,
+      noteIds: [noteKey('note-a')],
+    });
+    for (let i = 0; i < 1000 && (service as any).pending.size; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    expect((service as any).pending.size).toBe(0);
+    expect((service as any).controllers.size).toBe(0);
+    expect(writes).toBe(1);
+    const unknown = await service.task(receipt);
+    expect(unknown).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      resumable: false,
+      completed: 1,
+      remaining: 0,
+    });
+    expect(JSON.stringify(unknown)).not.toMatch(
+      /DO_NOT_EXPOSE|directory|contentHtml/,
+    );
+    await expect(
+      service.downloadNotes({ creatorId, noteIds: [noteKey('note-a')] }),
+    ).rejects.toThrow('XHS_TASK_RECEIPT_UNCERTAIN');
+    const oldBody = await db.xhsNote.findUniqueOrThrow({
+      where: { id: noteKey('note-a') },
+    });
+    const paths = (await fs.readdir(root, { recursive: true }))
+      .filter((f) => /\.(html|md|png)$/.test(String(f)))
+      .map((f) => path.join(root, String(f)));
+    expect(paths.some((file) => file.endsWith('.png'))).toBe(true);
+    const digest = async () =>
+      Promise.all(
+        paths.map(async (file) =>
+          createHash('sha256')
+            .update(await fs.readFile(file))
+            .digest('hex'),
+        ),
+      );
+    const before = await digest();
+    failure.mockRestore();
+    // Simulate process loss: only durable SQLite and saver receipts survive.
+    const fresh = new XhsSubscriptionService(db as any, source);
+    fresh.bindLocalSaver(
+      async () => root,
+      async (creator, noteId, directory) => {
+        const prepare = await cache.prepareLocalDownload(creator.id, noteId);
+        return store.save(
+          async (stage) => ({
+            ...(await prepare(stage)),
+            exportSource: { feedId: creator.id, feedName: creator.displayName },
+          }),
+          new Date(),
+          directory,
+        );
+      },
+    );
+    const requests = (source.detail as jest.Mock).mock.calls.length,
+      lists = (source.list as jest.Mock).mock.calls.length;
+    await fresh.onModuleInit();
+    expect(source.detail).toHaveBeenCalledTimes(requests);
+    expect(source.list).toHaveBeenCalledTimes(lists);
+    const discovered = await fresh.recentTasks({ creatorId });
+    expect(discovered.items.map((t) => t.taskId)).toContain(receipt.taskId);
+    const child = await fresh.resumeTask(receipt);
+    service = fresh;
+    const result = await finish(child.taskId);
+    expect(result).toMatchObject({
+      state: 'completed',
+      skipped: 1,
+      total: 1,
+      remaining: 0,
+      resumedFromTaskId: receipt.taskId,
+    });
+    expect(
+      result.completed + result.skipped + result.failed + result.remaining,
+    ).toBe(result.total);
+    expect(source.detail).toHaveBeenCalledTimes(requests);
+    expect(await digest()).toEqual(before);
+    expect(await db.xhsNote.findUnique({ where: { id: oldBody.id } })).toEqual(
+      oldBody,
+    );
+    await expect(fresh.resumeTask(receipt)).rejects.toThrow(
+      'XHS_TASK_SUPERSEDED',
+    );
+  }, 30000);
+  it('checks durable SQLite after a post-COMMIT acknowledgement error without repeating a save', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    let saved = false,
+      lost = false,
+      saves = 0;
+    service.bindLocalSaver(
+      async () => root,
+      async (creator, noteId, directory) => {
+        const prepare = await cache.prepareLocalDownload(creator.id, noteId);
+        const result = await store.save(
+          async (stage) => ({
+            ...(await prepare(stage)),
+            exportSource: { feedId: creator.id, feedName: creator.displayName },
+          }),
+          new Date(),
+          directory,
+        );
+        saves++;
+        saved = true;
+        return result;
+      },
+    );
+    const original = (service as any).write.bind(service);
+    const fault = jest
+      .spyOn(service as any, 'write')
+      .mockImplementation(async (...args: any[]) => {
+        const result = await original(...args);
+        if (saved && !lost) {
+          lost = true;
+          throw Error('synthetic COMMIT reply lost');
+        }
+        return result;
+      });
+    const receipt = await service.downloadNotes({
+      creatorId,
+      noteIds: [noteKey('note-a')],
+    });
+    expect(await finish(receipt.taskId)).toMatchObject({
+      state: 'completed',
+      completed: 1,
+      total: 1,
+      remaining: 0,
+    });
+    // COMMIT visibility precedes Promise/finally worker cleanup. Join the actual lane.
+    await (service as any).lane;
+    expect(lost).toBe(true);
+    expect(saves).toBe(1);
+    expect((service as any).pending.size).toBe(0);
+    fault.mockRestore();
+  });
+  it('discovers bounded recoverable summaries and atomically consumes a checkpoint under concurrent resume clicks', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: 'foreign',
+      notes: [],
+      nextCursor: null,
+    });
+    const first = await service.refresh({ id: creatorId });
+    expect(await finish(first.taskId)).toMatchObject({
+      code: 'XHS_LIST_INVALID',
+      state: 'blocked',
+    });
+    await settled(first.taskId);
+    expect(await service.recentTasks({ creatorId, limit: 1 })).toMatchObject({
+      items: [
+        { taskId: first.taskId, resumable: true, code: 'XHS_LIST_INVALID' },
+      ],
+    });
+    await expect(service.recentTasks({ limit: 21 })).rejects.toThrow(
+      'XHS_TASK_LIMIT_INVALID',
+    );
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      notes: [],
+      nextCursor: null,
+    });
+    const attempts = await Promise.allSettled([
+      service.resumeTask(first),
+      service.resumeTask(first),
+    ]);
+    expect(attempts.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    const child = (
+      attempts.find(
+        (r) => r.status === 'fulfilled',
+      ) as PromiseFulfilledResult<any>
+    ).value;
+    await finish(child.taskId);
+    expect(await service.task(first)).toMatchObject({
+      resumable: false,
+      supersededByTaskId: child.taskId,
+    });
+    await expect(service.resumeTask(first)).rejects.toThrow(
+      'XHS_TASK_SUPERSEDED',
+    );
+    expect(
+      (await service.recentTasks()).items.map((t) => t.taskId),
+    ).not.toContain(first.taskId);
+    const checkpoint = await (service as any).loadTask(first.taskId);
+    for (let i = 0; i < 21; i++)
+      await (service as any).persist({
+        ...checkpoint,
+        taskId: `synthetic-recent-${i}`,
+        supersededByTaskId: undefined,
+      });
+    expect((await service.recentTasks()).items).toHaveLength(10);
+    expect((await service.recentTasks({ limit: 20 })).items).toHaveLength(20);
+    expect(
+      (await service.recentTasks({ creatorId: 'synthetic-absent-creator' }))
+        .items,
+    ).toEqual([]);
+  });
+  it('retains a committed list cursor when its acknowledgement fails and resumes only the next page', async () => {
+    (source.list as jest.Mock).mockImplementation(async (_id, cursor) => ({
+      authorId: author.id,
+      notes: [
+        {
+          authorId: author.id,
+          noteId: cursor ? 'note-b' : 'note-a',
+          title: 'synthetic cursor checkpoint',
+          publishedAt: 0,
+          kind: 'image-text',
+        },
+      ],
+      nextCursor: cursor ? null : 'synthetic-second',
+    }));
+    let lost = false;
+    const original = (service as any).write.bind(service);
+    const fault = jest
+      .spyOn(service as any, 'write')
+      .mockImplementation(async (...args: any[]) => {
+        const result = await original(...args);
+        if (!lost && result?.cursorHistory?.length === 1) {
+          lost = true;
+          throw Error('synthetic list COMMIT acknowledgement lost');
+        }
+        return result;
+      });
+    const first = await service.refresh({ id: creatorId });
+    expect(await settled(first.taskId)).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_TASK_CHECKPOINT_RECONCILED',
+      total: 1,
+      completed: 1,
+      remaining: 0,
+    });
+    expect(lost).toBe(true);
+    expect(source.list).toHaveBeenCalledTimes(1);
+    expect((service as any).pending.size).toBe(0);
+    fault.mockRestore();
+    const child = await service.resumeTask(first);
+    const result = await finish(child.taskId);
+    expect(result).toMatchObject({
+      state: 'completed',
+      total: 2,
+      completed: 2,
+      remaining: 0,
+      resumedFromTaskId: first.taskId,
+    });
+    expect(
+      (source.list as jest.Mock).mock.calls.map((call) => call[1]),
+    ).toEqual([null, 'synthetic-second']);
+    expect(await db.xhsNote.count()).toBe(2);
+    expect(
+      result.completed + result.skipped + result.failed + result.remaining,
+    ).toBe(result.total);
+  });
+  it('finds a committed successor after a lost resume response and rejects a stale parent writer', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: 'foreign',
+      notes: [],
+      nextCursor: null,
+    });
+    const parent = await service.refresh({ id: creatorId });
+    await settled(parent.taskId);
+    const staleParent = await (service as any).loadTask(parent.taskId);
+    let release!: () => void;
+    (source.list as jest.Mock).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ authorId: author.id, notes: [], nextCursor: null });
+        }),
+    );
+    // The caller loses this response; discovery must use SQLite, not its ID.
+    const submitted = await service.resumeTask(parent);
+    for (let i = 0; i < 1000 && !release; i++)
+      await new Promise((r) => setTimeout(r, 5));
+    expect(release).toBeDefined();
+    const observer = new PrismaClient({
+      datasources: {
+        db: {
+          url:
+            'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+        },
+      },
+    });
+    try {
+      const rows = await observer.$queryRaw<
+        Array<{ id: string; document: string }>
+      >`SELECT id, document FROM xhs_subscription_tasks ORDER BY id`;
+      expect(rows).toHaveLength(2);
+      const persistedParent = JSON.parse(
+        rows.find((row) => row.id === parent.taskId)!.document,
+      );
+      const persistedChild = JSON.parse(
+        rows.find((row) => row.id !== parent.taskId)!.document,
+      );
+      expect(persistedParent.supersededByTaskId).toBe(persistedChild.taskId);
+      expect(persistedChild.resumedFromTaskId).toBe(parent.taskId);
+      const reloaded = new XhsSubscriptionService(observer as any, source);
+      expect(await reloaded.recentTasks({ creatorId, limit: 1 })).toMatchObject(
+        {
+          items: [{ taskId: persistedChild.taskId, state: 'running' }],
+        },
+      );
+      await expect((service as any).persist(staleParent)).rejects.toThrow(
+        'XHS_TASK_SUPERSEDED',
+      );
+      await expect(service.resumeTask(parent)).rejects.toThrow(
+        'XHS_TASK_SUPERSEDED',
+      );
+      expect((await service.task(parent)).supersededByTaskId).toBe(
+        submitted.taskId,
+      );
+    } finally {
+      release?.();
+      await finish(submitted.taskId);
+      await observer.$disconnect();
+    }
+    expect((await service.recentTasks({ creatorId })).items).toEqual([]);
+    expect(source.list).toHaveBeenCalledTimes(2);
+  });
+  it('discovers an unacknowledged initial task without its ID and reconciles without restarting or dispatching', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: 'foreign',
+      notes: [],
+      nextCursor: null,
+    });
+    const older = await service.refresh({ id: creatorId });
+    await settled(older.taskId);
+    const requests = (source.list as jest.Mock).mock.calls.length;
+    const fault = jest
+      .spyOn(service as any, 'persistIn')
+      .mockRejectedValue(Error('synthetic receipt write failure'));
+    await expect(service.refresh({ id: creatorId })).rejects.toThrow(
+      'XHS_TASK_RECEIPT_UNCERTAIN',
+    );
+    expect((service as any).pending.size).toBe(0);
+    const unknown = (await service.recentTasks({ creatorId, limit: 1 }))
+      .items[0];
+    expect(unknown.taskId).not.toBe(older.taskId);
+    expect(unknown).toMatchObject({
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      resumable: false,
+    });
+    expect(
+      await db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*) AS count FROM xhs_subscription_tasks WHERE id=${unknown.taskId}`,
+    ).toEqual([{ count: 0n }]);
+    fault.mockRestore();
+    const reconciled = (await service.recentTasks({ creatorId, limit: 1 }))
+      .items[0];
+    expect(reconciled).toMatchObject({
+      taskId: unknown.taskId,
+      state: 'blocked',
+      resumable: true,
+    });
+    const rows = await db.$queryRaw<
+      Array<{ state: string; document: string }>
+    >`SELECT state, document FROM xhs_subscription_tasks WHERE id=${unknown.taskId}`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].state).toBe('blocked');
+    expect(JSON.parse(rows[0].document).taskId).toBe(unknown.taskId);
+    expect(source.list).toHaveBeenCalledTimes(requests);
+  });
+  it('updates metadata only, then separately downloads actual body/image bytes and skips duplicates', async () => {
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'completed', total: 1, completed: 1 });
+    expect(source.detail).not.toHaveBeenCalled();
+    expect(
+      await db.xhsNote.findUnique({ where: { id: noteKey('note-a') } }),
+    ).toMatchObject({ status: 'listed', contentHtml: null, publishTime: 0 });
+    const request = { creatorId, noteIds: [noteKey('note-a')] };
+    expect(
+      await finish((await service.downloadNotes(request)).taskId),
+    ).toMatchObject({ state: 'completed', completed: 1, remaining: 0 });
+    const saved = await db.xhsNote.findUniqueOrThrow({
+      where: { id: noteKey('note-a') },
+    });
+    expect(saved.status).toBe('complete');
+    expect(saved.contentHtml).toContain('data:image/png;base64,');
+    expect(
+      await finish((await service.downloadNotes(request)).taskId),
+    ).toMatchObject({ state: 'completed', skipped: 1 });
+    expect(source.detail).toHaveBeenCalledTimes(1);
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    expect(await db.xhsNote.findUnique({ where: { id: saved.id } })).toEqual(
+      saved,
+    );
+    const files = await fs.readdir(root, { recursive: true });
+    expect(files.some((f) => String(f).endsWith('.md'))).toBe(true);
+    expect(files.some((f) => /\.png$/.test(String(f)))).toBe(true);
+  }, 30000);
+  it.each([false, true])(
+    'completes two repeat saves with unchanged files when last checkpoint acknowledgement fails: %s',
+    async (loseCheckpoint) => {
+      (source.list as jest.Mock).mockResolvedValue({
+        authorId: author.id,
+        nextCursor: null,
+        notes: ['repeat-one', 'repeat-two'].map((noteId) => ({
+          authorId: author.id,
+          noteId,
+          title: 'Synthetic repeat',
+          publishedAt: 0,
+          kind: 'image-text',
+        })),
+      });
+      (source.detail as jest.Mock).mockImplementation(async (_author, id) =>
+        detail(id),
+      );
+      const listed = await service.refresh({ id: creatorId });
+      await finish(listed.taskId);
+      await (service as any).lane;
+      expect((service as any).pending.has(listed.taskId)).toBe(false);
+      expect((service as any).controllers.has(listed.taskId)).toBe(false);
+      const request = {
+        creatorId,
+        noteIds: ['repeat-one', 'repeat-two'].map(noteKey),
+      };
+      const first = await service.downloadNotes(request);
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 2,
+        skipped: 0,
+        remaining: 0,
+      });
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const files = (await fs.readdir(root, { recursive: true }))
+        .map(String)
+        .filter((file) => /\.(md|png)$/.test(file));
+      const digest = async () =>
+        Promise.all(
+          files.map(async (file) => {
+            const full = path.join(root, file);
+            return {
+              file,
+              bytes: createHash('sha256')
+                .update(await fs.readFile(full))
+                .digest('hex'),
+              mtime: (await fs.stat(full)).mtimeMs,
+            };
+          }),
+        );
+      const before = await digest();
+      const original = (service as any).persistIn.bind(service);
+      let lost = false;
+      const fault = jest
+        .spyOn(service as any, 'persistIn')
+        .mockImplementation(async (tx, task: any) => {
+          if (
+            loseCheckpoint &&
+            !lost &&
+            task.kind === 'download' &&
+            task.state === 'running' &&
+            task.skipped === 2
+          ) {
+            lost = true;
+            throw Error(
+              'synthetic final skipped checkpoint acknowledgement unavailable',
+            );
+          }
+          return original(tx, task);
+        });
+      const repeat = await service.downloadNotes(request);
+      for (let i = 0; i < 1000 && (service as any).pending.size; i++)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((service as any).pending.size).toBe(0);
+      expect(await finish(repeat.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 0,
+        skipped: 2,
+        failed: 0,
+        remaining: 0,
+        resumable: false,
+      });
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(source.list).toHaveBeenCalledTimes(1);
+      expect(await digest()).toEqual(before);
+      const fresh = new XhsSubscriptionService(db as any, source);
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+      });
+      // Reproduce the historical durable receipt after process loss. A settled
+      // all-skipped checkpoint closes without a new task or any file action.
+      const rows = await db.$queryRaw<
+        Array<{ document: string }>
+      >`SELECT document FROM xhs_subscription_tasks WHERE id=${repeat.taskId}`;
+      const checkpoint = {
+        ...JSON.parse(rows[0].document),
+        state: 'blocked',
+        code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      };
+      await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='blocked', document=${JSON.stringify(checkpoint)} WHERE id=${repeat.taskId}`;
+      expect(await fresh.task(repeat)).toMatchObject({
+        state: 'completed',
+        skipped: 2,
+        resumable: false,
+      });
+      await expect(fresh.resumeTask(repeat)).rejects.toThrow(
+        'XHS_TASK_NOT_RESUMABLE',
+      );
+      expect(source.detail).toHaveBeenCalledTimes(2);
+      expect(await digest()).toEqual(before);
+      expect(lost).toBe(loseCheckpoint);
+      fault.mockRestore();
+    },
+    30000,
+  );
+  it('keeps enqueue fenced after durable completion until the original lane releases', async () => {
+    const listed = await service.refresh({ id: creatorId });
+    await finish(listed.taskId);
+    await (service as any).lane;
+    const request = { creatorId, noteIds: [noteKey('note-a')] };
+    let reached!: () => void, release!: () => void;
+    const committed = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = (service as any).persist.bind(service);
+    let held = false;
+    const fault = jest
+      .spyOn(service as any, 'persist')
+      .mockImplementation(async (task: any) => {
+        await original(task);
+        if (!held && task.kind === 'download' && task.state === 'completed') {
+          held = true;
+          reached();
+          await gate;
+        }
+      });
+    try {
+      const first = await service.downloadNotes(request);
+      await committed;
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'completed',
+        completed: 1,
+      });
+      expect((service as any).pending.has(first.taskId)).toBe(true);
+      expect((service as any).controllers.has(first.taskId)).toBe(true);
+      await expect(service.downloadNotes(request)).rejects.toThrow(
+        'XHS_TASK_CONFLICT',
+      );
+      expect(source.detail).toHaveBeenCalledTimes(1);
+      release();
+      await (service as any).lane;
+      expect((service as any).pending.has(first.taskId)).toBe(false);
+      expect((service as any).controllers.has(first.taskId)).toBe(false);
+      const repeat = await service.downloadNotes(request);
+      await (service as any).lane;
+      expect(await finish(repeat.taskId)).toMatchObject({
+        state: 'completed',
+        skipped: 1,
+      });
+      expect(source.detail).toHaveBeenCalledTimes(1);
+    } finally {
+      release();
+      await (service as any).lane;
+      fault.mockRestore();
+    }
+  }, 30000);
+  it('rejects another creator selection before details or saving', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    await expect(
+      service.downloadNotes({ creatorId, noteIds: ['foreign'] }),
+    ).rejects.toThrow('XHS_SELECTION_INVALID');
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('keeps uncertain, failed, cancelled and bounded-list receipts distinct from reconciled completion', () => {
+    const id = noteKey('synthetic-receipt');
+    const receipt = {
+      taskId: 'synthetic-receipt',
+      creatorId,
+      kind: 'download',
+      state: 'blocked',
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+      total: 1,
+      completed: 0,
+      skipped: 1,
+      failed: 0,
+      remaining: 0,
+      noteIds: [id],
+      items: { [id]: 'skipped' },
+      message: '',
+    };
+    const view = (task: any) => (service as any).view(task);
+    expect(view(receipt)).toMatchObject({
+      state: 'completed',
+      resumable: false,
+      code: undefined,
+    });
+    (service as any).uncertain.set(receipt.taskId, receipt);
+    expect(view(receipt)).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+      code: 'XHS_TASK_RECEIPT_UNCERTAIN',
+    });
+    (service as any).uncertain.clear();
+    expect(
+      view({ ...receipt, failed: 1, skipped: 0, items: { [id]: 'failed' } }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, items: {} })).toMatchObject({
+      state: 'blocked',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        kind: 'list',
+        code: 'XHS_LIST_PAGE_LIMIT_REACHED',
+        cursor: 'next',
+      }),
+    ).toMatchObject({ state: 'blocked', resumable: true });
+    expect(view({ ...receipt, state: 'cancelled' })).toMatchObject({
+      state: 'cancelled',
+      resumable: false,
+    });
+    expect(
+      view({
+        ...receipt,
+        skipped: 0,
+        remaining: 1,
+        supersededByTaskId: 'successor',
+      }),
+    ).toMatchObject({ resumable: false });
+  });
+  it('commits and searches all 32 notes when a bounded page exceeds the requested 30', async () => {
+    const notes = Array.from({ length: 32 }, (_, i) => ({
+      authorId: author.id,
+      noteId: `bounded32-${i}`,
+      title: `bounded32 title ${i}`,
+      publishedAt: 0,
+      kind: 'image-text' as const,
+    }));
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes,
+    });
+    const { taskId } = await service.refresh({ id: creatorId });
+    expect(await finish(taskId)).toMatchObject({
+      state: 'completed',
+      total: 32,
+      completed: 32,
+      remaining: 0,
+    });
+    expect(await db.xhsNote.count({ where: { creatorId } })).toBe(32);
+    expect(
+      (await cache.notes(creatorId, { creatorId, search: 'bounded32' })).items,
+    ).toHaveLength(32);
+    const rows = await db.$queryRawUnsafe<Array<{ document: string }>>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id = ?',
+      taskId,
+    );
+    expect(JSON.parse(rows[0].document)).toMatchObject({
+      listedIds: notes.map((note) => noteKey(note.noteId)),
+      listFinished: true,
+    });
+    expect(source.list).toHaveBeenCalledTimes(1);
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('rejects a page above 60 before writing any of its note metadata', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    const before = await db.xhsNote.findMany();
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes: Array.from({ length: 61 }, (_, i) => ({
+        authorId: author.id,
+        noteId: `oversize-${i}`,
+        title: 'synthetic oversize page',
+        publishedAt: 0,
+        kind: 'image-text',
+      })),
+    });
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'blocked', total: 0, completed: 0 });
+    expect(await db.xhsNote.findMany()).toEqual(before);
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('stops after one failed detail instead of dispatching the rest of a batch', async () => {
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes: ['note-a', 'note-b'].map((noteId) => ({
+        noteId,
+        authorId: author.id,
+        title: '',
+        publishedAt: 0,
+        kind: 'image-text',
+      })),
+    });
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    // Terminal persistence precedes finally cleanup; wait before the next enqueue.
+    await (service as any).lane;
+    (source.detail as jest.Mock).mockRejectedValue(
+      new Error('synthetic authentication stop'),
+    );
+    const task = await finish(
+      (
+        await service.downloadNotes({
+          creatorId,
+          noteIds: [noteKey('note-a'), noteKey('note-b')],
+        })
+      ).taskId,
+    );
+    expect(task).toMatchObject({
+      state: 'blocked',
+      total: 2,
+      failed: 1,
+      remaining: 1,
+    });
+    expect(source.detail).toHaveBeenCalledTimes(1);
+    expect(task).not.toHaveProperty('noteIds');
+    expect(task).not.toHaveProperty('items');
+  });
+  it('enumerates the fourth page and incrementally deduplicates a repeated full scan', async () => {
+    (source.list as jest.Mock).mockImplementation(async (_id, cursor) => {
+      const page = cursor === null ? 0 : Number(cursor.slice(1));
+      return {
+        authorId: author.id,
+        nextCursor: page === 3 ? null : `c${page + 1}`,
+        notes: [
+          {
+            authorId: author.id,
+            noteId: `page-${page}`,
+            title: 'synthetic',
+            publishedAt: 0,
+            kind: 'image-text',
+          },
+        ],
+      };
+    });
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'completed', total: 4, completed: 4 });
+    expect(source.list).toHaveBeenCalledTimes(4);
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'completed', total: 4, skipped: 4 });
+    expect(await db.xhsNote.count()).toBe(4);
+  });
+  it('preserves platform group membership when confirming subscription', async () => {
+    await db.managementGroup.create({
+      data: {
+        id: 'synthetic-xhs-group',
+        name: '合成分组',
+        platform: 'xiaohongshu',
+      },
+    });
+    const resolution = await service.resolveSubscription({
+      url: author.profileUrl,
+    });
+    await service.subscribe({
+      resolutionId: resolution.resolutionId,
+      groupId: 'synthetic-xhs-group',
+    });
+    expect(
+      (await cache.list({ groupId: 'synthetic-xhs-group' })).items.map(
+        (c) => c.id,
+      ),
+    ).toEqual([creatorId]);
+    await service.subscribe({ resolutionId: resolution.resolutionId });
+    expect(
+      await db.xhsCreator.findUnique({ where: { id: creatorId } }),
+    ).toMatchObject({ groupId: 'synthetic-xhs-group' });
+  });
+  it('processes a selection across 100-item boundaries without a total selection ceiling', async () => {
+    const ids = Array.from({ length: 205 }, (_, i) => noteKey(`bulk-${i}`));
+    await db.$transaction(async (tx) => {
+      for (const id of ids)
+        await tx.xhsNote.create({
+          data: {
+            id,
+            creatorId,
+            title: 'synthetic cached',
+            status: 'complete',
+            kind: 'image-text',
+            contentHtml: '<div id="js_content"><p>synthetic</p></div>',
+            publishTime: 1760000000,
+          },
+        });
+    });
+    const save = jest.fn(async () => ({ alreadySaved: false }));
+    service.bindLocalSaver(async () => root, save);
+    const task = await finish(
+      (await service.downloadNotes({ creatorId, noteIds: ids })).taskId,
+    );
+    expect(task).toMatchObject({
+      state: 'completed',
+      total: 205,
+      completed: 205,
+      remaining: 0,
+    });
+    expect(save).toHaveBeenCalledTimes(205);
+    expect(source.detail).not.toHaveBeenCalled();
+    expect(task).not.toHaveProperty('directory');
+    expect(task).not.toHaveProperty('cursor');
+  }, 60000);
+  it('resumes a cancelled list from its committed page without replaying or losing prior metadata', async () => {
+    let startedSecond = false;
+    (source.list as jest.Mock).mockImplementation(
+      async (_id, cursor, signal: AbortSignal) => {
+        if (cursor === null)
+          return {
+            authorId: author.id,
+            nextCursor: 'c1',
+            notes: [
+              {
+                authorId: author.id,
+                noteId: 'one',
+                title: 'one',
+                kind: 'image-text',
+                publishedAt: 0,
+              },
+            ],
+          };
+        startedSecond = true;
+        return new Promise((_resolve, reject) =>
+          signal.addEventListener(
+            'abort',
+            () => reject(Error('synthetic abort')),
+            { once: true },
+          ),
+        );
+      },
+    );
+    const first = await service.refresh({ id: creatorId });
+    while (!startedSecond) await new Promise((r) => setTimeout(r, 5));
+    await service.cancelTask(first);
+    expect(await settled(first.taskId)).toMatchObject({
+      state: 'cancelled',
+      completed: 1,
+    });
+    (source.list as jest.Mock).mockImplementation(async (_id, cursor) => {
+      expect(cursor).toBe('c1');
+      return {
+        authorId: author.id,
+        nextCursor: null,
+        notes: [
+          {
+            authorId: author.id,
+            noteId: 'two',
+            title: 'two',
+            kind: 'image-text',
+            publishedAt: 0,
+          },
+        ],
+      };
+    });
+    const resumed = await service.resumeTask(first);
+    expect(resumed.taskId).not.toBe(first.taskId);
+    expect(await finish(resumed.taskId)).toMatchObject({
+      state: 'completed',
+      completed: 2,
+      total: 2,
+    });
+    expect(await db.xhsNote.count()).toBe(2);
+    expect(await service.task(first)).toMatchObject({ state: 'cancelled' });
+  });
+  it('keeps cancellation terminal when creator validation finishes after cancellation', async () => {
+    const original = (service as any).creator.bind(service);
+    let calls = 0,
+      release!: () => void;
+    const validation = jest
+      .spyOn(service as any, 'creator')
+      .mockImplementation(async (id: unknown) => {
+        const creator = await original(id);
+        if (calls++ === 1)
+          await new Promise<void>((resolve) => (release = resolve));
+        return creator;
+      });
+    const task = await service.refresh({ id: creatorId });
+    while (!release) await new Promise((r) => setTimeout(r, 5));
+    await service.cancelTask(task);
+    release();
+    expect(await settled(task.taskId)).toMatchObject({
+      state: 'cancelled',
+      completed: 0,
+    });
+    expect(source.list).not.toHaveBeenCalled();
+    validation.mockRestore();
+  });
+  it('stops repeated cursors with earlier page/checkpoint data intact', async () => {
+    (source.list as jest.Mock).mockImplementation(async (_id, cursor) => ({
+      authorId: author.id,
+      nextCursor: 'same',
+      notes: [
+        {
+          authorId: author.id,
+          noteId: cursor === null ? 'one' : 'two',
+          title: '',
+          kind: 'image-text',
+          publishedAt: 0,
+        },
+      ],
+    }));
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_CURSOR_CYCLE',
+      total: 1,
+      completed: 1,
+    });
+    expect(await db.xhsNote.count()).toBe(1);
+    expect(source.list).toHaveBeenCalledTimes(2);
+  });
+  it('blocks a duplicate-only page even when the supplier keeps changing cursors', async () => {
+    (source.list as jest.Mock).mockImplementation(async (_id, cursor) => ({
+      authorId: author.id,
+      nextCursor: cursor === null ? 'c1' : 'c2',
+      notes: [
+        {
+          authorId: author.id,
+          noteId: 'same-note',
+          title: '',
+          kind: 'image-text',
+          publishedAt: 0,
+        },
+      ],
+    }));
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_LIST_NO_PROGRESS',
+      total: 1,
+    });
+    expect(source.list).toHaveBeenCalledTimes(2);
+    expect(await db.xhsNote.count()).toBe(1);
+  });
+  it('resumes only unfinished downloads, preserves saved content, and blocks changed destinations', () => {
+    trackedDownloadResume = (async () => {
+      (source.list as jest.Mock).mockResolvedValue({
+        authorId: author.id,
+        nextCursor: null,
+        notes: ['one', 'two'].map((noteId) => ({
+          authorId: author.id,
+          noteId,
+          title: '',
+          kind: 'image-text',
+          publishedAt: 0,
+        })),
+      });
+      await finish((await service.refresh({ id: creatorId })).taskId);
+      let allowSecond = false;
+      (source.detail as jest.Mock).mockImplementation(
+        async (_author, noteId) => {
+          if (noteId === 'two' && !allowSecond)
+            throw new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED');
+          return detail(noteId);
+        },
+      );
+      const save = jest.fn(async () => ({ alreadySaved: false }));
+      service.bindLocalSaver(async () => root, save);
+      const first = await service.downloadNotes({
+        creatorId,
+        noteIds: [noteKey('one'), noteKey('two')],
+      });
+      expect(await finish(first.taskId)).toMatchObject({
+        state: 'partial',
+        completed: 1,
+        failed: 1,
+        code: 'XHS_ACCESS_CONTEXT_EXPIRED',
+      });
+      await settled(first.taskId);
+      const old = await db.xhsNote.findUniqueOrThrow({
+        where: { id: noteKey('one') },
+      });
+      service.bindLocalSaver(async () => path.join(root, 'changed'), save);
+      await expect(service.resumeTask(first)).rejects.toThrow(
+        'XHS_RESUME_DIRECTORY_CHANGED',
+      );
+      service.bindLocalSaver(async () => root, save);
+      allowSecond = true;
+      expect(
+        await finish((await service.resumeTask(first)).taskId),
+      ).toMatchObject({
+        state: 'completed',
+        completed: 2,
+        failed: 0,
+        remaining: 0,
+      });
+      expect(save).toHaveBeenCalledTimes(2);
+      expect(source.detail).toHaveBeenCalledTimes(3);
+      expect(
+        await db.xhsNote.findUnique({ where: { id: noteKey('one') } }),
+      ).toEqual(old);
+    })();
+    return trackedDownloadResume;
+  }, 30000);
+  it('cancels during an in-flight list without committing the returned page', async () => {
+    let release!: (v: any) => void;
+    (source.list as jest.Mock).mockImplementation(
+      () => new Promise((r) => (release = r)),
+    );
+    const { taskId } = await service.refresh({ id: creatorId });
+    while (!release) await new Promise((r) => setTimeout(r, 5));
+    expect(await service.cancelTask({ taskId })).toMatchObject({
+      state: 'cancelled',
+    });
+    release({ authorId: author.id, notes: [], nextCursor: null });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(await db.xhsNote.count()).toBe(0);
+    expect(await service.task({ taskId })).toMatchObject({
+      state: 'cancelled',
+    });
+  });
+  it('recovers interrupted state as blocked without dispatching requests', async () => {
+    const document = {
+      taskId: 'restart',
+      creatorId,
+      state: 'running',
+      kind: 'download',
+      total: 2,
+      completed: 1,
+      skipped: 0,
+      failed: 0,
+      remaining: 1,
+      noteIds: ['synthetic'],
+      items: {},
+      message: '',
+    };
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks VALUES ('restart', ${creatorId}, 'running', ${JSON.stringify(document)}, 1)`;
+    await service.onModuleInit();
+    expect(await service.task({ taskId: 'restart' })).toMatchObject({
+      state: 'blocked',
+      code: 'XHS_TASK_INTERRUPTED',
+      completed: 1,
+      remaining: 1,
+    });
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+  it('keeps cancellation terminal if an in-flight detail subsequently rejects', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    let rejectDetail!: (error: Error) => void;
+    (source.detail as jest.Mock).mockImplementation(
+      () => new Promise((_resolve, reject) => (rejectDetail = reject)),
+    );
+    const { taskId } = await service.downloadNotes({
+      creatorId,
+      noteIds: [noteKey('note-a')],
+    });
+    while (!rejectDetail) await new Promise((r) => setTimeout(r, 5));
+    await service.cancelTask({ taskId });
+    rejectDetail(new Error('synthetic late transport failure'));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(await service.task({ taskId })).toMatchObject({
+      state: 'cancelled',
+      failed: 0,
+      remaining: 1,
+    });
+    expect(
+      await db.xhsNote.findUnique({ where: { id: noteKey('note-a') } }),
+    ).toMatchObject({ status: 'listed', contentHtml: null });
+  });
+  it('filters cached title/body and Shanghai dates without inventing unknown dates', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    expect(
+      (await cache.notes(creatorId, { creatorId, dateStart: '2025-01-01' }))
+        .items,
+    ).toHaveLength(0);
+    await finish(
+      (await service.downloadNotes({ creatorId, noteIds: [noteKey('note-a')] }))
+        .taskId,
+    );
+    expect(
+      (
+        await cache.notes(creatorId, {
+          creatorId,
+          search: '检索正文',
+          dateStart: '2025-10-09',
+          dateEnd: '2025-10-09',
+        })
+      ).items,
+    ).toHaveLength(1);
+    expect(
+      (await cache.notes(creatorId, { creatorId, search: 'unmatched' })).items,
+    ).toHaveLength(0);
+    expect(
+      xhsNoteFilterSchema.safeParse({ creatorId, dateStart: '2025-02-30' })
+        .success,
+    ).toBe(false);
+    expect(
+      xhsNoteFilterSchema.safeParse({
+        creatorId,
+        dateStart: '2025-10-10',
+        dateEnd: '2025-10-09',
+      }).success,
+    ).toBe(false);
+  });
+  it('rolls back a mismatched author page without downgrading old complete content', async () => {
+    await finish((await service.refresh({ id: creatorId })).taskId);
+    await finish(
+      (await service.downloadNotes({ creatorId, noteIds: [noteKey('note-a')] }))
+        .taskId,
+    );
+    const old = await db.xhsNote.findMany();
+    (source.list as jest.Mock).mockResolvedValue({
+      authorId: author.id,
+      nextCursor: null,
+      notes: [
+        {
+          noteId: 'first',
+          authorId: author.id,
+          title: '',
+          publishedAt: 0,
+          kind: 'image-text',
+        },
+        {
+          noteId: 'foreign',
+          authorId: 'foreign',
+          title: '',
+          publishedAt: 0,
+          kind: 'image-text',
+        },
+      ],
+    });
+    expect(
+      await finish((await service.refresh({ id: creatorId })).taskId),
+    ).toMatchObject({ state: 'blocked', total: 0, completed: 0 });
+    expect(await db.xhsNote.findMany()).toEqual(old);
+  });
+});
+
+describe('Redbook split adapter', () => {
+  it('maps all 32 notes with stable author identity and retains the page bound', () => {
+    const notes = Array.from({ length: 32 }, (_, i) => ({
+      note_id: `synthetic-page-${i}`,
+      xsec_token: `synthetic-token-${i}`,
+      type: 'normal',
+      display_title: `synthetic title ${i}`,
+      time: 1760000000,
+      user: { user_id: author.id },
+      cover: {},
+      interact_info: {},
+    }));
+    const page = { notes, has_more: true, cursor: 'synthetic-next' };
+    const mapped = mapRedbookPage(page, author.id);
+    expect(mapped.notes).toHaveLength(32);
+    expect(mapped.notes[31]).toEqual({
+      noteId: 'synthetic-page-31',
+      authorId: author.id,
+      xsecToken: 'synthetic-token-31',
+    });
+    expect(mapped).toMatchObject({
+      nextCursor: 'synthetic-next',
+      hasMore: true,
+    });
+    expect(() =>
+      mapRedbookPage(
+        { ...page, notes: Array.from({ length: 61 }, () => notes[0]) },
+        author.id,
+      ),
+    ).toThrow('REDBOOK_SCHEMA_REJECTED');
+    expect(() =>
+      mapRedbookPage(
+        {
+          ...page,
+          notes: [
+            ...notes.slice(0, 31),
+            { ...notes[31], user: { user_id: 'foreign-author' } },
+          ],
+        },
+        author.id,
+      ),
+    ).toThrow('REDBOOK_AUTHOR_MISMATCH');
+  });
+  it('upgrades allowlisted CDN images to HTTPS and rejects non-CDN sources', () => {
+    expect(
+      allowedRedbookMediaUrl('http://sns-webpic-qc.xhscdn.com/synthetic.jpg')
+        .href,
+    ).toBe('https://sns-webpic-qc.xhscdn.com/synthetic.jpg');
+    expect(() =>
+      allowedRedbookMediaUrl('http://127.0.0.1/synthetic.jpg'),
+    ).toThrow();
+    expect(() =>
+      allowedRedbookMediaUrl(
+        'http://sns-webpic-qc.xhscdn.com:80/synthetic.jpg',
+      ),
+    ).toThrow();
+  });
+  it('requires verified profile and performs zero media/detail calls during profile/list actions', async () => {
+    const client = {
+      getUserInfo: jest.fn(async () => ({
+        schema: 'synthetic-reviewed',
+        author,
+      })),
+      getUserNotes: jest.fn(async () => ({
+        notes: [
+          {
+            note_id: 'note-a',
+            user: { user_id: author.id },
+            xsec_token: 'synthetic-secret',
+            display_title: '列表',
+          },
+        ],
+        has_more: false,
+        cursor: '',
+      })),
+      getNoteById: jest.fn(),
+    };
+    const profile = jest.fn((raw: any, expected: string) => {
+        if (raw.schema !== 'synthetic-reviewed' || raw.author.id !== expected)
+          throw Error('synthetic invalid schema');
+        return raw.author;
+      }),
+      media = jest.fn();
+    const adapter = new RedbookSubscriptionAdapter(
+      client,
+      { profileParser: profile },
+      media,
+    );
+    expect(await adapter.resolve(author.profileUrl)).toEqual({
+      inputKind: 'profile',
+      author,
+    });
+    expect(await adapter.list(author.id, null)).toMatchObject({
+      notes: [{ noteId: 'note-a', title: '列表', publishedAt: 0 }],
+    });
+    expect(JSON.stringify(await adapter.list(author.id, null))).not.toContain(
+      'synthetic-secret',
+    );
+    expect(client.getNoteById).not.toHaveBeenCalled();
+    expect(media).not.toHaveBeenCalled();
+    await expect(
+      new RedbookSubscriptionAdapter(client, {
+        profileParser: () => ({
+          ...author,
+          id: 'foreign',
+        }),
+      }).resolve(author.profileUrl),
+    ).rejects.toThrow('XHS_AUTHOR_MISMATCH');
+  });
+  it.each([
+    'http://www.xiaohongshu.com/explore/a',
+    'https://evil.test/explore/a',
+    'https://www.xiaohongshu.com@evil.test/explore/a',
+    'https://www.xiaohongshu.com/explore/a#token',
+  ])('rejects noncanonical links: %s', (url) =>
+    expect(() => subscriptionUrl(url)).toThrow(),
+  );
+});

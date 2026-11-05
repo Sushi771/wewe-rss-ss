@@ -1,3 +1,4 @@
+import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -88,8 +89,7 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
         path.join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of sql
-        .split(';')
+      for (const statement of splitSqliteStatements(sql)
         .map((s) => s.trim())
         .filter(Boolean))
         await prisma.$executeRawUnsafe(statement);
@@ -302,6 +302,7 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
       expect(await caller().article.retryBody(id)).toMatchObject({
         status: 'failed',
         code: 'request_failed',
+        requestFailure: { reason: 'http_status', httpStatus: status },
       });
       expect((await read()).contentHtml).toBeNull();
       expect(axios.get).toHaveBeenCalledTimes(1);
@@ -321,6 +322,22 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(await caller().article.retryBody(id)).toMatchObject({
       status: 'available',
     });
+  });
+  it('retains only a safe timeout reason and preserves the missing-body edit watermark', async () => {
+    const before = await read();
+    (axios.get as jest.Mock).mockRejectedValueOnce({
+      code: 'ETIMEDOUT',
+      message: 'secret signed URL',
+      config: { headers: { Cookie: 'SECRET' } },
+    });
+    expect(await caller().article.retryBody(id)).toMatchObject({
+      status: 'failed',
+      requestFailure: { reason: 'timeout' },
+    });
+    const after = await read();
+    expect(after.updatedAt).toEqual(before.updatedAt);
+    expect(after.contentHtml).toBeNull();
+    expect(after.lastBodyRetry).not.toMatch(/SECRET|signed|Cookie/);
   });
 
   it('未绑定旧短链明确拒绝，不备份、不请求、不写状态', async () => {
@@ -446,27 +463,14 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(axios.get).not.toHaveBeenCalled();
   });
 
-  it('备份等待期间零请求零写入，失败后可再试', async () => {
-    const before = await read();
-    let reject!: (error: Error) => void;
-    (createVerifiedSqliteBackup as jest.Mock).mockImplementationOnce(
-      () =>
-        new Promise((_resolve, fail) => {
-          reject = fail;
-        }),
+  it('全备失败不阻塞普通正文重试，且不创建快照', async () => {
+    (createVerifiedSqliteBackup as jest.Mock).mockRejectedValue(
+      new Error('备份失败'),
     );
-    const pending = caller()
-      .article.retryBody(id)
-      .catch((e) => e);
-    while (!reject) await new Promise((resolve) => setImmediate(resolve));
-    expect(axios.get).not.toHaveBeenCalled();
-    expect(await read()).toEqual(before);
-    reject(new Error('备份失败'));
-    expect((await pending).message).toContain('备份失败');
-    expect(await read()).toEqual(before);
     expect(await caller().article.retryBody(id)).toMatchObject({
       status: 'available',
     });
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
 
   it('请求期间与同篇、同号手动/定时/合集操作互斥', async () => {
@@ -494,7 +498,7 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     await expect(
       collection.collectPublicAlbums({ mpId, albumIds: [] }),
     ).rejects.toThrow('正在采集');
-    expect(createVerifiedSqliteBackup).toHaveBeenCalledTimes(1);
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
     release({ status: 200, data: page() });
     await pending;
     expect(await caller().article.retryBody(id)).toMatchObject({
@@ -532,20 +536,19 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect((await read()).lastBodyRetry).toBeNull();
   });
 
-  it('真实SQLite写正文失败使正文与状态回滚，再独立记录失败而非成功', async () => {
+  it('真实SQLite写正文失败原子回滚并返回未完成，不再进行第二次状态写入', async () => {
     const before = await read();
     await prisma.$executeRawUnsafe(
       `CREATE TRIGGER reject_body BEFORE UPDATE OF content_html ON articles BEGIN SELECT RAISE(ABORT, 'BODY_TEST_ABORT'); END`,
     );
     try {
-      expect(await caller().article.retryBody(id)).toMatchObject({
-        status: 'failed',
-        code: 'save_failed',
-        filled: false,
-      });
+      await expect(caller().article.retryBody(id)).rejects.toThrow(
+        '正文重试未完成',
+      );
       const after = await read();
       expect(after.contentHtml).toBeNull();
       expect(after.lastBodyStatus).toBe(before.lastBodyStatus);
+      expect(after.lastBodyRetry).toBe(before.lastBodyRetry);
       expect(protectedFields(after)).toEqual(protectedFields(before));
     } finally {
       await prisma.$executeRawUnsafe('DROP TRIGGER reject_body');
@@ -590,6 +593,44 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     expect(axios.get).not.toHaveBeenCalled();
     expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
   });
+  it('list and detail responses exclude raw persisted diagnostic secrets while retaining safe history', async () => {
+    const raw = JSON.stringify({
+      status: 'failed',
+      code: 'request_failed',
+      attemptedAt: time,
+      cached: true,
+      filled: false,
+      message: 'Cookie=SECRET',
+      rawError: 'SECRET',
+      requestFailure: {
+        reason: 'http_status',
+        httpStatus: 302,
+        url: 'https://evil.invalid/SECRET',
+      },
+    });
+    await prisma.article.update({
+      where: { id },
+      data: { lastBodyRetry: raw, contentHtml: oldBody },
+    });
+    const list = await caller().article.list({
+      mpId,
+      search: title,
+      limit: 20,
+    });
+    const detail = await caller().article.byId(id);
+    for (const response of [list.items[0], detail]) {
+      expect(response).not.toHaveProperty('lastBodyRetry');
+      expect(response.bodyRetryResult).toMatchObject({
+        status: 'failed',
+        requestFailure: { reason: 'http_status', httpStatus: 302 },
+      });
+      expect(JSON.stringify(response)).not.toMatch(
+        /SECRET|Cookie|evil|rawError/,
+      );
+    }
+    expect((await read()).lastBodyRetry).toBe(raw);
+  });
+
   it('accepts a current official long canonical for a canonical-ID row without changing old time', async () => {
     await prisma.article.update({
       where: { id },

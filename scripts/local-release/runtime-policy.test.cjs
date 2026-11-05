@@ -22,6 +22,18 @@ test('native canonical module checks preserve release boundaries including junct
     guardModulePath(release, 'node:fs');
     guardModulePath(release, 'fs');
     guardModulePath(release, path.join(release, 'safe.cjs'));
+    const alias = path.join(root, 'release-alias');
+    fs.symlinkSync(
+      release,
+      alias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    guardModulePath(alias, path.join(alias, 'safe.cjs'));
+    assert.throws(
+      () => guardModulePath(alias, path.join(alias, 'linked/escape.cjs')),
+      /escaped/,
+    );
+
     assert.throws(
       () => guardModulePath(release, path.join(release, 'linked/escape.cjs')),
       /escaped/,

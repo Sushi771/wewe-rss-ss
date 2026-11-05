@@ -29,10 +29,13 @@ function Read-StartupState {
   $reader = $null
   try {
     $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
-    return ($reader.ReadToEnd() | ConvertFrom-Json)
+    $text = $reader.ReadToEnd()
   } finally {
     if ($reader) { $reader.Dispose() } else { $stream.Dispose() }
   }
+  # Parse after closing the OS handle. ConvertFrom-Json may load/JIT on its
+  # first invocation; that work must not hold the destination during rename.
+  return ($text | ConvertFrom-Json)
 }
 $sha = [Security.Cryptography.SHA256]::Create()
 $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($StateFile.ToLowerInvariant()))).Replace('-', '')

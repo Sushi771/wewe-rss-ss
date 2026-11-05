@@ -1,7 +1,7 @@
 // WSH and the compatible batch launcher share the guarded startup.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn } = require('./lib.cjs').hostEffects.processes;
 const { startAtLogon } = require('./logon-start.cjs');
 const { writeProgress, showProgress } = require('./desktop-progress.cjs');
 const {
@@ -21,6 +21,7 @@ const report = path.resolve(
 const url = 'http://127.0.0.1:4000/dash/feeds';
 const backendUrl = 'http://127.0.0.1:18080/#/';
 function openBrowser() {
+  require('./lib.cjs').hostEffects.assertWritable();
   // Always pass the subscription URL, including already-running service reuse.
   // Opening a URL navigates explicitly even if Edge restores a tools tab;
   // invoking the browser with no URL would only activate that old page.
@@ -54,6 +55,7 @@ function openBrowser() {
 }
 
 async function main() {
+  require('./lib.cjs').hostEffects.assertWritable();
   const start = performance.now();
   const phases = [];
   const check = process.argv.includes('--check');

@@ -13,7 +13,12 @@ test('full RSS acceptance is bound to canonical package origin, manifest, verifi
   try {
     const scripts = path.join(root, 'scripts/local-release');
     fs.mkdirSync(scripts, { recursive: true });
-    for (const file of ['lib.cjs', 'startup-acceptance.cjs'])
+    for (const file of [
+      'lib.cjs',
+      'release-scope.cjs',
+      'scope-inventory.cjs',
+      'startup-acceptance.cjs',
+    ])
       fs.copyFileSync(path.join(__dirname, file), path.join(scripts, file));
     for (const file of ['restart.cjs', 'switch.cjs'])
       fs.writeFileSync(path.join(scripts, file), '// verified controller');

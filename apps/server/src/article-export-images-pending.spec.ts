@@ -5,6 +5,7 @@ import { buildArticleMarkdown } from './article-export';
 import { LocalArticleStore } from './article-local-save';
 import { prepareVerifiedProviderDownload } from './article-verified-download';
 import { decodeInlineImage } from './collection/image-fetch';
+import { articleContentHtml } from './collection/article-page';
 
 const png = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aS9sAAAAASUVORK5CYII=',
@@ -32,19 +33,56 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     await rm(folder, { recursive: true, force: true });
   });
 
-  it('accepts a bounded image container above the previous 10 MB limit', () => {
-    const bytes = Buffer.concat([
-      png.subarray(0, -12),
-      Buffer.alloc(10_000_001),
-      png.subarray(-12),
-    ]);
-    expect(
-      decodeInlineImage(
-        `data:image/png;base64,${bytes.toString('base64')}`,
-        30_000_000,
-      ).bytes.length,
-    ).toBe(bytes.length);
+  it('keeps many source-less slots unknown, retains actual bytes and omits empty statistics', async () => {
+    const fetcher = jest.fn();
+    const exported = await buildArticleMarkdown(
+      {
+        ...article,
+        lastBodyStatus: 'available',
+        contentHtml: `<div id="js_content"><p>可靠正文</p>${'<img>'.repeat(210)}<img src="data:image/png;base64,${png.toString('base64')}"></div>`,
+      },
+      '',
+      folder,
+      fetcher,
+      'image',
+    );
+    expect(exported.mediaComplete).toBe(false);
+    expect(exported.markdown).not.toContain('媒体完整性未确认');
+    expect(exported.markdown).toContain('可靠正文');
+    expect(exported.markdown).not.toMatch(
+      /丢失210|缺失210|指标来源|\| 指标 \|/,
+    );
+    const files = await readdir(join(folder, 'image'));
+    expect(files).toHaveLength(1);
+    expect(await readFile(join(folder, 'image', files[0]))).toEqual(png);
+    expect(fetcher).not.toHaveBeenCalled();
   });
+
+  it.each(['available', 'unavailable'])(
+    'detects lost image sources in cached and cleaned bodies with %s history',
+    async (status) => {
+      for (const html of [
+        '<div id="js_content"><p>可靠正文</p><img></div>',
+        articleContentHtml(
+          '<div id="js_content"><p>可靠正文</p><img src="javascript:alert(1)"></div>',
+        ),
+      ]) {
+        if (!html)
+          throw new Error('Cleaned fixture must retain its cached body');
+        const fetcher = jest.fn();
+        const exported = await buildArticleMarkdown(
+          { ...article, contentHtml: html, lastBodyStatus: status },
+          '',
+          undefined,
+          fetcher,
+        );
+        expect(exported.mediaComplete).toBe(false);
+        expect(exported.markdown).toContain('可靠正文');
+        expect(exported.markdown).not.toContain('媒体完整性未确认');
+        expect(fetcher).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('saves reliable text and actual image bytes, reports the limit and preserves edited duplicate notes', async () => {
     const store = new LocalArticleStore(
@@ -72,7 +110,7 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     expect(saved).toMatchObject({ imageCount: 1, mediaComplete: false });
     const markdown = await readFile(saved.markdownPath, 'utf8');
     expect(markdown).toContain('可靠正文');
-    expect(markdown).toContain('媒体完整性未确认');
+    expect(markdown).not.toContain('媒体完整性未确认');
     const images = await readdir(join(saved.directory, 'image'));
     expect(images).toHaveLength(1);
     expect(await readFile(join(saved.directory, 'image', images[0]))).toEqual(
@@ -107,12 +145,35 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
       imageCount: 1,
       mediaComplete: false,
     });
-    expect(await readFile(join(folder, 'index.md'), 'utf8')).toContain(
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).not.toContain(
       '媒体完整性未确认',
     );
     expect(() =>
       prepareVerifiedProviderDownload(url, providerArticle),
     ).toThrow();
+  });
+  it('retains per-image uncertainty even if the original body lacks a root pending marker', async () => {
+    const raw = body.replace(' data-wewe-image-pending="1"', '');
+    const prepare = prepareVerifiedProviderDownload(
+      url,
+      {
+        id: article.id,
+        mpId: 'MP_WXS_1234567890',
+        picUrl: '',
+        title: article.title,
+        url,
+        publishTime: article.publishTime,
+        contentHtml: raw,
+      },
+      true,
+    );
+    expect(await prepare(folder)).toMatchObject({
+      imageCount: 1,
+      mediaComplete: false,
+    });
+    expect(await readFile(join(folder, 'index.md'), 'utf8')).not.toContain(
+      '媒体完整性未确认',
+    );
   });
 
   it('keeps usable text when a known pending image still fails, while retaining valid images', async () => {
@@ -133,7 +194,7 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
     );
     expect(exported.mediaComplete).toBe(false);
     expect(exported.markdown).toContain('可靠正文');
-    expect(exported.markdown).toContain('媒体完整性未确认');
+    expect(exported.markdown).not.toContain('媒体完整性未确认');
     expect(exported.markdown).not.toContain('qpic.cn');
     expect(await readdir(join(folder, 'image'))).toHaveLength(1);
   });
@@ -169,5 +230,18 @@ describe('unconfirmed media preserves usable text and valid image export', () =>
         maxBytes: png.length - 1,
       }),
     ).rejects.toThrow('上限');
+  });
+  it('accepts a bounded image container above the previous 10 MB limit', () => {
+    const bytes = Buffer.concat([
+      png.subarray(0, -12),
+      Buffer.alloc(10_000_001),
+      png.subarray(-12),
+    ]);
+    expect(
+      decodeInlineImage(
+        `data:image/png;base64,${bytes.toString('base64')}`,
+        30_000_000,
+      ).bytes.length,
+    ).toBe(bytes.length);
   });
 });

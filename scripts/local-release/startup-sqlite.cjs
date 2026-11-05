@@ -1,10 +1,12 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { hash, fileHash, writeJson } = require('./lib.cjs');
+const budget = require('./space-budget.cjs');
 
 class UnsupportedBaselineValue extends Error {}
+class SourceChangedDuringPreparation extends Error {}
 const required = {
   feeds: ['collection_channel'],
   articles: ['last_body_status', 'verified_source_url', 'last_body_retry'],
@@ -44,6 +46,7 @@ function sqlite() {
   return require('node:sqlite');
 }
 function open(database) {
+  require('./lib.cjs').hostEffects.assertRuntime();
   const { DatabaseSync } = sqlite();
   const connection = new DatabaseSync(database, {
     readOnly: true,
@@ -102,6 +105,9 @@ function inspectConnection(
   migrations,
   { schemaOnly = false, capture, startupGate = false } = {},
 ) {
+  // A current schema/receipt must not let malformed or unrecognized persisted
+  // task documents reach recovery code or clear an existing source stop.
+  require('./task-document-preflight.cjs').assertTaskDocumentsInConnection(connection);
   if (!startupGate) {
     assert.deepEqual(
       connection
@@ -136,6 +142,50 @@ function inspectConnection(
     );
   }
   const applied = new Set();
+  const optionalSearch = fs.existsSync(
+    path.join(migrations, 'search-rollback.json'),
+  );
+  const searchMigration = '20261020160000_local_body_search';
+  if (optionalSearch) {
+    const marker = JSON.parse(
+      fs.readFileSync(path.join(migrations, 'search-rollback.json'), 'utf8'),
+    );
+    assert(
+      [
+        '48fdf73f4d770001bbb6de3e2383189811e56ccb',
+        'f618e48f48ff0e3df1c646cb8a666a2461815732',
+      ].includes(marker.baseSourceCommit),
+      'Rollback source changed',
+    );
+    assert.deepEqual(marker, {
+      format: 1,
+      baseSourceCommit: marker.baseSourceCommit,
+      optionalMigration: searchMigration,
+    });
+    const inventory = [...expected.keys()]
+      .filter((name) => name !== searchMigration)
+      .map((name) => [
+        name,
+        hash(
+          fs
+            .readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8')
+            .replace(/\r\n/g, '\n'),
+        ),
+      ]);
+    assert.equal(
+      hash(JSON.stringify(inventory)),
+      '952c507616467fb5b9d428e1a54a4d09ef4257be03c07654a34956bf2edb6c76',
+      'Rollback base migrations changed',
+    );
+    assert(
+      expected
+        .get(searchMigration)
+        ?.has(
+          'ff72e5e104374f9ce6b45ef8a9b0320a8bc310a26a447a33f2e4636cf2c36fad',
+        ),
+      'Rollback search migration changed',
+    );
+  }
   for (const row of connection
     .prepare(
       'SELECT migration_name,checksum,finished_at,rolled_back_at FROM _prisma_migrations',
@@ -154,19 +204,53 @@ function inspectConnection(
     applied.add(row.migration_name);
   }
   const pending = [...expected.keys()]
-    .filter((name) => !applied.has(name))
+    .filter(
+      (name) =>
+        !applied.has(name) && !(optionalSearch && name === searchMigration),
+    )
     .sort();
   assert.deepEqual(pending, [], 'Pending migrations are forbidden at startup');
-  if (startupGate || capture) {
+  if (startupGate || capture || optionalSearch) {
     // Reconstruct the packaged schema in memory. Migration receipts alone, or
     // a few selected columns, cannot establish compatibility with this client.
     const { DatabaseSync } = sqlite();
     const reference = new DatabaseSync(':memory:');
     try {
       for (const name of expected.keys())
-        reference.exec(
-          fs.readFileSync(path.join(migrations, name, 'migration.sql'), 'utf8'),
+        if (!(optionalSearch && name === searchMigration && !applied.has(name)))
+          reference.exec(
+            fs.readFileSync(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          );
+      if (optionalSearch || expected.has(searchMigration)) {
+        const schema = (db) =>
+          db
+            .prepare(
+              "SELECT type,name,tbl_name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name <> '_prisma_migrations' ORDER BY type,name",
+            )
+            .all()
+            .map((row) => ({
+              ...row,
+              // Only the two historically reversed nullable TEXT additions commute.
+              // All other SQL and the named PRAGMA contracts remain exact.
+              sql:
+                row.type === 'table' && row.name === 'feeds'
+                  ? (row.sql
+                      ?.replace(/\r\n/g, '\n')
+                      .replace(
+                        ', "local_directory" TEXT, "public_album_ids" TEXT,',
+                        ', "public_album_ids" TEXT, "local_directory" TEXT,',
+                      ) ?? null)
+                  : (row.sql?.replace(/\r\n/g, '\n') ?? null),
+            }));
+        assert.deepEqual(
+          schema(connection),
+          schema(reference),
+          'Unreviewed schema object or SQL drift',
         );
+      }
       for (const { name } of reference
         .prepare(
           "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
@@ -263,11 +347,56 @@ function inspectConnection(
     tables,
   };
 }
+function recoverHotJournal(database) {
+  require('./lib.cjs').hostEffects.assertRuntime();
+  require('./lib.cjs').hostEffects.assertWritable();
+  if (
+    fs.existsSync(database + '-journal') &&
+    fs.statSync(database + '-journal').size
+  ) {
+    // Let SQLite recover its own hot rollback journal after an interrupted write.
+    // No backup restore, migration, journal-mode change or application DML.
+    const recovery = new (sqlite().DatabaseSync)(database, { timeout: 10000 });
+    try {
+      recovery.prepare('PRAGMA schema_version').get();
+    } finally {
+      recovery.close();
+    }
+  }
+}
 function inspectDatabase(database, migrations, options) {
-  database = fs.realpathSync(database);
+  require('./lib.cjs').hostEffects.assertRuntime();
+  database = fs.realpathSync.native(database);
+  if (options?.startupGate) recoverHotJournal(database);
   const connection = open(database);
   try {
     return inspectConnection(connection, database, migrations, options);
+  } finally {
+    connection.close();
+  }
+}
+function auditCurrentDatabase(database, migrations, baselineFile) {
+  require('./lib.cjs').hostEffects.assertRuntime();
+  database = fs.realpathSync.native(database);
+  recoverHotJournal(database);
+  const before = fs.statSync(database, { bigint: true });
+  const connection = open(database);
+  try {
+    inspectConnection(connection, database, migrations, {
+      startupGate: true,
+      schemaOnly: true,
+    });
+    const inspection = inspectConnection(connection, database, migrations, {
+      schemaOnly: true,
+    });
+    const after = fs.statSync(database, { bigint: true });
+    assert.equal(
+      String(before.dev) + '/' + before.ino,
+      String(after.dev) + '/' + after.ino,
+      'Startup source replaced',
+    );
+    writeJson(baselineFile, inspection);
+    return inspection;
   } finally {
     connection.close();
   }
@@ -276,6 +405,7 @@ function sourceIdentity(database) {
   return [database, database + '-wal'].map((file) => {
     try {
       const stat = fs.statSync(file, { bigint: true });
+      if (file.endsWith('-wal') && stat.size === 0n) return null;
       return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(
         String,
       );
@@ -285,8 +415,173 @@ function sourceIdentity(database) {
     }
   });
 }
+function snapshotEqual(source, copied) {
+  const schema = (connection) =>
+    connection
+      .prepare(
+        'SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name',
+      )
+      .all();
+  try {
+    assert.deepEqual(schema(source), schema(copied));
+  } catch {
+    return false;
+  }
+  for (const { name } of source
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+    .all()) {
+    const info = source.prepare(`PRAGMA table_info(${quote(name)})`).all();
+    const primary = info
+      .filter((row) => row.pk)
+      .sort((a, b) => a.pk - b.pk)
+      .map((row) => quote(row.name));
+    const query = `SELECT ${info.map((row) => quote(row.name)).join(',')} FROM ${quote(name)} ORDER BY ${primary.length ? primary.join(',') : 'rowid'}`;
+    const rows = (connection) => {
+      const statement = connection.prepare(query);
+      statement.setReadBigInts(true);
+      statement.setReturnArrays(true);
+      return statement.iterate();
+    };
+    const original = rows(source),
+      duplicate = rows(copied);
+    for (;;) {
+      const left = original.next(),
+        right = duplicate.next();
+      if (left.done || right.done) {
+        if (left.done !== right.done) return false;
+        break;
+      }
+      if (left.value.length !== right.value.length) return false;
+      for (let i = 0; i < left.value.length; i++) {
+        const a = left.value[i],
+          b = right.value[i];
+        if (a instanceof Uint8Array && b instanceof Uint8Array) {
+          if (!Buffer.from(a).equals(Buffer.from(b))) return false;
+        } else if (!Object.is(a, b)) return false;
+      }
+    }
+  }
+  return true;
+}
+function verifyCurrentSnapshot(database, backup, stage) {
+  // An unpinned observer notices commits made during the pinned row comparison.
+  const observer = new (sqlite().DatabaseSync)(database, { readOnly: true });
+  const current = open(database),
+    copied = open(backup);
+  try {
+    const version = observer.prepare('PRAGMA data_version').get().data_version;
+    if (
+      !snapshotEqual(current, copied) ||
+      observer.prepare('PRAGMA data_version').get().data_version !== version
+    )
+      throw new SourceChangedDuringPreparation(
+        'SQLite source changed during startup ' + stage,
+      );
+  } finally {
+    current.close();
+    copied.close();
+    observer.close();
+  }
+}
 async function prepareStart(database, migrations, backupRoot, baselineFile) {
-  database = fs.realpathSync(database);
+  require('./lib.cjs').hostEffects.assertRuntime();
+  require('./lib.cjs').hostEffects.assertWritable();
+  database = fs.realpathSync.native(database);
+  backupRoot = budget.canonical(backupRoot);
+  if (budget.inside(backupRoot, database))
+    throw new Error('Nested source/destination refused');
+  const receipt = budget.reuseFile(backupRoot, database);
+  const identity = sourceIdentity(database);
+  try {
+    const previous = JSON.parse(fs.readFileSync(receipt, 'utf8'));
+    if (
+      previous.recoveryOrigin?.kind === 'protected' &&
+      previous.source === database &&
+      budget.inside(backupRoot, budget.canonical(previous.backup)) &&
+      fileHash(previous.backup) === previous.sha256
+    ) {
+      const source = open(database),
+        copied = open(previous.backup);
+      try {
+        if (snapshotEqual(source, copied)) {
+          inspectConnection(copied, previous.backup, migrations, {
+            schemaOnly: true,
+          });
+          const inspection = inspectConnection(source, database, migrations);
+          if (fileHash(previous.backup) !== previous.sha256)
+            throw new Error('Recovery point changed during verification');
+          verifyCurrentSnapshot(database, previous.backup, 'reuse');
+          writeJson(baselineFile, inspection);
+          return {
+            backup: {
+              ...previous,
+              reused: true,
+              reuseProof: 'all-schema-and-typed-rows-pinned-snapshot-v1',
+            },
+            inspection,
+          };
+        }
+      } finally {
+        source.close();
+        copied.close();
+      }
+    }
+  } catch (error) {
+    if (
+      error instanceof SourceChangedDuringPreparation ||
+      fs.existsSync(baselineFile)
+    )
+      throw error;
+  }
+  const scope =
+    process.env.SQLITE_BACKUP_KIND === 'test'
+      ? process.env.SQLITE_TEST_BUDGET_ROOT || backupRoot
+      : backupRoot;
+  if (!budget.inside(budget.canonical(scope), backupRoot))
+    throw new Error('Backup escapes test budget root');
+  budget.preflight(scope, budget.estimate(database));
+  const unlock = budget.lease(scope);
+  try {
+    budget.preflight(scope, budget.estimate(database));
+    const result = await freshPrepareStart(
+      database,
+      migrations,
+      backupRoot,
+      baselineFile,
+    );
+    Object.assign(result.backup, {
+      sourceIdentity: identity,
+      recoveryOrigin: {
+        format: 'sqlite-recovery-origin-v1',
+        kind: 'protected',
+      },
+      native: true,
+      reused: false,
+    });
+    budget.replaceJson(
+      path.join(path.dirname(result.backup.backup), 'verification.json'),
+      result.backup,
+    );
+    budget.replaceJson(receipt, result.backup);
+    return result;
+  } catch (error) {
+    budget.replaceJson(path.join(backupRoot, 'last-failure.json'), {
+      failure: error.message,
+      existingFilesRetained: true,
+    });
+    throw error;
+  } finally {
+    unlock();
+  }
+}
+async function freshPrepareStart(
+  database,
+  migrations,
+  backupRoot,
+  baselineFile,
+) {
+  require('./lib.cjs').hostEffects.assertWritable();
+  database = fs.realpathSync.native(database);
   const identity = sourceIdentity(database);
   const connection = open(database);
   try {
@@ -331,6 +626,7 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
     } finally {
       duplicate.close();
     }
+    verifyCurrentSnapshot(database, destination, 'backup');
     connection.close();
     assert.deepEqual(
       sourceIdentity(database),
@@ -355,6 +651,7 @@ async function prepareStart(database, migrations, backupRoot, baselineFile) {
 }
 module.exports = {
   inspectDatabase,
+  auditCurrentDatabase,
   prepareStart,
   digestRows,
   UnsupportedBaselineValue,

@@ -1,8 +1,9 @@
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const { parseArgs } = require('node:util');
 const Module = require('node:module');
 const { isIP } = require('node:net');
+const { actualEngineCommit, sqliteRuntimeUrl } = require('./engine-audit.cjs');
 const {
   verifyReleaseAsync,
   fileHash,
@@ -112,7 +113,7 @@ function guardModulePath(release, resolved) {
   // ancestor walk repeated for every dependency in the immutable package.
   if (
     !Module.isBuiltin(resolved) &&
-    !inside(release, fs.realpathSync.native(resolved))
+    !inside(fs.realpathSync.native(release), fs.realpathSync.native(resolved))
   )
     throw new Error('Runtime dependency escaped the fixed release');
 }
@@ -121,7 +122,7 @@ function guardNativePath(release, manifest, file) {
   const canonical = fs.realpathSync.native(file);
   const relative = path.relative(release, canonical).replace(/\\/g, '/');
   if (
-    !inside(release, canonical) ||
+    !inside(fs.realpathSync.native(release), canonical) ||
     !relative.endsWith('.node') ||
     !manifest.files[relative] ||
     fileHash(canonical) !== manifest.files[relative]
@@ -130,6 +131,8 @@ function guardNativePath(release, manifest, file) {
 }
 
 async function runtime() {
+  require('./lib.cjs').hostEffects.assertRuntime();
+  require('./lib.cjs').hostEffects.assertWritable();
   const { values, positionals } = parseArgs({
     allowPositionals: true,
     options: {
@@ -165,6 +168,7 @@ async function runtime() {
     throw new Error('必须明确指定已有数据库的绝对路径');
   const database = fs.realpathSync(values.database);
   if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');
+  if (command === 'start') require('./project-writer-gate.cjs').acquireWriter(database);
   const server = path.join(release, 'server');
   const compact = manifest.executionLayout === 'compact-cjs-v1';
   if (manifest.executionLayout && !compact)
@@ -187,6 +191,7 @@ async function runtime() {
     return dlopen.call(this, module, file, ...args);
   };
   const python = process.env.SQLITE_BACKUP_PYTHON || 'python';
+  process.env.PYTHONDONTWRITEBYTECODE = '1';
   const backgroundAudit =
     command === 'start' &&
     manifest.startupPreparation === 'node-background-backup-v1' &&
@@ -215,9 +220,10 @@ async function runtime() {
           ]),
         );
   const env = cleanEnvironment({
-    DATABASE_URL: 'file:' + database.replace(/\\/g, '/'),
+    DATABASE_URL: sqliteRuntimeUrl(database),
     NODE_ENV: 'production',
     DATABASE_TYPE: 'sqlite',
+    PYTHONDONTWRITEBYTECODE: '1',
   });
   for (const key of Object.keys(process.env))
     if (/^(NODE_OPTIONS|NODE_PATH|PRISMA_.*|DATABASE_URL)$/i.test(key))
@@ -226,6 +232,14 @@ async function runtime() {
   process.chdir(server);
   const clientPath = require.resolve('@prisma/client', { paths: [server] });
   const { PrismaClient, Prisma } = require(clientPath);
+  const engineCommit = actualEngineCommit(
+    path.join(path.dirname(clientPath), 'query_engine-windows.dll.node'),
+  );
+  if (
+    manifest.prisma.engineCommit &&
+    engineCommit !== manifest.prisma.engineCommit
+  )
+    throw new Error('Native Prisma engine differs from release manifest');
   if (Prisma.prismaVersion.client !== manifest.prisma.clientVersion)
     throw new Error('运行时 Client 版本不一致');
   const client = new PrismaClient();
@@ -306,6 +320,8 @@ async function runtime() {
       prisma: Prisma.prismaVersion,
       clientPath,
       engineSha256: manifest.prisma.engineSha256,
+      actualEngineCommit: engineCommit,
+      sqliteConnectionLimit: 1,
       counts,
       schemaCompatibility: manifest.schemaCompatibility,
       pending: inspected.pending,
@@ -320,6 +336,10 @@ async function runtime() {
         database,
         migrations: path.join(server, 'prisma/migrations'),
         auditRoot: backgroundAudit,
+        kind: values.production ? 'production' : 'test',
+        backupRoot: values.production
+          ? require('./space-budget.cjs').productionRoot(database)
+          : undefined,
       });
   }
   // Legacy rollback bundles still carry the shared pause marker. Current

@@ -1,5 +1,5 @@
 // Run from the stable checkout after integration. No tasks/security settings.
-const fs = require('node:fs');
+const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
 const os = require('node:os');
 const { run } = require('./lib.cjs');
@@ -7,6 +7,7 @@ function installDesktop({
   root = path.resolve(__dirname, '../..'),
   testDesktop,
 } = {}) {
+  require('./lib.cjs').hostEffects.assertUnscoped();
   if (process.platform !== 'win32') throw new Error('Windows only');
   root = fs.realpathSync(root);
   const inTemporary = path.relative(os.tmpdir(), root);

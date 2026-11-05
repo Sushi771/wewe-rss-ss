@@ -20,7 +20,14 @@ const calendarDate = z
 
 export const articleFilterShape = {
   mpId: z.string().nullish(),
-  search: z.string().nullish(),
+  search: z
+    .string()
+    .trim()
+    .max(200)
+    .refine((value) => !value.includes('\0'), {
+      message: '搜索词不能包含空字符',
+    })
+    .nullish(),
   group: z.string().min(1).optional(),
   dateStart: calendarDate.optional(),
   dateEnd: calendarDate.optional(),

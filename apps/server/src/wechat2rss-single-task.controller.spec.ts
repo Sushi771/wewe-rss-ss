@@ -74,7 +74,7 @@ describe('single download HTTP task receipts; isolated queue, no network or data
     await mkdir(directory);
     const database = join(root, 'synthetic.sqlite');
     await writeFile(database, '');
-    process.env.DATABASE_URL = 'file:' + database;
+    process.env.DATABASE_URL = 'file:' + database + '?connection_limit=1';
     await writeFile(
       join(root, '.article-download-settings.json'),
       JSON.stringify({ directory, askEveryTime: false }),
@@ -159,6 +159,14 @@ describe('single download HTTP task receipts; isolated queue, no network or data
     jest.restoreAllMocks();
     process.env = { ...environment };
     await rm(root, { recursive: true, force: true });
+  });
+  it('pool options keep single-task storage on the real SQLite directory', async () => {
+    const response = await get('/single-tasks');
+    expect(response.status).toBe(200);
+    expect(response.body.tasks).toEqual([]);
+    expect(
+      (await stat(join(root, '.wechat2rss-single-downloads'))).isDirectory(),
+    ).toBe(true);
   });
   it('cache hit saves immediately without adding a subscription', async () => {
     ready = true;

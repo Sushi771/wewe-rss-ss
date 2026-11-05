@@ -11,7 +11,8 @@ const ts = require(
 function fixture(batch) {
   const requests = [],
     changes = [];
-  const jsx = (type, props) => ({ type, props });
+  const jsx = (type, props) =>
+    typeof type === 'function' ? type(props) : { type, props };
   const trpc = {
     feed: Object.fromEntries(
       ['stopSubscriptionBatch', 'resumeSubscriptionBatch'].map((name) => [
@@ -53,9 +54,41 @@ function fixture(batch) {
         return {
           useRef: (value) => ({ current: value }),
           useState: (value) => [value, () => {}],
+          useEffect: () => {},
         };
       if (name === '@nextui-org/react')
         return { Button: 'Button', Progress: 'Progress' };
+      if (name === '@web/components/SubscriptionPrimitives') {
+        const shared = { exports: {} };
+        const output = ts.transpileModule(
+          fs.readFileSync(
+            'apps/web/src/components/SubscriptionPrimitives.tsx',
+            'utf8',
+          ),
+          {
+            compilerOptions: {
+              module: ts.ModuleKind.CommonJS,
+              jsx: ts.JsxEmit.ReactJSX,
+              target: ts.ScriptTarget.ES2022,
+            },
+          },
+        ).outputText;
+        vm.runInNewContext(output, {
+          module: shared,
+          exports: shared.exports,
+          require: (dependency) => {
+            if (dependency === 'react/jsx-runtime') return { jsx, jsxs: jsx };
+            if (dependency === '@nextui-org/react' || dependency === '@web/components/AppOverlays')
+              return {
+                Progress: 'Progress',
+                Checkbox: 'Checkbox',
+                Modal: 'Modal',
+              };
+            throw new Error(`Unexpected dependency ${dependency}`);
+          },
+        });
+        return shared.exports;
+      }
       if (name === '@web/utils/trpc') return { trpc };
       throw new Error(`Unexpected dependency ${name}`);
     },
@@ -96,7 +129,7 @@ const item = {
   feedId: 'synthetic-feed',
   state: 'waiting',
   accepted: true,
-  message: '上游已受理，缓存仍在生成。',
+  message: '已开始，缓存仍在生成。',
 };
 test('actual progress component distinguishes queued, upstream accepted and synchronized cache counts', () => {
   const f = fixture({
@@ -110,11 +143,9 @@ test('actual progress component distinguishes queued, upstream accepted and sync
   });
   assert.equal(f.progress.props.value, 2);
   assert.equal(f.progress.props.maxValue, 3);
-  assert(
-    f.progress.props.label.includes('排队 1 · 上游已受理 2 · 缓存已同步 1'),
-  );
-  assert(f.text.includes('等待缓存'));
-  assert(f.text.includes('缓存已同步'));
+  assert(f.progress.props.label.includes('排队 1 · 已开始 2 · 内容已同步 1'));
+  assert(f.text.includes('等待内容同步'));
+  assert(f.text.includes('内容已同步'));
   assert(!f.text.includes('全部正文已完成'));
   assert.equal(f.requests.length, 0);
 });
@@ -176,4 +207,93 @@ test('cancelled and completed batches never advertise full-history or newest-art
   assert.equal(complete.progress, undefined);
   assert.equal(complete.text, '');
   assert.equal(complete.buttons.length, 0);
+});
+
+test('a terminal 14-source round exposes skipped gaps and offers no submission action', () => {
+  const f = fixture({
+    batchId: 'synthetic-round',
+    state: 'completed',
+    items: Array.from({ length: 14 }, (_, index) => ({
+      ...item,
+      index,
+      state: index < 12 ? 'succeeded' : 'skipped',
+      accepted: index < 12,
+    })),
+    coverage: {
+      expected: 14,
+      submitted: 12,
+      completed: 12,
+      pending: 0,
+      legitimateSkipped: 0,
+      excluded: 0,
+      anomalies: 2,
+      fullyUpdated: false,
+      items: [],
+    },
+  });
+  assert(f.text.includes('本轮应更新 14'));
+  assert(f.text.includes('本轮已提交 12'));
+  assert(f.text.includes('已完成 12'));
+  assert(f.text.includes('异常 2'));
+  assert(f.text.includes('本轮尚未全部更新完成。'));
+  assert(!f.text.includes('本轮全部更新完成。'));
+  assert.equal(f.buttons.length, 0);
+  assert.equal(f.requests.length, 0);
+});
+
+test('legal exclusions remain visibly different from a fully updated round', () => {
+  const base = {
+    batchId: 'synthetic-round',
+    state: 'completed',
+    items: [{ ...item, state: 'succeeded' }],
+  };
+  const coverage = {
+    expected: 2,
+    submitted: 1,
+    completed: 1,
+    pending: 0,
+    legitimateSkipped: 1,
+    excluded: 1,
+    anomalies: 0,
+    fullyUpdated: false,
+    items: [],
+  };
+  const excluded = fixture({ ...base, coverage });
+  assert(excluded.text.includes('已跳过 1'));
+  assert(excluded.text.includes('本轮尚未全部更新完成。'));
+  const done = fixture({
+    ...base,
+    coverage: {
+      ...coverage,
+      expected: 1,
+      legitimateSkipped: 0,
+      excluded: 0,
+      fullyUpdated: true,
+    },
+  });
+  assert(done.text.includes('本轮全部更新完成。'));
+  assert.equal(done.buttons.length, 0);
+  assert.equal(done.requests.length, 0);
+});
+
+test('an unexplained terminal gap is not invented as a legal skip or a full success', () => {
+  const f = fixture({
+    batchId: 'unconfirmed-terminal',
+    state: 'completed',
+    items: [item],
+    coverage: {
+      expected: 1,
+      submitted: 1,
+      completed: 1,
+      pending: 0,
+      legitimateSkipped: 0,
+      excluded: 0,
+      anomalies: 0,
+      fullyUpdated: false,
+      items: [],
+    },
+  });
+  assert(f.progress.props.label.includes('需核对'));
+  assert(!f.progress.props.label.includes('部分订阅已跳过'));
+  assert(!f.progress.props.label.includes('已全部更新'));
 });

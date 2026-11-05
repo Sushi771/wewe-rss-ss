@@ -107,6 +107,16 @@ export type BodyRetryResult = {
   cached: boolean;
   filled: boolean;
   message: string;
+  requestFailure?: {
+    reason:
+      | 'timeout'
+      | 'connection_refused'
+      | 'dns'
+      | 'http_status'
+      | 'network'
+      | 'invalid_response';
+    httpStatus?: number;
+  };
 };
 
 export function readBodyRetryResult(raw: string | null) {
@@ -121,20 +131,58 @@ export function readBodyRetryResult(raw: string | null) {
       typeof value.filled !== 'boolean'
     )
       return null;
-    return { ...value, message: bodyRetryMessages[value.code] };
+    const reasons = [
+      'timeout',
+      'connection_refused',
+      'dns',
+      'http_status',
+      'network',
+      'invalid_response',
+    ];
+    const failure = value.requestFailure;
+    const requestFailure =
+      value.code === 'request_failed' &&
+      failure &&
+      reasons.includes(failure.reason)
+        ? {
+            reason: failure.reason,
+            ...(failure.reason === 'http_status' &&
+            Number.isInteger(failure.httpStatus) &&
+            failure.httpStatus! >= 100 &&
+            failure.httpStatus! <= 599
+              ? { httpStatus: failure.httpStatus }
+              : {}),
+          }
+        : undefined;
+    // Never spread persisted diagnostics: legacy values may contain raw URLs/errors.
+    return {
+      status: value.status,
+      code: value.code,
+      attemptedAt: value.attemptedAt,
+      cached: value.cached,
+      filled: value.filled,
+      message: bodyRetryMessages[value.code],
+      ...(requestFailure ? { requestFailure } : {}),
+    };
   } catch {
     return null;
   }
 }
 
 class BodyRetryError extends Error {
-  constructor(public readonly code: keyof typeof bodyRetryMessages) {
+  constructor(
+    public readonly code: keyof typeof bodyRetryMessages,
+    public readonly requestFailure?: BodyRetryResult['requestFailure'],
+  ) {
     super(bodyRetryMessages[code]);
   }
 }
 
 export function bodyRetryFailure(error: unknown) {
   return error instanceof BodyRetryError ? error.code : 'save_failed';
+}
+export function bodyRetryRequestFailure(error: unknown) {
+  return error instanceof BodyRetryError ? error.requestFailure : undefined;
 }
 
 /** 一次显式请求，只访问保存且可证明身份的第一方原文，不启动桌面或读取会话。 */
@@ -178,11 +226,40 @@ export async function fetchArticleBody(
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36',
       },
     });
-    if (response.status !== 200 || typeof response.data !== 'string')
-      throw new Error();
+    if (response.status !== 200)
+      throw new BodyRetryError('request_failed', {
+        reason: 'http_status',
+        ...(Number.isInteger(response.status) &&
+        response.status >= 100 &&
+        response.status <= 599
+          ? { httpStatus: response.status }
+          : {}),
+      });
+    if (typeof response.data !== 'string')
+      throw new BodyRetryError('request_failed', {
+        reason: 'invalid_response',
+      });
     html = response.data;
-  } catch {
-    throw new BodyRetryError('request_failed');
+  } catch (error) {
+    if (error instanceof BodyRetryError) throw error;
+    const value = error as {
+      code?: string;
+      response?: { status?: number };
+    } | null;
+    const status = value?.response?.status;
+    const reason = ['ECONNABORTED', 'ETIMEDOUT'].includes(value?.code || '')
+      ? 'timeout'
+      : value?.code === 'ECONNREFUSED'
+        ? 'connection_refused'
+        : ['ENOTFOUND', 'EAI_AGAIN'].includes(value?.code || '')
+          ? 'dns'
+          : Number.isInteger(status) && status! >= 100 && status! <= 599
+            ? 'http_status'
+            : 'network';
+    throw new BodyRetryError('request_failed', {
+      reason,
+      ...(reason === 'http_status' ? { httpStatus: status } : {}),
+    });
   }
   const $ = load(html);
   if (

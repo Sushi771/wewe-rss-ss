@@ -34,7 +34,17 @@ function fixture({
     performance,
     console,
     process: { env: settings, argv: ['node', 'entry', '--reuse-only'] },
-    require(name) {
+    require: function fixtureRequire(name) {
+      if (name === './lib.cjs') {
+        const lib = require(name);
+        return {
+          hostEffects: {
+            ...lib.hostEffects,
+            fs: fixtureRequire('node:fs'),
+            processes: fixtureRequire('node:child_process'),
+          },
+        };
+      }
       if (name === 'node:fs')
         return {
           existsSync: () => edge,
@@ -82,6 +92,17 @@ function fixture({
                 )
             : async (_, action) => action(),
         };
+      assert(
+        [
+          'node:path',
+          'node:os',
+          'node:util',
+          'node:events',
+          'node:perf_hooks',
+          'node:crypto',
+        ].includes(name),
+        'Unexpected VM dependency: ' + name,
+      );
       return require(name);
     },
   };

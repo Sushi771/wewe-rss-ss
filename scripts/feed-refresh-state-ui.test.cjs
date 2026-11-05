@@ -18,6 +18,8 @@ function fixture({
   batchRunning = false,
   feedReadFails = false,
   manualBatch,
+  summaryFailed = false,
+  privateMode = false,
 } = {}) {
   let route = 'A',
     index = 0,
@@ -90,17 +92,23 @@ function fixture({
           {
             get(_, name) {
               return {
-                useQuery: () => ({
+                useQuery: (input) => ({
+                  isError: name === 'summary' && summaryFailed,
+                  isFetching: false,
                   data:
-                    name === 'list'
-                      ? { items: scope === 'feed' ? items : [] }
-                      : name === 'groups'
-                        ? { items: [] }
-                        : name === 'isRefreshAllMpArticlesRunning'
-                          ? batchRunning
-                          : name === 'manualRefreshBatches'
-                            ? { items: manualBatch ? [manualBatch] : [] }
-                            : undefined,
+                    name === 'summary'
+                      ? summaryFailed
+                        ? undefined
+                        : { articles: input.group ? 37 : 53 }
+                      : name === 'list'
+                        ? { items: scope === 'feed' ? items : [] }
+                        : name === 'groups'
+                          ? { items: [] }
+                          : name === 'isRefreshAllMpArticlesRunning'
+                            ? batchRunning
+                            : name === 'manualRefreshBatches'
+                              ? { items: manualBatch ? [manualBatch] : [] }
+                              : undefined,
                   refetch,
                 }),
                 useMutation: () => ({
@@ -168,80 +176,86 @@ function fixture({
     clearTimeout: (key) => timers.delete(key),
     window: { addEventListener() {}, removeEventListener() {} },
     require: (name) =>
-      [
-        '@web/utils/use-feed-browse-state',
-        '@web/utils/use-cache-revision',
-      ].includes(name)
-        ? {
-            useCacheRevision: () => false,
-            useFeedBrowseState: () => {
-              // Refresh lifecycle tests stay isolated; actual persistence is covered by browser tests.
-              const [search, setSearch] = react.useState('');
-              const [folderFilter, setFolderFilter] = react.useState('all');
-              const [articleDates, setArticleDates] = react.useState({
-                mode: 'day',
-                start: '',
-                end: '',
-              });
-              const [articleDirection, setArticleDirection] =
-                react.useState('desc');
-              const [articleSort, setArticleSort] =
-                react.useState('publishTime');
-              return {
-                search,
-                setSearch,
-                folderFilter,
-                setFolderFilter,
-                articleDates,
-                setArticleDates,
-                articleDirection,
-                setArticleDirection,
-                articleSort,
-                setArticleSort,
-                clearBrowseState() {},
-                browseGeneration: 0,
-              };
-            },
-          }
-        : name === '@web/utils/article-date-selection'
-          ? dateSelection
-          : name === '@wewe-rss/shared'
-            ? articleDates
-            : name === 'react'
-              ? react
-              : name === 'react/jsx-runtime'
-                ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
-                : name === '@nextui-org/react'
-                  ? ui
-                  : name === '@web/utils/trpc'
-                    ? { trpc }
-                    : name === '@web/utils/refresh-feed-view'
-                      ? {
-                          refreshFeedViews: async (...operations) => {
-                            await Promise.all(operations.map((fn) => fn()));
-                          },
-                        }
-                      : name === 'react-router-dom'
+      name === '@web/components/ArticleExportGuidance'
+        ? { __esModule: true, default: 'ArticleExportGuidance' }
+        : [
+              '@web/utils/use-feed-browse-state',
+              '@web/utils/use-cache-revision',
+            ].includes(name)
+          ? {
+              useCacheRevision: () => false,
+              useFeedBrowseState: () => {
+                // Refresh lifecycle tests stay isolated; actual persistence is covered by browser tests.
+                const [search, setSearch] = react.useState('');
+                const [folderFilter, setFolderFilter] = react.useState('all');
+                const [articleDates, setArticleDates] = react.useState({
+                  mode: 'day',
+                  start: '',
+                  end: '',
+                });
+                const [articleDirection, setArticleDirection] =
+                  react.useState('desc');
+                const [articleSort, setArticleSort] =
+                  react.useState('publishTime');
+                return {
+                  search,
+                  setSearch,
+                  folderFilter,
+                  setFolderFilter,
+                  articleDates,
+                  setArticleDates,
+                  articleDirection,
+                  setArticleDirection,
+                  articleSort,
+                  setArticleSort,
+                  clearBrowseState() {},
+                  browseGeneration: 0,
+                };
+              },
+            }
+          : name === '@web/utils/article-date-selection'
+            ? dateSelection
+            : name === '@wewe-rss/shared'
+              ? articleDates
+              : name === 'react'
+                ? react
+                : name === 'react/jsx-runtime'
+                  ? { jsx: element, jsxs: element, Fragment: 'Fragment' }
+                  : [
+                        '@nextui-org/react',
+                        '@web/components/AppOverlays',
+                        '@web/components/SubscriptionPrimitives',
+                      ].includes(name)
+                    ? ui
+                    : name === '@web/utils/trpc'
+                      ? { trpc }
+                      : name === '@web/utils/refresh-feed-view'
                         ? {
-                            useParams: () => ({ id: route }),
-                            useNavigate: () => (next) => {
-                              route =
-                                next.split('/').at(-1) === 'feeds'
-                                  ? ''
-                                  : next.split('/').at(-1);
+                            refreshFeedViews: async (...operations) => {
+                              await Promise.all(operations.map((fn) => fn()));
                             },
                           }
-                        : name === 'sonner'
-                          ? { toast }
-                          : name === 'dayjs'
-                            ? () => ({ format: () => '' })
-                            : name === '@web/utils/env'
-                              ? {
-                                  acceptanceMode: false,
-                                  privateOnlineMode: false,
-                                  serverOriginUrl: '',
-                                }
-                              : () => null,
+                        : name === 'react-router-dom'
+                          ? {
+                              useParams: () => ({ id: route }),
+                              useNavigate: () => (next) => {
+                                route =
+                                  next.split('/').at(-1) === 'feeds'
+                                    ? ''
+                                    : next.split('/').at(-1);
+                              },
+                            }
+                          : name === 'sonner'
+                            ? { toast }
+                            : name === 'dayjs'
+                              ? () => ({ format: () => '' })
+                              : name === '@web/utils/env'
+                                ? {
+                                    acceptanceMode: false,
+                                    privateOnlineMode: privateMode,
+                                    serverOriginUrl: '',
+                                  }
+                                : () => null,
   });
   function render() {
     for (let count = 0; count < 10; count++) {
@@ -289,6 +303,10 @@ function fixture({
     timers,
     render,
     button,
+    find: (predicate) => {
+      render();
+      return walk(tree, predicate);
+    },
     navigate: (id) => {
       route = id;
       render();
@@ -314,6 +332,90 @@ const complete = [
   },
 ];
 
+test('single export entry shows actual scope counts, limits ZIP to supported scopes, and closes on route change', () => {
+  const f = fixture();
+  const entry = () =>
+    f.find((n) => n.type === 'Button' && n.props.children === '导出文章');
+  entry().props.onPress();
+  assert(f.find((n) => n.type === 'Modal' && n.props.isOpen));
+  const confirm = () =>
+    f.find(
+      (n) =>
+        n.type === 'Button' &&
+        Array.isArray(n.props.children) &&
+        n.props.children[0] === '开始导出 ',
+    );
+  assert.equal(confirm().props.children[1], 37);
+  f.find((n) => n.type === 'ContentExportScope').props.onChange('all');
+  assert.match(f.text(), /公众号：Synthetic A/);
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.singleFeed,
+    true,
+  );
+  f.find(
+    (n) => n.type === 'select' && n.props['aria-label'] === '导出方式',
+  ).props.onChange({ target: { value: 'zip' } });
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.format,
+    'zip',
+  );
+  assert.equal(
+    f.find((n) => n.type === 'ArticleExportGuidance').props.scope,
+    'all',
+  );
+  assert.equal(confirm().props.children[1], 53);
+  assert.equal(
+    f.find((n) => n.type === 'option' && n.props.value === 'zip').props
+      .disabled,
+    false,
+  );
+  f.navigate('B');
+  assert(!f.find((n) => n.type === 'Modal' && n.props.isOpen));
+  f.navigate('');
+  entry().props.onPress();
+  f.find((n) => n.type === 'ContentExportScope').props.onChange('all');
+  assert.match(f.text(), /公众号：全部订阅/);
+  assert.equal(
+    f.find((n) => n.type === 'option' && n.props.value === 'zip').props
+      .disabled,
+    true,
+  );
+});
+
+test('scope read errors prevent export with retry and private mode retains ZIP without exposing local directory export', () => {
+  const f = fixture({ summaryFailed: true });
+  f.find(
+    (n) => n.type === 'Button' && n.props.children === '导出文章',
+  ).props.onPress();
+  assert(
+    f.find((n) => n.type === 'Button' && n.props.children === '重试读取篇数'),
+  );
+  assert.equal(
+    f.find(
+      (n) =>
+        n.type === 'Button' &&
+        Array.isArray(n.props.children) &&
+        n.props.children[0] === '开始导出 ',
+    ).props.isDisabled,
+    true,
+  );
+  assert.equal(f.requests.length, 0);
+  const p = fixture({ privateMode: true });
+  p.find(
+    (n) => n.type === 'Button' && n.props.children === '导出文章',
+  ).props.onPress();
+  assert.equal(
+    p.find((n) => n.type === 'select' && n.props['aria-label'] === '导出方式')
+      .props.value,
+    'zip',
+  );
+  assert.equal(
+    p.find((n) => n.type === 'option' && n.props.value === 'obsidian').props
+      .disabled,
+    true,
+  );
+});
+
 test('single-feed request remains scoped; switching and concurrent feeds never inherit mutation loading', async () => {
   const f = fixture();
   const a = f.button();
@@ -336,7 +438,7 @@ test('single-feed request remains scoped; switching and concurrent feeds never i
   await pa;
   assert.equal(f.button().text, '更新中');
   f.navigate('A');
-  assert.equal(f.button().text, '缓存已同步');
+  assert.equal(f.button().text, '内容已同步');
   f.requests[1].reject(new Error('Synthetic B failure'));
   await pb;
   f.navigate('B');
@@ -345,9 +447,37 @@ test('single-feed request remains scoped; switching and concurrent feeds never i
   assert(
     f.events.some(
       (e) =>
-        Array.isArray(e) && e[0] === 'error' && e[1] === 'Synthetic B failure',
+        Array.isArray(e) &&
+        e[0] === 'error' &&
+        e[1].includes('可再次点击更新本号重试'),
     ),
   );
+});
+
+test('multiple successful receipts emit one operation notice; mixed failure stays retryable without exposing raw errors', async () => {
+  const f = fixture();
+  const pending = f.button().props.onPress();
+  f.requests[0].resolve([complete[0], { ...complete[0], source: 'second' }]);
+  await pending;
+  assert.equal(
+    f.events.filter((e) => Array.isArray(e) && e[0] === 'success').length,
+    1,
+  );
+  const next = f.button().props.onPress();
+  f.requests[1].resolve([
+    complete[0],
+    {
+      source: 'error',
+      status: 'failed',
+      complete: false,
+      message: 'SQLITE_INTERNAL_SYNTHETIC',
+    },
+  ]);
+  await next;
+  const errors = f.events.filter((e) => Array.isArray(e) && e[0] === 'error');
+  assert.equal(errors.length, 1);
+  assert(!errors[0][1].includes('SQLITE_INTERNAL'));
+  assert.equal(f.button().props.isDisabled, false);
 });
 test('single-feed work does not label overview or other feeds as updating; batch has its own lock', async () => {
   const f = fixture();
@@ -365,7 +495,7 @@ test('single-feed work does not label overview or other feeds as updating; batch
   assert.equal(f.requests.length, 2);
   assert.equal(f.requests[1].name, 'beginRefreshAll');
   assert.equal(f.requests[1].input, undefined);
-  assert.equal(f.button(true).text, '正在受理');
+  assert.equal(f.button(true).text, '正在开始');
   f.navigate('B');
   assert.equal(f.button().text, '更新本号');
   assert.equal(f.button().props.isDisabled, true);

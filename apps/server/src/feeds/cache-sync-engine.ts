@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { Wechat2RssListedFeed } from '../collection/providers/wechat2rss';
+import { cacheFailureDiagnostic } from '../collection/cache-failure';
+import {
+  Wechat2RssListedFeed,
+  Wechat2RssRestrictionError,
+  Wechat2RssSourceStoppedError,
+} from '../collection/providers/wechat2rss';
 import { ProviderPage } from '../collection/subscription-provider';
 import { cacheSyncState, CacheSyncFeedState } from './cache-sync-state';
 
@@ -7,17 +12,29 @@ export function cacheSyncDaytime(now: number) {
   return new Date(now + 8 * 3600000).getUTCHours() >= 6;
 }
 export function cachePageFingerprint(page: ProviderPage) {
+  const bodyFailures = page.bodyFailures ?? [];
   return createHash('sha256')
     .update(
       JSON.stringify({
         articles: [...page.articles].sort((a, b) => a.id.localeCompare(b.id)),
         bodyMissing: page.bodyMissing,
         imageBlocked: page.imageBlocked,
+        bodyFailures: [...bodyFailures].sort(
+          (a, b) => a.id.localeCompare(b.id) || a.code.localeCompare(b.code),
+        ),
       }),
     )
     .digest('hex');
 }
 type LocalFeed = { id: string; mpName: string };
+function isSourceStopped(error: unknown) {
+  return (
+    error instanceof Wechat2RssRestrictionError ||
+    error instanceof Wechat2RssSourceStoppedError ||
+    (error instanceof Error &&
+      error.message === 'WECHAT2RSS_SOURCE_STOP_PERSIST_FAILED')
+  );
+}
 type Slot = {
   metadata: Wechat2RssListedFeed;
   local: LocalFeed;
@@ -31,11 +48,17 @@ type Slot = {
 };
 export type CacheSyncDependencies = {
   now(): number;
+  /** Durable adapter replaces the volatile page media queue in the main service. */
+  durableMedia?: {
+    tick(allowedFeeds: ReadonlySet<string>): Promise<void>;
+    close(): void;
+  };
   /** Operational pause keeps list imports and pending media intact. */
   mediaEnabled?(): boolean;
   onMediaBlocked?(): Promise<void>;
   mediaStopped?(): boolean;
-  /** Read-only stored-body flags, even when the upstream fingerprint is unchanged. */
+  sourceStopped?(): boolean;
+  /** Read-only stored-body fallback when text reconciliation is unavailable. */
   inspectLocalMedia?(
     id: string,
     page: ProviderPage,
@@ -43,6 +66,12 @@ export type CacheSyncDependencies = {
   list(): Promise<Wechat2RssListedFeed[]>;
   localFeeds(): Promise<LocalFeed[]>;
   read(feed: Wechat2RssListedFeed, name: string): Promise<ProviderPage>;
+  /** Reconcile text without CDN requests and return fresh stored-media readiness.
+   * Missing readiness remains pending; never reuse a previous tick's summary. */
+  syncText?(
+    id: string,
+    page: ProviderPage,
+  ): Promise<{ mediaReady?: boolean } | void>;
   sync(
     id: string,
     page: ProviderPage,
@@ -68,6 +97,7 @@ export class CacheSyncEngine {
   private rerun = false;
   private mediaBusy = false;
   private mediaBlocked = false;
+  private sourceBlocked = false;
   private stopped = false;
   private media = new Map<string, { page: ProviderPage; due: number }>();
   private nextList = 0;
@@ -87,9 +117,14 @@ export class CacheSyncEngine {
   }
   close() {
     this.stopped = true;
+    this.deps.durableMedia?.close();
   }
   async tick() {
-    if (this.stopped) return;
+    if (this.stopped || this.sourceBlocked || this.deps.sourceStopped?.()) {
+      if (this.sourceBlocked || this.deps.sourceStopped?.())
+        cacheSyncState.state = 'source-blocked';
+      return;
+    }
     if (this.busy) {
       this.rerun = true;
       return;
@@ -154,10 +189,21 @@ export class CacheSyncEngine {
               this.media.delete(id);
             }
           this.listFailures = 0;
+          cacheSyncState.metadataFailure = undefined;
           this.nextList = now + 5000;
           cacheSyncState.lastMetadataAt = new Date(now).toISOString();
           cacheSyncState.state = 'watching-cache';
-        } catch {
+        } catch (error) {
+          cacheSyncState.metadataFailure = cacheFailureDiagnostic(
+            error,
+            'metadata-read',
+            this.deps.now(),
+          );
+          if (isSourceStopped(error) || this.deps.sourceStopped?.()) {
+            this.sourceBlocked = true;
+            cacheSyncState.state = 'source-blocked';
+            return;
+          }
           this.nextList =
             now + Math.min(60000, 5000 * 2 ** Math.min(++this.listFailures, 4));
           cacheSyncState.state = 'upstream-unavailable';
@@ -176,8 +222,17 @@ export class CacheSyncEngine {
           slot.checks = 0;
         }
       }
-      // Bound fulltext traffic even when many upstream checks advance at once.
-      let readBudget = 2;
+      // Finish an account's media attempt before starting the next account.
+      await this.runMedia();
+      if (
+        this.sourceBlocked ||
+        this.deps.sourceStopped?.() ||
+        this.mediaBlocked ||
+        this.deps.mediaStopped?.() ||
+        (this.media.size > 0 && this.deps.mediaEnabled?.() === false)
+      )
+        return;
+      let readBudget = 1;
       const due = [...this.slots].sort((a, b) => a[1].nextRead - b[1].nextRead);
       for (const [id, slot] of due) {
         if (
@@ -187,23 +242,32 @@ export class CacheSyncEngine {
         )
           continue;
         if (readBudget-- <= 0) break;
+        let point: 'cache-read' | 'cache-import' = 'cache-read';
         try {
           const page = await this.deps.read(slot.metadata, slot.local.mpName);
+          point = 'cache-import';
           const fingerprint = cachePageFingerprint(page);
           // If cache HTTP lags its DB marker, keep rechecking the affected feed.
           // Never mark check_time consumed after a single unchanged/empty read.
           if (fingerprint !== slot.fingerprint) {
             await this.deps.sync(id, page, true);
+            await this.deps.syncText?.(id, page);
             slot.fingerprint = fingerprint;
-            this.media.set(id, { page, due: now });
+            if (!this.deps.durableMedia) this.media.set(id, { page, due: now });
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
-            const local = await this.deps.inspectLocalMedia?.(id, page);
-            if (local?.mediaReady !== true)
+            // Text reconciliation already reads current local flags and rereads
+            // them after writes. Use that result instead of inspecting twice.
+            const local = this.deps.syncText
+              ? await this.deps.syncText(id, page)
+              : await this.deps.inspectLocalMedia?.(id, page);
+            if (local?.mediaReady !== true && !this.deps.durableMedia) {
               this.media.set(id, { page, due: now });
+            }
           }
           slot.failures = 0;
+          slot.status.failure = undefined;
           const delays =
             cacheSyncState.signal === 'sqlite'
               ? [1000, 2000, 5000, 15000, 30000, 60000]
@@ -218,8 +282,19 @@ export class CacheSyncEngine {
             ? 'media-pending'
             : 'synced-cache';
           cacheSyncState.lastSyncAt = slot.status.lastCacheReadAt;
+          await this.runMedia(id);
         } catch (error) {
+          if (isSourceStopped(error) || this.deps.sourceStopped?.()) {
+            this.sourceBlocked = true;
+            cacheSyncState.state = 'source-blocked';
+            return;
+          }
           slot.status.state = 'unavailable';
+          slot.status.failure = cacheFailureDiagnostic(
+            error,
+            point,
+            this.deps.now(),
+          );
           slot.nextRead =
             now +
             (error instanceof Error && error.message === 'CACHE_SYNC_BUSY'
@@ -227,10 +302,28 @@ export class CacheSyncEngine {
               : Math.min(60000, 5000 * 2 ** Math.min(++slot.failures, 4)));
         }
       }
-      // Separate lane: slow image archives never hold the metadata/list worker.
-      void this.runMedia();
     } finally {
-      if (this.mediaBlocked || this.deps.mediaStopped?.())
+      if (this.deps.durableMedia && !this.stopped) {
+        const allowed = new Set(
+          cacheSyncDaytime(this.deps.now()) &&
+            !this.sourceBlocked &&
+            !this.deps.sourceStopped?.() &&
+            !cacheSyncState.metadataFailure &&
+            this.deps.mediaEnabled?.() !== false &&
+            !this.deps.mediaStopped?.()
+            ? [...this.slots]
+                .filter(([, slot]) => slot.metadata.paused === false)
+                .map(([id]) => id)
+            : [],
+        );
+        // Discovery/recovery still runs when downloads are paused. No upstream I/O.
+        void this.deps.durableMedia.tick(allowed).catch(() => {
+          cacheSyncState.mediaFailure = 'MEDIA_WORKER_UNAVAILABLE';
+        });
+      }
+      if (this.sourceBlocked || this.deps.sourceStopped?.())
+        cacheSyncState.state = 'source-blocked';
+      else if (this.mediaBlocked || this.deps.mediaStopped?.())
         cacheSyncState.state = 'media-blocked';
       cacheSyncState.feeds = [...this.slots.values()].map((slot) => ({
         ...slot.status,
@@ -249,8 +342,10 @@ export class CacheSyncEngine {
       }
     }
   }
-  private async runMedia() {
+  private async runMedia(onlyId?: string) {
     if (
+      this.sourceBlocked ||
+      this.deps.sourceStopped?.() ||
       this.mediaBusy ||
       this.mediaBlocked ||
       this.deps.mediaStopped?.() ||
@@ -261,6 +356,7 @@ export class CacheSyncEngine {
       return;
     const entry = [...this.media].find(
       ([id, job]) =>
+        (!onlyId || id === onlyId) &&
         job.due <= this.deps.now() &&
         this.slots.get(id)?.metadata.paused !== true,
     );
@@ -294,7 +390,12 @@ export class CacheSyncEngine {
         job.due = this.deps.now() + 60000;
         slot.status.state = 'media-pending';
       }
-    } catch {
+    } catch (error) {
+      if (isSourceStopped(error) || this.deps.sourceStopped?.()) {
+        this.sourceBlocked = true;
+        cacheSyncState.state = 'source-blocked';
+        return;
+      }
       job.due = this.deps.now() + 60000;
       slot.status.state = 'media-pending';
     } finally {

@@ -1,4 +1,10 @@
 import { Wechat2RssProvider } from './wechat2rss';
+jest.mock('../wechat2rss-source-gate', () => ({
+  defaultWechat2RssSourceGate: () => ({
+    begin: async () => 'fixture',
+    finish: async () => undefined,
+  }),
+}));
 
 const number = '1234567890';
 const feedId = `MP_WXS_${number}`;
@@ -137,7 +143,7 @@ describe('Wechat2RSS private HTTP client', () => {
       'fixture-token',
     );
     await expect(provider.checkAccountStatus()).rejects.toThrow(
-      'WECHAT2RSS_REQUEST_FAILED',
+      'WECHAT2RSS_HTTP_STATUS',
     );
   });
 });
@@ -271,19 +277,19 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
       .mockResolvedValue(response({}, 500));
     await expect(
       provider().waitForAcceptedSubscription('/feed/' + number + '.xml'),
-    ).rejects.toThrow('WECHAT2RSS_REQUEST_FAILED');
+    ).rejects.toThrow('WECHAT2RSS_HTTP_STATUS');
     await jest.advanceTimersByTimeAsync(60000);
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
-  it('preserves a pending result at the overall deadline rather than accepting a late response', async () => {
+  it('stops the source at the overall deadline rather than accepting a late response', async () => {
     const fetcher = jest.spyOn(global, 'fetch').mockImplementation(async () => {
       jest.setSystemTime(Date.now() + 35000);
       return response(listed());
     });
     await expect(
       provider().waitForAcceptedSubscription('/feed/' + number + '.xml'),
-    ).resolves.toBeNull();
+    ).rejects.toThrow('WECHAT2RSS_SOURCE_STOPPED');
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(jest.getTimerCount()).toBe(0);
   });
@@ -298,7 +304,7 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
       .mockRejectedValue(expired.reason);
     await expect(
       provider().waitForAcceptedSubscription('/feed/' + number + '.xml'),
-    ).resolves.toBeNull();
+    ).rejects.toThrow('WECHAT2RSS_SOURCE_STOPPED');
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(jest.getTimerCount()).toBe(0);
   });
@@ -319,7 +325,7 @@ describe('foreground accepted-identity checks (synthetic time and HTTP only)', (
     });
     await expect(
       provider().waitForAcceptedSubscription('/feed/' + number + '.xml'),
-    ).resolves.toBeNull();
+    ).rejects.toThrow('WECHAT2RSS_SOURCE_STOPPED');
     expect(fetcher).toHaveBeenCalledTimes(6);
     expect(jest.getTimerCount()).toBe(0);
   });
