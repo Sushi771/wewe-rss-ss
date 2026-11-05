@@ -219,6 +219,31 @@ function validateRoles(roles) {
       current.schemaSha256,
       'RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION',
     );
+  const exactInstalled33 =
+    roles.current.manifestSha256 ===
+      'b40a121b0ed68dd346fa39a60fc15fd88ceae3fe136df82b6a6a552e751595b8' &&
+    roles.rollback.manifestSha256 ===
+      'b40a121b0ed68dd346fa39a60fc15fd88ceae3fe136df82b6a6a552e751595b8';
+  if (exactInstalled33) {
+    assert.equal(
+      Object.keys(current.migrations).length,
+      33,
+      'RELEASE_EXACT_33_BASELINE_REQUIRED',
+    );
+    assert.deepEqual(
+      {
+        schemaSha256: candidate.schemaSha256,
+        migrations: candidate.migrations,
+      },
+      { schemaSha256: current.schemaSha256, migrations: current.migrations },
+      'RELEASE_EXACT_33_SCHEMA_REQUIRED',
+    );
+    assert(
+      hex(roles.candidate.manifest.prisma?.engineCommit, 40),
+      'RELEASE_CANDIDATE_ENGINE_COMMIT_REQUIRED',
+    );
+    return roles;
+  }
   assert(
     roles.current.manifestSha256 === LEGACY_SHA &&
       roles.rollback.manifestSha256 === LEGACY_SHA,
