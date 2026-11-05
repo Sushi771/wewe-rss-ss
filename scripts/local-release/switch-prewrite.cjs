@@ -158,10 +158,13 @@ function fileSnapshot(
   };
 }
 function databaseFiles(database) {
+  // Database content can exceed the generic metadata-file bound.
+  // Keep a finite 2 GiB bound and the existing identity/hash/time checks.
+  const maxBytes = 2 * 1024 ** 3;
   return [
-    fileSnapshot(database),
-    fileSnapshot(database + '-wal', { optional: true }),
-    fileSnapshot(database + '-journal', { optional: true }),
+    fileSnapshot(database, { maxBytes }),
+    fileSnapshot(database + '-wal', { optional: true, maxBytes }),
+    fileSnapshot(database + '-journal', { optional: true, maxBytes }),
   ];
 }
 let runtime;
