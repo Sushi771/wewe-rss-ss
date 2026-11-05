@@ -464,6 +464,28 @@ function receiptSnapshot(db, profile) {
     })),
   };
 }
+function matchesProfileSchema(schema, profileName, profile) {
+  const variants = profile.schemaVariants ?? [];
+  if (!Array.isArray(variants) || variants.length > 1)
+    fail('SWITCH_SCHEMA_VARIANT_INVALID');
+  const accepted = [
+    canonicalSchema({ objects: profile.objects, tables: profile.tables }),
+  ];
+  for (const variant of variants) {
+    if (
+      variant.id !== 'installed-' + profileName + '-windows-v1' ||
+      !Array.isArray(variant.schema?.objects) ||
+      !variant.schema?.tables ||
+      !/^[a-f0-9]{64}$/.test(variant.schemaSha256 || '')
+    )
+      fail('SWITCH_SCHEMA_VARIANT_INVALID');
+    const exact = canonicalSchema(variant.schema);
+    if (digest(exact) !== variant.schemaSha256)
+      fail('SWITCH_SCHEMA_VARIANT_CHANGED');
+    accepted.push(exact);
+  }
+  return accepted.some((exact) => same(schema, exact));
+}
 function inspectSwitchDatabase({
   database,
   roles,
@@ -500,12 +522,7 @@ function inspectSwitchDatabase({
     )
       fail('SWITCH_SCHEMA_ATTACHED_DATABASE_FORBIDDEN');
     schema = canonicalSchema(schemaSnapshot(db));
-    if (
-      !same(
-        schema,
-        canonicalSchema({ objects: profile.objects, tables: profile.tables }),
-      )
-    )
+    if (!matchesProfileSchema(schema, profileName, profile))
       fail('SWITCH_SCHEMA_CANONICAL_MISMATCH', { stage, profile: profileName });
     if (
       !same(all(db, 'PRAGMA integrity_check'), [{ integrity_check: 'ok' }]) ||
