@@ -1,3 +1,4 @@
+import XhsSavedConnection from '@web/components/XhsSavedConnection';
 import { Modal } from '@web/components/AppOverlays';
 import {
   Button,
@@ -245,6 +246,7 @@ const AccountPage = () => {
           </div>
         ))}
       </section>
+      <XhsSavedConnection />
       <details
         onToggle={(event) => setShowLegacy(event.currentTarget.open)}
         className="rounded-lg border p-3"

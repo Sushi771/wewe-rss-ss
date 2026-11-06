@@ -85,6 +85,11 @@ export type XhsSubscriptionTask = {
   supersededByTaskId?: string;
 };
 export type XhsConnectionStatus = {
+  persistence?: {
+    autoRestore: boolean;
+    needsReconnect: boolean;
+    restoreFailed?: boolean;
+  };
   requestAttempts?: {
     instanceId: string;
     profiles: number;

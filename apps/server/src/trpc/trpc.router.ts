@@ -1677,6 +1677,19 @@ export class TrpcRouter {
       this.requireLocalXhsConnection(ctx, true);
       return this.xhsRuntime!.connectionStatus();
     }),
+    savedSession: this.trpcService.protectedProcedure.query(async ({ ctx }) => {
+      this.requireLocalXhsConnection(ctx);
+      (ctx as any).res?.setHeader('Cache-Control', 'no-store');
+      (ctx as any).res?.setHeader('Pragma', 'no-cache');
+      try {
+        return await this.xhsRuntime!.savedSession();
+      } catch {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'XHS_VAULT_OPERATION_FAILED',
+        });
+      }
+    }),
     connectSession: this.trpcService.protectedProcedure
       .input(
         z
@@ -1684,6 +1697,8 @@ export class TrpcRouter {
             a1: z.string().min(1).max(8192),
             webSession: z.string().min(1).max(8192),
             persist: z.boolean().optional(),
+            replaceSaved: z.boolean().optional(),
+            autoRestore: z.boolean().optional(),
           })
           .strict(),
       )
@@ -2633,7 +2648,8 @@ export class TrpcRouter {
               .some(
                 (name) =>
                   name.endsWith('xiaohongshu.prepareOriginalLink') ||
-                  name.endsWith('xiaohongshu.recoverSingleNote'),
+                  name.endsWith('xiaohongshu.recoverSingleNote') ||
+                  name.endsWith('xiaohongshu.savedSession'),
               )
           ) {
             res.setHeader('Cache-Control', 'no-store');

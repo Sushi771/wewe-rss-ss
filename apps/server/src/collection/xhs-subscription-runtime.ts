@@ -685,6 +685,39 @@ export class XhsSubscriptionRuntime
     )
       this.stopCode = undefined;
   }
+  private destroyed = false;
+  private persistence = {
+    autoRestore: false,
+    needsReconnect: false,
+    restoreFailed: false,
+  };
+  private startupSessionRestore: Promise<void> = Promise.resolve();
+  onModuleInit() {
+    this.startupSessionRestore = this.restoreOptedInSession();
+    return this.startupSessionRestore;
+  }
+  private async restoreOptedInSession() {
+    if (!this.enabled() || !this.options.vault?.policy) return;
+    try {
+      const policy = await this.options.vault.policy();
+      this.persistence = { ...policy, restoreFailed: false };
+      if (policy.autoRestore && !policy.needsReconnect) {
+        const result = await this.restoreSession();
+        if (!result.sessionPresent) this.persistence.restoreFailed = true;
+      }
+    } catch {
+      this.persistence.restoreFailed = true;
+    }
+  }
+  async savedSession() {
+    await this.startupSessionRestore;
+    if (!this.enabled() || !this.options.vault)
+      return failure('XHS_VAULT_UNAVAILABLE');
+    return this.change(async () => {
+      const value = checkedXhsCookies(await this.options.vault!.load());
+      return { a1: value.a1, webSession: value.web_session };
+    });
+  }
   private changing = false;
   private stored: boolean | null = null;
   private verified = false;
@@ -1273,6 +1306,12 @@ export class XhsSubscriptionRuntime
       risk = this.stopCode ?? this.persistedRisk;
     return {
       requestAttempts: { ...this.requestAttempts },
+      persistence: {
+        ...this.persistence,
+        needsReconnect:
+          this.persistence.needsReconnect ||
+          this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+      },
       liveEnabled,
       connected,
       sessionPresent: !!this.cookies,
@@ -1307,6 +1346,17 @@ export class XhsSubscriptionRuntime
     };
   }
   async connectionStatus() {
+    await this.startupSessionRestore;
+    if (this.options.vault?.policy) {
+      try {
+        this.persistence = {
+          ...this.persistence,
+          ...(await this.options.vault.policy()),
+        };
+      } catch {
+        this.persistence.restoreFailed = true;
+      }
+    }
     if (this.riskStore) {
       try {
         this.persistedRisk = await this.riskStore.read();
@@ -1359,8 +1409,16 @@ export class XhsSubscriptionRuntime
     a1: string;
     webSession: string;
     persist?: boolean;
+    replaceSaved?: boolean;
+    autoRestore?: boolean;
   }) {
+    await this.startupSessionRestore;
     if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
+    if (
+      !input.persist &&
+      (input.replaceSaved || input.autoRestore !== undefined)
+    )
+      return failure('XHS_SESSION_INPUT_INVALID');
     return this.change(async () => {
       const next = checkedXhsCookies({
         a1: input.a1,
@@ -1370,7 +1428,20 @@ export class XhsSubscriptionRuntime
         if (input.persist) {
           if (!this.options.vault) return failure('XHS_VAULT_UNAVAILABLE');
           try {
-            await this.options.vault.store(next);
+            if (input.replaceSaved) {
+              if (!this.options.vault.replace)
+                return failure('XHS_VAULT_UNAVAILABLE');
+              await this.options.vault.replace(next);
+            } else await this.options.vault.store(next);
+            if (this.options.vault.configureRestore)
+              await this.options.vault.configureRestore(
+                input.autoRestore === true,
+              );
+            if (this.options.vault.policy)
+              this.persistence = {
+                ...(await this.options.vault.policy()),
+                restoreFailed: false,
+              };
             this.stored = true;
           } catch {
             return failure('XHS_VAULT_OPERATION_FAILED');
@@ -1391,9 +1462,11 @@ export class XhsSubscriptionRuntime
     });
   }
   async restoreSession() {
+    if (this.destroyed) return failure('XHS_SESSION_CHANGED');
     if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
     return this.change(async () => {
       if (!this.options.vault) return failure('XHS_VAULT_UNAVAILABLE');
+      const generation = this.generation;
       let next: XhsSessionCookies | undefined;
       try {
         try {
@@ -1401,6 +1474,8 @@ export class XhsSubscriptionRuntime
         } catch {
           return failure('XHS_VAULT_OPERATION_FAILED');
         }
+        if (this.destroyed || generation !== this.generation)
+          return failure('XHS_SESSION_CHANGED');
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
         this.cookies = { ...next };
@@ -1415,6 +1490,7 @@ export class XhsSubscriptionRuntime
     });
   }
   async disconnectSession() {
+    await this.startupSessionRestore;
     return this.change(async () => {
       this.clearMemory();
       try {
@@ -1428,6 +1504,7 @@ export class XhsSubscriptionRuntime
     });
   }
   private async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    await this.startupSessionRestore;
     if (!this.budgetScope.getStore())
       return this.budgetScope.run({ id: '' }, () =>
         this.withSession(operation),
@@ -1551,6 +1628,14 @@ export class XhsSubscriptionRuntime
         ].includes(error.reason)
       ) {
         this.stopCode = `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
+        if (error.reason === 'authentication') {
+          this.persistence.needsReconnect = true;
+          try {
+            await this.options.vault?.markExpired?.();
+          } catch {
+            this.persistence.restoreFailed = true;
+          }
+        }
         this.verified = false;
         this.sessionAbort.abort();
         this.transientMedia.clear();
@@ -2245,6 +2330,7 @@ export class XhsSubscriptionRuntime
     );
   }
   onModuleDestroy() {
+    this.destroyed = true;
     this.clearMemory();
   }
 }
