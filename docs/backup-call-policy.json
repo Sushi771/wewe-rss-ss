@@ -274,6 +274,13 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Explicit legacy pending-owner review takes one verified backup inside the exclusive protected-write boundary, rechecks the source database fingerprint and verified backup identity before recording the reviewed historical transition; ordinary collection and status inspection do not use this boundary."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmUnboundThreePageRound",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "The explicitly confirmed three-account one-page round takes one verified protected backup inside sqliteWrites.protectedWrite, verifies source database identity and fingerprint before recording the immutable grant, and preserves original unknown history and budgets; prepare/status and each source request do not take full snapshots."
     }
   ]
 }

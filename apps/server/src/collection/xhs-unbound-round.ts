@@ -200,7 +200,7 @@ export async function admitUnboundRequest(
 ) {
   const reviews = await rows(
     tx,
-    'SELECT * FROM xhs_unbound_owner_reviews WHERE id=?',
+    'SELECT scope_json,old_task_ids_json,old_job_ids_json,creator_bindings_json FROM xhs_unbound_owner_reviews WHERE id=?',
     reviewId,
   );
   check(reviews.length === 1, 'APPROVED_NEW_ROUND_REQUIRED');
