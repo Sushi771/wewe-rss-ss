@@ -363,6 +363,7 @@ it('binds all three existing jobs, preserves unknown and budgets, supports full 
         maxRequests: 80,
         phaseLimits: input.phaseLimits,
       });
+      expect(() => JSON.stringify(plan2)).not.toThrow();
       const confirmation2 = await db.$transaction((tx) =>
         confirmFullHistoryScope(
           tx,

@@ -412,9 +412,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
   ) {
     await this.readyForMutation();
     try {
-      return await this.db.$transaction((tx) =>
+      const plan = await this.db.$transaction((tx) =>
         prepareFullHistoryScope(tx, this.fullHistoryInput(input)),
       );
+      return { digest: plan.digest, scope: plan.scope, availableRequests: plan.availableRequests };
     } catch (error) {
       return this.fullHistoryError(error);
     }
