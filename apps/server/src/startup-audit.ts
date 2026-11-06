@@ -59,6 +59,10 @@ export function assertDatabaseWritesAllowed() {
     throw new ServiceUnavailableException(startupMessage());
 }
 export async function waitForStartupAudit() {
+  const update = (globalThis as any)[
+    Symbol.for('wewe.installed-startup-gate.v1')
+  ];
+  if (update && !(await update.waitUntilEnabled())) return false;
   return startupAudit()?.ready ?? true;
 }
 export function startupAuditHttpGuard(

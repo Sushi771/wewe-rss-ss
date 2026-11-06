@@ -32,7 +32,7 @@ import {
 } from './incremental-write';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import {
-  startupAudit,
+  databaseWritesAllowed,
   waitForStartupAudit,
   assertDatabaseWritesAllowed,
 } from '../startup-audit';
@@ -458,7 +458,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       : work();
   }
   async onModuleInit() {
-    if (startupAudit()?.status === 'verifying') {
+    if (!databaseWritesAllowed()) {
       this.startupRecovery = waitForStartupAudit().then(async (ok) => {
         if (!ok || this.destroyed)
           throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');

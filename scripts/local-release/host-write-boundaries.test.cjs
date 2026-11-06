@@ -78,7 +78,11 @@ const catalog = {
   ],
   registry: ['release-scope'],
   // Read native identities, then delegate startup and update effects to reviewed hosts.
-  nativeControl: ['installed-startup-gate', 'updater/update-entry'],
+  nativeControl: [
+    'installed-startup-gate',
+    'updater/update-entry',
+    'updater/maintenance-entry',
+  ],
   gateway: ['lib', 'updater/install-binding/role-aware/lib'],
 };
 

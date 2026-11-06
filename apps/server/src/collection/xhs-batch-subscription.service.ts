@@ -1,3 +1,4 @@
+import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -82,6 +83,17 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
     if (count !== 1) fail('XHS_TASK_STATE_CHANGED');
   }
   async onModuleInit() {
+    if (!databaseWritesAllowed()) {
+      void waitForStartupAudit()
+        .then(async (ok) => {
+          if (ok) await this.onModuleInit();
+          else this.initializationFailed = true;
+        })
+        .catch(() => {
+          this.initializationFailed = true;
+        });
+      return;
+    }
     try {
       const pending = await this.db.$queryRaw<
         Array<{ id: string }>
