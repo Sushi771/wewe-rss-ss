@@ -260,6 +260,33 @@ function validateRoles(roles) {
     );
     return roles;
   }
+  // This deployed schema34 baseline admits an application-only update only.
+  const exactInstalled34 =
+    roles.current.manifestSha256 ===
+      '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d' &&
+    roles.rollback.manifestSha256 ===
+      '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d';
+  if (exactInstalled34) {
+    assert.equal(
+      Object.keys(current.migrations).length,
+      34,
+      'RELEASE_EXACT_34_BASELINE_REQUIRED',
+    );
+    assert.deepEqual(
+      {
+        schemaSha256: candidate.schemaSha256,
+        migrations: candidate.migrations,
+      },
+      { schemaSha256: current.schemaSha256, migrations: current.migrations },
+      'RELEASE_EXACT_34_SCHEMA_REQUIRED',
+    );
+    assert.equal(
+      roles.candidate.manifest.prisma.engineCommit,
+      roles.current.manifest.prisma.engineCommit,
+      'RELEASE_EXACT_34_ENGINE_REQUIRED',
+    );
+    return roles;
+  }
   const exactInstalled33 =
     roles.current.manifestSha256 ===
       'b40a121b0ed68dd346fa39a60fc15fd88ceae3fe136df82b6a6a552e751595b8' &&
