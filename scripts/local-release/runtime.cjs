@@ -56,7 +56,6 @@ function scheduledUpdatesEnabled(manifest, settings) {
     settings.enabled !== '1'
   )
     return false;
-  if (settings.mp2RssFeedKey?.trim()) return true;
   if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {
     const allowed = new Set(
       (settings.wechat2RssFeedIds || '')
@@ -386,7 +385,6 @@ async function runtime() {
       throw new Error('生产模式必须由受控切换器启动');
     const scheduled = scheduledUpdatesEnabled(manifest, {
       enabled: process.env.ENABLE_SCHEDULED_UPDATES,
-      mp2RssFeedKey: process.env.MP2RSS_FEED_KEY,
       publicAlbumFeeds,
       ownerSearchFeeds,
       ownerSearchConfigFile: process.env.OWNER_SEARCH_CONFIG_FILE,

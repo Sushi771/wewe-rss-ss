@@ -14,7 +14,6 @@ import {
 } from './owner-search-update';
 import { fetchOwnerWereadLatest } from './owner-weread-latest';
 import { continueVerifiedWereadCandidate } from './weread-publisher-validation';
-import { fetchMp2RssRecent20 } from './mp2rss';
 import { fetchArticleBody } from './article-body-retry';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { ProviderPage } from './subscription-provider';
@@ -31,7 +30,6 @@ jest.mock('./owner-weread-latest', () => ({
 jest.mock('./weread-publisher-validation', () => ({
   continueVerifiedWereadCandidate: jest.fn(),
 }));
-jest.mock('./mp2rss', () => ({ fetchMp2RssRecent20: jest.fn() }));
 jest.mock('./article-body-retry', () => ({
   ...jest.requireActual('./article-body-retry'),
   fetchArticleBody: jest.fn(),
@@ -110,7 +108,6 @@ describe('ordinary collection boundaries on synthetic SQLite', () => {
       continueVerifiedWereadCandidate,
     ])
       (fn as jest.Mock).mockResolvedValue(page);
-    (fetchMp2RssRecent20 as jest.Mock).mockResolvedValue(page.articles);
     collection = new CollectionService(db as any);
     trpc = new TrpcService(
       db as any,
@@ -339,27 +336,6 @@ describe('ordinary collection boundaries on synthetic SQLite', () => {
           .lastBodyRetry!,
       ),
     ).toMatchObject({ status: 'available' });
-  });
-
-  it('bound Mp2RSS is zero snapshot; explicit source change keeps one independent gate', async () => {
-    await db.feed.update({
-      where: { id: mpId },
-      data: { collectionChannel: 'mp2rss' },
-    });
-    await collection.collectMp2RssRecent20({ mpId, mpName: 'fixture' });
-    expect(backup).not.toHaveBeenCalled();
-    await db.feed.update({
-      where: { id: mpId },
-      data: { collectionChannel: 'owner-web-search' },
-    });
-    await expect(
-      collection.collectMp2RssRecent20({ mpId, mpName: 'fixture' }),
-    ).rejects.toThrow('SYNTHETIC_FULL_BACKUP_QUOTA');
-    expect(backup).toHaveBeenCalledTimes(1);
-    backup.mockResolvedValue({});
-    await collection.collectMp2RssRecent20({ mpId, mpName: 'fixture' });
-    expect(backup).toHaveBeenCalledTimes(2);
-    await integrity();
   });
 
   it('bound public albums use zero snapshots; changing the album set needs exactly one gate', async () => {

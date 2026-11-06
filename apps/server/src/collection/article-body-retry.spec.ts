@@ -13,12 +13,10 @@ import {
   bodyRetryAvailability,
   readBodyRetryResult,
 } from './article-body-retry';
-import { fetchMp2RssRecent20 } from './mp2rss';
 
 // 真实迁移、SQLite事务、路由和解析器；所有网络与桌面入口均为 mock。
 jest.mock('axios');
 jest.mock('./sqlite-backup', () => ({ createVerifiedSqliteBackup: jest.fn() }));
-jest.mock('./mp2rss', () => ({ fetchMp2RssRecent20: jest.fn() }));
 
 const mpId = 'MP_WXS_1234567890';
 const id = 'R'.repeat(22);
@@ -196,7 +194,6 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
         timeout: 15000,
       }),
     );
-    expect(fetchMp2RssRecent20).not.toHaveBeenCalled();
     (axios.get as jest.Mock).mockResolvedValueOnce({
       status: 200,
       data: page({ body: '<p>后来的正文不得替换</p>' }),
@@ -492,9 +489,6 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     await expect(
       trpc.refreshMpArticlesAndUpdateFeed(mpId, 1, 'local-manual'),
     ).rejects.toThrow('正在采集');
-    await expect(
-      collection.collectMp2RssRecent20({ mpId, mpName: '单篇隔离测试号' }),
-    ).rejects.toThrow('正在更新');
     await expect(
       collection.collectPublicAlbums({ mpId, albumIds: [] }),
     ).rejects.toThrow('正在采集');

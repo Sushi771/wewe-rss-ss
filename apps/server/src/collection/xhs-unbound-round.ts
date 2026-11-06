@@ -77,11 +77,11 @@ export async function prepareUnboundRound(
   );
   const tasks = await rows(
     tx,
-    'SELECT id,creator_id,state,document,updated_at FROM xhs_subscription_tasks ORDER BY id',
+    'SELECT id,creator_id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_subscription_tasks ORDER BY id',
   );
   const jobs = await rows(
     tx,
-    'SELECT id,creator_id,state,document,updated_at FROM xhs_whole_creator_jobs ORDER BY id',
+    'SELECT id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_whole_creator_jobs ORDER BY id',
   );
   check(
     tasks.every((r) =>

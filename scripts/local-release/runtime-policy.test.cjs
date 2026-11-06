@@ -98,7 +98,7 @@ test('missing, disabled and invalid bindings cannot enable anonymous scheduling'
     );
 });
 
-test('legacy desktop bundles stay disabled and the existing explicit key path is retained', () => {
+test('legacy desktop bundles and unbound schedules stay disabled', () => {
   assert.equal(
     scheduledUpdatesEnabled(
       { ...manifest, desktopHelperIncluded: true },
@@ -116,15 +116,13 @@ test('legacy desktop bundles stay disabled and the existing explicit key path is
   assert.equal(
     scheduledUpdatesEnabled(manifest, {
       enabled: '1',
-      mp2RssFeedKey: 'fixture',
       publicAlbumFeeds: [],
     }),
-    true,
+    false,
   );
   assert.equal(
     scheduledUpdatesEnabled(manifest, {
       enabled: '0',
-      mp2RssFeedKey: 'fixture',
     }),
     false,
   );

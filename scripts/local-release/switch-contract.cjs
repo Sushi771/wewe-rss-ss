@@ -259,6 +259,31 @@ function validateRoles(roles) {
     );
     return roles;
   }
+  if (
+    roles.current.manifestSha256 ===
+      '3ab20ac6ca2352940172cb42b986fa9d1e7935bd3fef4330f55a88f368d62fc3' &&
+    roles.rollback.manifestSha256 === roles.current.manifestSha256
+  ) {
+    assert.equal(
+      Object.keys(current.migrations).length,
+      35,
+      'EXACT_35_REQUIRED',
+    );
+    assert.deepEqual(
+      {
+        schemaSha256: candidate.schemaSha256,
+        migrations: candidate.migrations,
+      },
+      { schemaSha256: current.schemaSha256, migrations: current.migrations },
+      'EXACT_35_SCHEMA_REQUIRED',
+    );
+    assert.equal(
+      roles.candidate.manifest.prisma.engineCommit,
+      roles.current.manifest.prisma.engineCommit,
+      'EXACT_35_ENGINE_REQUIRED',
+    );
+    return roles;
+  }
   const exactUnboundBaseline =
     roles.current.manifestSha256 ===
       '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e' &&
