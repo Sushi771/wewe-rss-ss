@@ -639,6 +639,50 @@ export class XhsSubscriptionRuntime
     string,
     { digest: string; next: number; stopped: boolean; running: boolean }
   >();
+  private replacementSession?: { binding: string; connectedAt: number };
+  replacementSessionForReview() {
+    if (
+      !this.enabled() ||
+      this.changing ||
+      !this.cookies ||
+      !this.replacementSession ||
+      this.hasActiveSourceSessions()
+    )
+      return failure('XHS_SESSION_CHANGED');
+    if (
+      [this.stopCode, this.persistedRisk].some(
+        (code) =>
+          code &&
+          ![
+            'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+            'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+          ].includes(code),
+      )
+    )
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    return { ...this.replacementSession };
+  }
+  assertReplacementSession(binding: string, blockedAt?: bigint) {
+    const session = this.replacementSession;
+    if (!this.enabled() || this.changing || !this.cookies || !session)
+      return failure('XHS_SESSION_CHANGED');
+    if (
+      session.binding !== binding ||
+      (blockedAt !== undefined && BigInt(session.connectedAt) < blockedAt)
+    )
+      return failure('XHS_SESSION_CHANGED');
+  }
+  async refreshAfterAuthSessionReview(binding: string) {
+    this.assertReplacementSession(binding);
+    if (!this.riskStore || (await this.riskStore.read()))
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    this.persistedRisk = undefined;
+    if (
+      this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' ||
+      this.stopCode === 'XHS_SOURCE_RISK_REVIEW_REQUIRED'
+    )
+      this.stopCode = undefined;
+  }
   private changing = false;
   private stored: boolean | null = null;
   private verified = false;
@@ -1206,6 +1250,7 @@ export class XhsSubscriptionRuntime
     if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
   }
   private clearMemory() {
+    this.replacementSession = undefined;
     this.generation++;
     this.sessionAbort.abort();
     this.sessionAbort = new AbortController();
@@ -1332,6 +1377,10 @@ export class XhsSubscriptionRuntime
         if (!this.enabled()) return failure('XHS_LIVE_ACCESS_DISABLED');
         this.clearMemory();
         this.cookies = { ...next };
+        this.replacementSession = {
+          binding: createHash('sha256').update(randomUUID()).digest('hex'),
+          connectedAt: Date.now(),
+        };
         return this.snapshot();
       } finally {
         next.a1 = '';

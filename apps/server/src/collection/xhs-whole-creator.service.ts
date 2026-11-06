@@ -1,3 +1,7 @@
+import {
+  prepareAuthSessionReview,
+  confirmAuthSessionReview,
+} from './xhs-auth-session-review';
 import { prepareUnboundRound, confirmUnboundRound } from './xhs-unbound-round';
 import { runApprovedThreePages } from './round-runner';
 import { assertLegacyXhsSourceReady } from './xhs-legacy-source-fence';
@@ -1029,6 +1033,46 @@ export class XhsWholeCreatorService implements OnModuleInit {
       noteKey: result.noteKey,
     };
   }
+  private assertAuthSessionReviewIdle(
+    binding: string,
+    ownConfirmation = false,
+  ) {
+    this.runtime.assertReplacementSession(binding);
+    if (
+      this.starting.size > (ownConfirmation ? 1 : 0) ||
+      this.subscriptions.hasLocalSourceWork() ||
+      this.runtime.hasActiveSourceSessions()
+    )
+      throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+  }
+  async prepareAuthSessionThreePageRound(input: { creatorIds: string[] }) {
+    await this.readyForMutation();
+    const session = this.runtime.replacementSessionForReview();
+    this.assertAuthSessionReviewIdle(session.binding);
+    const plan = await this.db.$transaction((tx) =>
+      prepareAuthSessionReview(tx, input.creatorIds, session.binding),
+    );
+    this.runtime.assertReplacementSession(
+      session.binding,
+      BigInt(plan.originalRisk.updated_at),
+    );
+    this.assertAuthSessionReviewIdle(session.binding);
+    return {
+      digest: plan.digest,
+      creatorIds: plan.scope.creatorIds,
+      originalOutcome: 'unknown',
+      authenticationVerified: false,
+      maxListPages: 1,
+    };
+  }
+  async confirmAuthSessionThreePageRound(input: {
+    creatorIds: string[];
+    digest: string;
+    acknowledgedUnknownScope: true;
+  }) {
+    const binding = this.runtime.replacementSessionForReview().binding;
+    return this.confirmUnboundThreePageRound(input, binding);
+  }
   async prepareUnboundThreePageRound(input: { creatorIds: string[] }) {
     await this.readyForMutation();
     this.assertLegacyPendingIdle();
@@ -1046,6 +1090,15 @@ export class XhsWholeCreatorService implements OnModuleInit {
   async executeUnboundThreePageRound(input: { reviewId: string }) {
     await this.readyForMutation();
     this.assertLegacyPendingIdle();
+    const grants = await this.db.$queryRawUnsafe<Array<{ scope_json: string }>>(
+      'SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?',
+      input.reviewId,
+    );
+    if (grants.length === 1) {
+      const scope = JSON.parse(grants[0].scope_json);
+      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+        this.runtime.assertReplacementSession(scope.sessionBinding);
+    }
     this.starting.add('unbound-three-page-round');
     try {
       return await runApprovedThreePages(
@@ -1058,13 +1111,20 @@ export class XhsWholeCreatorService implements OnModuleInit {
       this.starting.delete('unbound-three-page-round');
     }
   }
-  async confirmUnboundThreePageRound(input: {
-    creatorIds: string[];
-    digest: string;
-    acknowledgedUnknownScope: true;
-  }) {
+  async confirmUnboundThreePageRound(
+    input: {
+      creatorIds: string[];
+      digest: string;
+      acknowledgedUnknownScope: true;
+    },
+    authBinding?: string,
+  ) {
     await this.readyForMutation();
-    this.assertLegacyPendingIdle();
+    const assertIdle = (own = false) =>
+      authBinding
+        ? this.assertAuthSessionReviewIdle(authBinding, own)
+        : this.assertLegacyPendingIdle(own);
+    assertIdle();
     this.starting.add('legacy-pending-review');
     try {
       let backupSha256 = '',
@@ -1072,7 +1132,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         version = '';
       const result = await sqliteWrites.protectedWrite(
         async () => {
-          this.assertLegacyPendingIdle(true);
+          assertIdle(true);
           const rows = await this.db.$queryRawUnsafe<
             Array<{ name: string; file: string }>
           >('PRAGMA database_list');
@@ -1104,7 +1164,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
         },
         () =>
           this.write(async (tx) => {
-            this.assertLegacyPendingIdle(true);
+            assertIdle(true);
             const rows = await tx.$queryRawUnsafe<
               Array<{ name: string; file: string }>
             >('PRAGMA database_list');
@@ -1115,13 +1175,37 @@ export class XhsWholeCreatorService implements OnModuleInit {
               (await legacyReviewDatabaseFingerprint(database)) !== version
             )
               throw new Error('XHS_DATABASE_CHANGED');
-            return confirmUnboundRound(
+            const confirm = authBinding
+              ? (
+                  tx: any,
+                  ids: string[],
+                  digest: string,
+                  host: any,
+                  now: bigint,
+                ) =>
+                  confirmAuthSessionReview(
+                    tx,
+                    ids,
+                    authBinding,
+                    digest,
+                    host,
+                    now,
+                  )
+              : confirmUnboundRound;
+            return confirm(
               tx,
               input.creatorIds,
               input.digest,
               {
-                assertQuiescent: async () => this.assertLegacyPendingIdle(true),
-                authorizePlan: async (plan) => {
+                ...{
+                  assertReplacementSession: async (
+                    binding: string,
+                    blockedAt?: bigint,
+                  ) =>
+                    this.runtime.assertReplacementSession(binding, blockedAt),
+                },
+                assertQuiescent: async () => assertIdle(true),
+                authorizePlan: async (plan: { digest: string }) => {
                   if (
                     input.acknowledgedUnknownScope !== true ||
                     plan.digest !== input.digest
@@ -1136,7 +1220,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
             );
           }),
       );
-      await this.runtime.refreshAfterHistoryHandoff();
+      if (authBinding)
+        await this.runtime.refreshAfterAuthSessionReview(authBinding);
+      else await this.runtime.refreshAfterHistoryHandoff();
       return result;
     } finally {
       this.starting.delete('legacy-pending-review');

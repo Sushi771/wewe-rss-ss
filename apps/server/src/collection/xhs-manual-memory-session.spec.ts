@@ -47,5 +47,32 @@ it('manual memory-only connection preserves rejection without vault writes or so
   expect(risk.finish).not.toHaveBeenCalled();
   expect(api).not.toHaveBeenCalled();
   expect(JSON.stringify(result)).not.toContain('synthetic-new');
+  const first = runtime.replacementSessionForReview();
+  expect(first.binding).toMatch(/^[a-f0-9]{64}$/);
+  expect(() =>
+    runtime.assertReplacementSession(
+      first.binding,
+      BigInt(first.connectedAt + 1),
+    ),
+  ).toThrow('XHS_SESSION_CHANGED');
+  await expect(
+    runtime.refreshAfterAuthSessionReview(first.binding),
+  ).rejects.toThrow('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+  await runtime.connectSession({
+    a1: 'synthetic-second',
+    webSession: 'synthetic-second',
+    persist: false,
+  });
+  expect(() => runtime.assertReplacementSession(first.binding)).toThrow(
+    'XHS_SESSION_CHANGED',
+  );
+  const second = runtime.replacementSessionForReview();
+  risk.read.mockImplementation(async () => undefined as any);
+  await runtime.refreshAfterAuthSessionReview(second.binding);
+  expect((await runtime.connectionStatus()).verified).toBe(false);
+  expect(api).not.toHaveBeenCalled();
   await runtime.onModuleDestroy();
+  expect(() => runtime.replacementSessionForReview()).toThrow(
+    'XHS_SESSION_CHANGED',
+  );
 });

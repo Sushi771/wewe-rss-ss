@@ -38,6 +38,8 @@ export async function runApprovedThreePages(
     const authorId = bindings[creatorId];
     let profile: any;
     for (const phase of ['profile', 'list'] as const) {
+      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+        runtime.assertReplacementSession(scope.sessionBinding);
       const request: RoundRequest = {
         operationId: randomUUID(),
         taskId: 'new-round:' + reviewId,
@@ -66,6 +68,8 @@ export async function runApprovedThreePages(
       );
       if (wait > 60000) throw Error('XHS_REQUEST_RATE_PAUSED');
       if (wait) await runtime.waitForSourceRate(wait);
+      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+        runtime.assertReplacementSession(scope.sessionBinding);
       let owner: string | undefined;
       try {
         const value: any = await dispatchUnboundContext<any>(
@@ -77,6 +81,11 @@ export async function runApprovedThreePages(
               await admitUnboundRequest(tx, reviewId, request);
               return reserveRoundBudgetRisk(tx, reviewId, request, Date.now());
             }); // COMMIT before operation enters transport.
+            if (
+              scope.reviewKind ===
+              'replacement-session-authentication-review-v1'
+            )
+              runtime.assertReplacementSession(scope.sessionBinding);
             return unboundRoundContext.run({ reviewId, request }, operation);
           },
           (permit) =>
