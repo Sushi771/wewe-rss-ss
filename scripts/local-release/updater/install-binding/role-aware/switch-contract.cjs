@@ -219,6 +219,47 @@ function validateRoles(roles) {
       current.schemaSha256,
       'RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION',
     );
+  const exactUnboundBaseline =
+    roles.current.manifestSha256 ===
+      '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e' &&
+    roles.rollback.manifestSha256 ===
+      '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e';
+  if (exactUnboundBaseline) {
+    assert.equal(
+      Object.keys(current.migrations).length,
+      33,
+      'RELEASE_UNBOUND_CURRENT_33_REQUIRED',
+    );
+    assert.equal(
+      Object.keys(candidate.migrations).length,
+      34,
+      'RELEASE_UNBOUND_CANDIDATE_34_REQUIRED',
+    );
+    assert.equal(
+      candidate.schemaSha256,
+      current.schemaSha256,
+      'RELEASE_UNBOUND_SCHEMA_CHANGED',
+    );
+    const additions = Object.fromEntries(
+      Object.entries(candidate.migrations).filter(
+        ([name]) => !(name in current.migrations),
+      ),
+    );
+    assert.deepEqual(
+      additions,
+      {
+        '20261106010000_xhs_unbound_round':
+          '05263fa79ce07a05f11dd243cd6c39d9158913127e8e229f4ed8cbc858e0d703',
+      },
+      'RELEASE_UNBOUND_MIGRATION_CHANGED',
+    );
+    assert.equal(
+      roles.candidate.manifest.prisma.engineCommit,
+      roles.current.manifest.prisma.engineCommit,
+      'RELEASE_UNBOUND_ENGINE_CHANGED',
+    );
+    return roles;
+  }
   const exactInstalled33 =
     roles.current.manifestSha256 ===
       'b40a121b0ed68dd346fa39a60fc15fd88ceae3fe136df82b6a6a552e751595b8' &&
