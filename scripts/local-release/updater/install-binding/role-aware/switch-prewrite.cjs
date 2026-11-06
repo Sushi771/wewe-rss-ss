@@ -264,14 +264,20 @@ function catalog() {
     data.format !== 1 ||
     Object.keys(data.profiles || {})
       .sort()
-      .join(',') !== 'canonical27,canonical33'
+      .join(',') !== 'canonical27,canonical33,canonical34'
   )
     fail('SWITCH_SCHEMA_CONTRACT_INVALID');
   const a = data.profiles.canonical27,
-    b = data.profiles.canonical33;
-  if (a.migrations.length !== 27 || b.migrations.length !== 33)
+    b = data.profiles.canonical33,
+    c = data.profiles.canonical34;
+  if (
+    a.migrations.length !== 27 ||
+    b.migrations.length !== 33 ||
+    c.migrations.length !== 34 ||
+    c.schemaPrismaSha256 !== b.schemaPrismaSha256
+  )
     fail('SWITCH_SCHEMA_CONTRACT_INVALID');
-  for (const profile of [a, b])
+  for (const profile of [a, b, c])
     if (
       !/^[a-f0-9]{64}$/.test(profile.schemaPrismaSha256 || '') ||
       new Set(profile.migrations.map((m) => m.name)).size !==
@@ -287,7 +293,7 @@ function catalog() {
     )
   )
     fail('SWITCH_SCHEMA_RECEIPT_BASELINE_CHANGED');
-  for (const profile of [a, b])
+  for (const profile of [a, b, c])
     for (const m of profile.migrations)
       if (m.receiptSha256 !== (OBSERVED_RECEIPTS[m.name] ?? m.sha256))
         fail('SWITCH_SCHEMA_FIXED_RECEIPT_CHANGED');
@@ -301,6 +307,22 @@ function catalog() {
     )
   )
     fail('SWITCH_SCHEMA_CONTRACT_INVALID');
+  const unbound = Object.fromEntries(
+    c.migrations.map((m) => [m.name, m.sha256]),
+  );
+  if (
+    Object.entries(next).some(([name, sha]) => unbound[name] !== sha) ||
+    !same(
+      Object.fromEntries(
+        Object.entries(unbound).filter(([name]) => !(name in next)),
+      ),
+      {
+        '20261106010000_xhs_unbound_round':
+          '05263fa79ce07a05f11dd243cd6c39d9158913127e8e229f4ed8cbc858e0d703',
+      },
+    )
+  )
+    fail('SWITCH_SCHEMA_UNBOUND_CONTRACT_INVALID');
   return { data, fileSha256: textHash(bytes), sourceIdentity };
 }
 function bindRoles(roles, contract) {
@@ -368,7 +390,16 @@ function bindRoles(roles, contract) {
     };
   }
   if (
-    bound.candidate.profile !== 'canonical33' ||
+    !(
+      bound.candidate.profile === 'canonical33' ||
+      (bound.candidate.profile === 'canonical34' &&
+        bound.current.profile === 'canonical33' &&
+        bound.rollback.profile === 'canonical33' &&
+        roles.current.manifestSha256 ===
+          '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e' &&
+        roles.rollback.manifestSha256 ===
+          '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e')
+    ) ||
     bound.current.profile !== bound.rollback.profile
   )
     fail('SWITCH_SCHEMA_TRANSITION_UNAPPROVED');
