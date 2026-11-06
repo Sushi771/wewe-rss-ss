@@ -12,7 +12,7 @@ type Tx = Pick<Prisma.TransactionClient, '$queryRaw' | '$executeRaw'>;
 const blocked = (): never => {
   throw new XhsSubscriptionError('XHS_WHOLE_SOURCE_FENCE_BLOCKED');
 };
-const restrictionEvidence = (value: any): boolean => {
+export const restrictionEvidence = (value: any): boolean => {
   if (!value || typeof value !== 'object') return false;
   if (
     typeof value.code === 'string' &&

@@ -1,3 +1,4 @@
+import { classifyReviewedRestrictions } from './xhs-reviewed-restrictions';
 import { createHash } from 'node:crypto';
 import type { RoundTx } from './xhs-unbound-round';
 
@@ -58,10 +59,10 @@ export async function prepareAuthSessionReview(
     'UNKNOWN_REQUEST_REVIEW_REQUIRED',
   );
   const tasks = await tx.$queryRawUnsafe<any[]>(
-    'SELECT id,state,document FROM xhs_subscription_tasks ORDER BY id',
+    'SELECT id,creator_id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_subscription_tasks ORDER BY id',
   );
   const jobs = await tx.$queryRawUnsafe<any[]>(
-    'SELECT id,state,document FROM xhs_whole_creator_jobs ORDER BY id',
+    'SELECT id,state,document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_whole_creator_jobs ORDER BY id',
   );
   requireReview(
     tasks.every((r) =>
@@ -76,14 +77,10 @@ export async function prepareAuthSessionReview(
       ),
     'SOURCE_WORK_NOT_IDLE',
   );
-  requireReview(
-    [...tasks, ...jobs].every(
-      (r) =>
-        !/XHS_SOURCE_(VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED/.test(
-          r.document,
-        ),
-    ),
-    'OTHER_PLATFORM_RESTRICTION',
+  const historicalRestrictions = classifyReviewedRestrictions(
+    tasks,
+    jobs,
+    BigInt(risk[0].updated_at),
   );
   const creators = await tx.$queryRawUnsafe<any[]>(
     'SELECT id,external_author_id,enabled FROM xhs_creators ORDER BY id',
@@ -116,6 +113,7 @@ export async function prepareAuthSessionReview(
     reviewKind: 'replacement-session-authentication-review-v1',
     sessionBinding,
     originalRequests: requests,
+    historicalRestrictions,
     authenticationVerified: false,
   };
   const plan = {
