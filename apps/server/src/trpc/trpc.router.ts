@@ -141,6 +141,17 @@ export function isLocalXhsStatusRequest(input: {
   );
 }
 
+const xhsFullHistoryInput = z.object({
+  bindings: z.array(z.object({ creatorId: z.string().uuid(), jobId: z.string().uuid() }).strict()).length(3),
+  maxRequests: z.number().int().min(1).max(100000),
+  phaseLimits: z.object({
+    profile: z.number().int().nonnegative().max(100000),
+    list: z.number().int().nonnegative().max(100000),
+    detail: z.number().int().nonnegative().max(100000),
+    media: z.number().int().nonnegative().max(100000),
+  }).strict(),
+}).strict();
+
 @Injectable()
 export class TrpcRouter {
   private readonly wechat2RssAccounts = new Wechat2RssAccounts();
@@ -2115,6 +2126,28 @@ export class TrpcRouter {
         return this.xhsSourceOperation(() =>
           this.xhsWhole!.confirmAuthSessionThreePageRound(input),
         );
+      }),
+    prepareWholeCreatorFullHistory: this.trpcService.protectedProcedure
+      .input(xhsFullHistoryInput)
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() => this.xhsWhole!.prepareWholeCreatorFullHistory(input));
+      }),
+    confirmWholeCreatorFullHistory: this.trpcService.protectedProcedure
+      .input(xhsFullHistoryInput.extend({
+        digest: z.string().regex(/^[a-f0-9]{64}$/),
+        acknowledgedUnknownScope: z.literal(true),
+        acknowledgedDuplicateDirectoryRead: z.literal(true),
+      }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() => this.xhsWhole!.confirmWholeCreatorFullHistory(input));
+      }),
+    executeWholeCreatorFullHistory: this.trpcService.protectedProcedure
+      .input(z.object({ reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/), jobId: z.string().uuid() }).strict())
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() => this.xhsWhole!.executeWholeCreatorFullHistory(input));
       }),
     prepareUnboundThreePageRound: this.trpcService.protectedProcedure
       .input(

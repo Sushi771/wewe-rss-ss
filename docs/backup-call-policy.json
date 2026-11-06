@@ -39,13 +39,6 @@
     },
     {
       "file": "apps/server/src/collection/collection.service.ts",
-      "scope": "CollectionService.collectMp2RssRecent20",
-      "gate": "createVerifiedSqliteBackup",
-      "maxCalls": 1,
-      "rationale": "Only a real collection-channel or normalized album-binding change; unchanged routine updates have zero calls. Runtime conditional matrix required."
-    },
-    {
-      "file": "apps/server/src/collection/collection.service.ts",
       "scope": "CollectionService.collectPublicAlbums",
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
@@ -281,6 +274,13 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "The explicitly confirmed three-account one-page round takes one verified protected backup inside sqliteWrites.protectedWrite, verifies source database identity and fingerprint before recording the immutable grant, and preserves original unknown history and budgets; prepare/status and each source request do not take full snapshots."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmWholeCreatorFullHistory",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicitly confirmed three-account full-history scope takes one verified protected backup inside sqliteWrites.protectedWrite; source identity and fingerprint are rechecked before appending the review and new allowance. Historical unknown records and original budgets remain unchanged. Per-request collection stays incremental."
     }
   ]
 }

@@ -110,7 +110,7 @@ export type XhsConnectionStatus = {
   verified: boolean;
   canConnect: boolean;
   canPersist: boolean;
-  restartRequiresReparse: true;
+  restartRequiresReparse: boolean;
   code?: string;
   message: string;
 };

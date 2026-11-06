@@ -1,3 +1,8 @@
+import {
+  fullHistoryContext,
+  fullHistoryExcludedNoteIds,
+  fullHistoryNoteExcluded,
+} from './xhs-full-history-scope';
 import { safeXhsAvatarUrl } from './xhs-profile';
 import { load as loadHtml } from 'cheerio';
 import { readHistoryHandoffs } from './xhs-history-handoff';
@@ -2022,13 +2027,32 @@ export class XhsSubscriptionService implements OnModuleInit {
         await this.runScheduledMedia(t, creator);
         return;
       }
-      if (!t.schedule && t.collectDetails && !t.reuseCompleteCache) {
+      const fullExclusions = await fullHistoryExcludedNoteIds(
+        this.db,
+        t.creatorId,
+      );
+      if (fullExclusions)
+        t.historyExcludedIds = [
+          ...new Set([...(t.historyExcludedIds ?? []), ...fullExclusions]),
+        ];
+      if (
+        !fullHistoryContext.getStore() &&
+        !t.schedule &&
+        t.collectDetails &&
+        !t.reuseCompleteCache
+      ) {
         const history = await readHistoryHandoffs(this.db);
         if (history.profilePendingCreators.includes(t.creatorId))
           return reject('XHS_SOURCE_HISTORY_REVIEW_REQUIRED');
         t.historyExcludedIds = history.excludedByCreator[t.creatorId] ?? [];
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
       }
+      if (
+        fullHistoryContext.getStore() &&
+        t.collectDetails &&
+        !t.reuseCompleteCache
+      )
+        await this.prepareScheduledContext(t, creator.externalAuthorId!);
       if (t.schedule?.phase === 'basic')
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
       if (t.kind === 'list' && t.collectionStage !== 'details') {
@@ -2083,7 +2107,11 @@ export class XhsSubscriptionService implements OnModuleInit {
           if (!active(t)) break;
           if (t.items[id] === 'completed' || t.items[id] === 'skipped')
             continue;
-          if (!t.schedule && t.historyExcludedIds?.includes(id)) {
+          if (
+            !t.schedule &&
+            (t.historyExcludedIds?.includes(id) ||
+              (await fullHistoryNoteExcluded(this.db, t.creatorId, id)))
+          ) {
             t.failed++;
             t.items[id] = 'failed';
             t.basicResults = { ...t.basicResults, [id]: 'missing' };

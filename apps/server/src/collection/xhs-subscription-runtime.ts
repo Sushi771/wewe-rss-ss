@@ -1,3 +1,13 @@
+import {
+  fullHistoryContext,
+  dispatchFullHistoryRequest,
+  fullHistoryNextDelay,
+  type FullHistoryWriter,
+} from './xhs-full-history-scope';
+import {
+  unboundRoundContext,
+  type Phase as RoundPhase,
+} from './xhs-unbound-round';
 import { roundSourceReceiptContext } from './round-source-receipt';
 import { projectWriterGate } from './project-writer-boundary';
 import {
@@ -290,6 +300,11 @@ export class XhsSubscriptionRuntime
     work: () => Promise<T>,
   ): Promise<T> {
     const scope = this.wholeAuthorization.getStore();
+    const full = fullHistoryContext.getStore();
+    if (!scope && full && noteId) {
+      if (full.authorId !== authorId) return failure('XHS_AUTHOR_MISMATCH');
+      return this.fullHistoryNote.run(noteId, work);
+    }
     if (!scope) return work();
     if (scope.authorId !== authorId)
       return Promise.reject(
@@ -624,6 +639,31 @@ export class XhsSubscriptionRuntime
   ) {
     this.sourceAdmission ??= admit;
     this.sourceDispatch ??= dispatch;
+  }
+  private readonly fullHistoryNote = new AsyncLocalStorage<string>();
+  private fullHistoryWriter?: FullHistoryWriter;
+  private fullHistoryReader?: FullHistoryWriter;
+  bindFullHistoryReader(reader: FullHistoryWriter) {
+    this.fullHistoryReader ??= reader;
+  }
+  private fullHistoryLegacyGuard?: () => Promise<void>;
+  bindFullHistoryLegacyGuard(guard: () => Promise<void>) {
+    this.fullHistoryLegacyGuard ??= guard;
+  }
+  private readonly fullHistoryInstance = randomUUID();
+  bindFullHistoryWriter(writer: FullHistoryWriter) {
+    this.fullHistoryWriter ??= writer;
+  }
+  fullScopeSessionBinding() {
+    this.requireSession();
+    if (this.changing) return failure('XHS_SESSION_CHANGED');
+    return createHash('sha256')
+      .update(this.fullHistoryInstance + ':' + this.generation)
+      .digest('hex');
+  }
+  assertFullScopeSession(binding: string) {
+    if (binding !== this.fullScopeSessionBinding())
+      return failure('XHS_SESSION_CHANGED');
   }
   private cookies?: XhsSessionCookies;
   private generation = 0;
@@ -994,6 +1034,32 @@ export class XhsSubscriptionRuntime
             })(),
           charge,
           scoped,
+          route.endsWith('/user/otherinfo')
+            ? {
+                phase: 'profile',
+                target: 'profile',
+                authorId:
+                  new URL(request.url).searchParams.get('target_user_id') ?? '',
+              }
+            : route.endsWith('/user_posted')
+              ? {
+                  phase: 'list',
+                  target:
+                    'cursor:' +
+                    createHash('sha256')
+                      .update(
+                        new URL(request.url).searchParams.get('cursor') ?? '',
+                      )
+                      .digest('hex'),
+                  authorId:
+                    new URL(request.url).searchParams.get('user_id') ?? '',
+                }
+              : route.endsWith('/feed')
+                ? {
+                    phase: 'detail',
+                    target: JSON.parse(request.body || '{}').source_note_id,
+                  }
+                : undefined,
         );
       },
     });
@@ -1044,6 +1110,17 @@ export class XhsSubscriptionRuntime
         },
         'media',
         scoped,
+        task?.mediaNoteKey || this.fullHistoryNote.getStore()
+          ? {
+              phase: 'media',
+              target:
+                (task?.mediaNoteKey
+                  ? JSON.parse(task.mediaNoteKey)[2]
+                  : this.fullHistoryNote.getStore()) +
+                ':' +
+                createHash('sha256').update(url.href).digest('hex'),
+            }
+          : undefined,
       );
     };
     this.adapter = new RedbookSubscriptionAdapter(
@@ -1080,7 +1157,113 @@ export class XhsSubscriptionRuntime
     operation: () => Promise<T>,
     charge?: Charge,
     scoped?: TaskSourceScope,
+    physical?: { phase: RoundPhase; target: string; authorId?: string },
   ) {
+    const full = fullHistoryContext.getStore();
+    if (full) {
+      if (
+        !physical ||
+        !this.fullHistoryWriter ||
+        !this.fullHistoryReader ||
+        !this.fullHistoryLegacyGuard ||
+        unboundRoundContext.getStore()
+      )
+        return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      this.assertFullScopeSession(full.sessionBinding);
+      if (
+        ['profile', 'list'].includes(physical.phase) &&
+        physical.authorId !== full.authorId
+      )
+        return failure('XHS_AUTHOR_MISMATCH');
+      const request = {
+        operationId: randomUUID(),
+        taskId: full.jobId,
+        creatorId: full.creatorId,
+        phase: physical.phase,
+        target: physical.target,
+      };
+      for (;;) {
+        this.assertFullScopeSession(full.sessionBinding);
+        const delay = await this.fullHistoryReader((tx) =>
+          fullHistoryNextDelay(tx, full.reviewId, full.jobId, full.creatorId),
+        );
+        if (delay > 0) {
+          await this.waitForSourceRate(delay);
+          continue;
+        }
+        try {
+          return await dispatchFullHistoryRequest(
+            this.fullHistoryWriter,
+            request,
+            {
+              ready: () => {
+                this.assertFullScopeSession(full.sessionBinding);
+              },
+              send: async () => {
+                try {
+                  await this.riskStore?.assertUnboundRoundAdmission();
+                  await this.fullHistoryLegacyGuard!();
+                  this.assertFullScopeSession(full.sessionBinding);
+                } catch (error) {
+                  throw new XhsPreDispatchError(
+                    error instanceof XhsSubscriptionError
+                      ? error.code
+                      : 'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+                  );
+                }
+                this.observeSourceStage('transport');
+                return operation();
+              },
+              response: (value: any) => {
+                const reason = redbookResponseReason(
+                  value.status,
+                  physical.phase === 'media' ? undefined : value.body,
+                );
+                const platformCode = reason
+                  ? `XHS_SOURCE_${reason.toUpperCase()}_BLOCKED`
+                  : undefined;
+                if (platformCode) {
+                  this.stopCode = platformCode;
+                  this.verified = false;
+                }
+                let noteIds: string[] | undefined;
+                if (physical.phase === 'list') {
+                  let payload = value.body;
+                  if (typeof payload === 'string')
+                    payload = JSON.parse(payload);
+                  noteIds = platformCode
+                    ? []
+                    : (payload?.data?.notes ?? []).map(
+                        (n: any) => n.note_id ?? n.id,
+                      );
+                  if (
+                    !Array.isArray(noteIds) ||
+                    noteIds.length > 60 ||
+                    noteIds.some(
+                      (id) =>
+                        typeof id !== 'string' ||
+                        !/^[A-Za-z0-9_-]{1,128}$/.test(id),
+                    )
+                  )
+                    throw new Error('XHS_DETAIL_PARSE_FAILED');
+                }
+                return { noteIds, platformCode, status: value.status };
+              },
+              notSent: (error: unknown) => error instanceof XhsPreDispatchError,
+            },
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message === 'XHS_REQUEST_RATE_PAUSED'
+          ) {
+            await this.waitForSourceRate(250);
+            continue;
+          }
+          throw error;
+        }
+      }
+    }
     try {
       this.requireSession();
     } catch (error) {
@@ -1320,7 +1503,11 @@ export class XhsSubscriptionRuntime
       verified: connected && this.verified && !risk,
       canConnect: liveEnabled,
       canPersist: liveEnabled && !!this.options.vault,
-      restartRequiresReparse: true,
+      restartRequiresReparse: !(
+        this.persistence.autoRestore &&
+        !this.persistence.needsReconnect &&
+        !this.persistence.restoreFailed
+      ),
       code:
         code ??
         (!liveEnabled
@@ -1392,7 +1579,11 @@ export class XhsSubscriptionRuntime
       canCollectComments: ready && this.options.commentsEnabled?.() === true,
       liveEnabled: status.liveEnabled,
       connected: status.connected,
-      restartRequiresReparse: true,
+      restartRequiresReparse: !(
+        this.persistence.autoRestore &&
+        !this.persistence.needsReconnect &&
+        !this.persistence.restoreFailed
+      ),
       message: status.message,
     };
   }
@@ -1524,6 +1715,8 @@ export class XhsSubscriptionRuntime
         throw new XhsPreDispatchError(error.code);
       throw error;
     }
+    const full = fullHistoryContext.getStore();
+    if (full) this.assertFullScopeSession(full.sessionBinding);
     const generation = this.generation;
     const admission = this.budgetScope.getStore();
     if (admission) {
@@ -1538,7 +1731,8 @@ export class XhsSubscriptionRuntime
       !this.limitedRecoveryScope.getStore() &&
       !this.wholeSourceGroup.getStore() &&
       !this.reviewedSingle.getStore() &&
-      !this.reviewedContext.getStore()
+      !this.reviewedContext.getStore() &&
+      !fullHistoryContext.getStore()
     ) {
       try {
         riskOwner = await this.riskStore.begin();

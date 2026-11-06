@@ -1,4 +1,8 @@
 import {
+  admitFullHistoryRequest,
+  FULL_HISTORY_KIND,
+} from './xhs-full-history-scope';
+import {
   prepareRemainingScope,
   assertRemainingAdmission,
 } from './round-continuation';
@@ -247,6 +251,8 @@ export async function admitUnboundRequest(
   check(reviews.length === 1, 'APPROVED_NEW_ROUND_REQUIRED');
   const review = reviews[0],
     scope = JSON.parse(review.scope_json);
+  if (scope.reviewKind === FULL_HISTORY_KIND)
+    return admitFullHistoryRequest(tx, reviewId, review, r);
   if (scope.reviewKind === 'remaining-creators-review-v1')
     await assertRemainingAdmission(tx, reviewId, scope, r);
   check(
@@ -385,9 +391,19 @@ export async function settleUnboundRequest(
   check(request.length === 1, 'REQUEST_ALREADY_SETTLED');
   let notes: string | null = null;
   if (request[0].phase === 'list' && outcome === 'response-received') {
+    const reviews = await rows(
+      tx,
+      'SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?',
+      reviewId,
+    );
+    const pageLimit =
+      reviews.length === 1 &&
+      JSON.parse(reviews[0].scope_json).reviewKind === FULL_HISTORY_KIND
+        ? 60
+        : 30;
     check(
       Array.isArray(noteIds) &&
-        noteIds.length <= 30 &&
+        noteIds.length <= pageLimit &&
         new Set(noteIds).size === noteIds.length &&
         noteIds.every((x) => /^[A-Za-z0-9_-]{1,128}$/.test(x)),
       'LIST_RESULT_SCOPE_INVALID',

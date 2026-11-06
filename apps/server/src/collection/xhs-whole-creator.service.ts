@@ -1,4 +1,12 @@
 import {
+  prepareFullHistoryScope,
+  confirmFullHistoryScope,
+  fullHistoryContext,
+  FULL_HISTORY_KIND,
+  fullHistoryBudgetId,
+  type FullHistoryInput,
+} from './xhs-full-history-scope';
+import {
   prepareAuthSessionReview,
   confirmAuthSessionReview,
 } from './xhs-auth-session-review';
@@ -199,7 +207,15 @@ export class XhsWholeCreatorService implements OnModuleInit {
     private readonly subscriptions: XhsSubscriptionService,
     private readonly runtime: XhsSubscriptionRuntime,
     private readonly engagement: XhsEngagementService,
-  ) {}
+  ) {
+    this.runtime.bindFullHistoryWriter((work) => this.write((tx) => work(tx)));
+    this.runtime.bindFullHistoryReader((work) =>
+      this.db.$transaction((tx) => work(tx)),
+    );
+    this.runtime.bindFullHistoryLegacyGuard(() =>
+      assertLegacyXhsSourceReady(this.db),
+    );
+  }
   private write<T>(
     fn: (tx: Prisma.TransactionClient) => Promise<T>,
     expectedBytes = 2_000_000,
@@ -369,6 +385,215 @@ export class XhsWholeCreatorService implements OnModuleInit {
     return this.view(job.id);
   }
   /** Explicitly prepare a bounded history-review grant; never schedules work. */
+  private fullHistoryInput(
+    input: Omit<FullHistoryInput, 'sessionBinding'>,
+  ): FullHistoryInput {
+    return { ...input, sessionBinding: this.runtime.fullScopeSessionBinding() };
+  }
+  private fullHistoryError(error: unknown): never {
+    const code = error instanceof Error ? error.message : '';
+    throw new XhsSubscriptionError(
+      [
+        'XHS_SESSION_CHANGED',
+        'XHS_SESSION_REQUIRED',
+        'XHS_LIVE_ACCESS_DISABLED',
+        'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+        'XHS_REQUEST_BUDGET_EXHAUSTED',
+        'XHS_REQUEST_RATE_PAUSED',
+      ].includes(code)
+        ? code
+        : code === 'REVIEW_STATE_CHANGED'
+          ? 'XHS_TASK_STATE_CHANGED'
+          : 'XHS_REQUEST_POLICY_INVALID',
+    );
+  }
+  async prepareWholeCreatorFullHistory(
+    input: Omit<FullHistoryInput, 'sessionBinding'>,
+  ) {
+    await this.readyForMutation();
+    try {
+      return await this.db.$transaction((tx) =>
+        prepareFullHistoryScope(tx, this.fullHistoryInput(input)),
+      );
+    } catch (error) {
+      return this.fullHistoryError(error);
+    }
+  }
+  async confirmWholeCreatorFullHistory(
+    input: Omit<FullHistoryInput, 'sessionBinding'> & {
+      digest: string;
+      acknowledgedUnknownScope: true;
+      acknowledgedDuplicateDirectoryRead: true;
+    },
+  ) {
+    await this.readyForMutation();
+    if (
+      input.acknowledgedUnknownScope !== true ||
+      input.acknowledgedDuplicateDirectoryRead !== true
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    const scopeInput = this.fullHistoryInput({
+      bindings: input.bindings,
+      maxRequests: input.maxRequests,
+      phaseLimits: input.phaseLimits,
+    });
+    const idle = () => {
+      this.runtime.assertFullScopeSession(scopeInput.sessionBinding);
+      if (
+        this.running.size ||
+        this.reviewing.size ||
+        this.starting.size ||
+        this.runtime.hasActiveSourceSessions()
+      )
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    };
+    try {
+      idle();
+      let backupSha256 = '',
+        database = '',
+        version = '';
+      return await sqliteWrites.protectedWrite(
+        async () => {
+          idle();
+          const rows = await this.db.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const main = rows.find((r) => r.name === 'main');
+          if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          database = await realpath(main.file);
+          version = await legacyReviewDatabaseFingerprint(database);
+          const verified = (await createVerifiedSqliteBackup()) as {
+            source?: string;
+            backup?: string;
+            sha256?: string;
+            integrityCheck?: string;
+            recoveryOrigin?: { format?: string; kind?: string };
+          };
+          if (
+            !verified.source ||
+            (await realpath(verified.source)) !== database ||
+            !verified.backup ||
+            !verified.sha256 ||
+            !/^[a-f0-9]{64}$/.test(verified.sha256) ||
+            verified.integrityCheck !== 'ok' ||
+            verified.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+            verified.recoveryOrigin.kind !== 'protected'
+          )
+            throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          backupSha256 = verified.sha256;
+        },
+        () =>
+          this.write(async (tx) => {
+            idle();
+            if ((await legacyReviewDatabaseFingerprint(database)) !== version)
+              throw new Error('XHS_DATABASE_CHANGED');
+            return confirmFullHistoryScope(
+              tx,
+              scopeInput,
+              input.digest,
+              {
+                assertQuiescent: async () => idle(),
+                assertSession: (binding) =>
+                  this.runtime.assertFullScopeSession(binding),
+                verifyBackup: async () => backupSha256,
+              },
+              BigInt(Date.now()),
+            );
+          }),
+      );
+    } catch (error) {
+      return this.fullHistoryError(error);
+    }
+  }
+  /** New scan belongs to the existing job; original generation and unknowns remain untouched. */
+  async executeWholeCreatorFullHistory(input: {
+    reviewId: string;
+    jobId: string;
+  }) {
+    await this.readyForMutation();
+    let release: (allowed: boolean) => void = () => {};
+    const startAfter = new Promise<boolean>((resolve) => {
+      release = resolve;
+    });
+    try {
+      const rows = await this.db.$queryRawUnsafe<
+        Array<{ scope_json: string; creator_bindings_json: string }>
+      >(
+        'SELECT scope_json,creator_bindings_json FROM xhs_unbound_owner_reviews WHERE id=?',
+        input.reviewId,
+      );
+      if (rows.length !== 1) throw new Error('XHS_REQUEST_POLICY_INVALID');
+      const scope = JSON.parse(rows[0].scope_json),
+        binding = scope.bindings?.find((b: any) => b.jobId === input.jobId);
+      if (scope.reviewKind !== FULL_HISTORY_KIND || !binding)
+        throw new Error('XHS_REQUEST_POLICY_INVALID');
+      this.runtime.assertFullScopeSession(scope.sessionBinding);
+      const original = await this.load(input.jobId);
+      if (
+        ['queued', 'running'].includes(original.state) ||
+        (original as any).fullHistoryReview?.reviewId === input.reviewId
+      )
+        throw new Error('XHS_TASK_STATE_CHANGED');
+      const context = {
+        reviewId: input.reviewId,
+        jobId: input.jobId,
+        creatorId: binding.creatorId,
+        authorId: JSON.parse(rows[0].creator_bindings_json)[binding.creatorId],
+        sessionBinding: scope.sessionBinding,
+      };
+      return await fullHistoryContext.run(context, async () => {
+        const task = await this.subscriptions.refreshFull(
+          { id: binding.creatorId, scope: 'all' },
+          startAfter,
+        );
+        await this.write(async (tx) => {
+          const current = await tx.$queryRawUnsafe<
+            Array<{ document: string; state: string }>
+          >(
+            'SELECT document,state FROM xhs_whole_creator_jobs WHERE id=? AND creator_id=?',
+            input.jobId,
+            binding.creatorId,
+          );
+          if (
+            current.length !== 1 ||
+            ['queued', 'running'].includes(current[0].state)
+          )
+            throw new Error('XHS_TASK_STATE_CHANGED');
+          const doc = JSON.parse(current[0].document);
+          if (doc.fullHistoryReview?.reviewId === input.reviewId)
+            throw new Error('XHS_TASK_STATE_CHANGED');
+          doc.fullHistoryReview = {
+            reviewId: input.reviewId,
+            budgetId: fullHistoryBudgetId(input.reviewId, input.jobId),
+            originalBudgetPreserved: true,
+            taskId: task.taskId,
+            state: 'queued',
+            originalOutcome: 'unknown',
+            duplicateDirectoryReadAcknowledged: true,
+            startedAt: Date.now(),
+          };
+          const changed = await tx.$executeRawUnsafe(
+            'UPDATE xhs_whole_creator_jobs SET document=?,updated_at=? WHERE id=? AND document=?',
+            JSON.stringify(doc),
+            BigInt(Date.now()),
+            input.jobId,
+            current[0].document,
+          );
+          if (changed !== 1) throw new Error('XHS_TASK_STATE_CHANGED');
+        });
+        release(true);
+        return {
+          jobId: input.jobId,
+          reviewId: input.reviewId,
+          taskId: task.taskId,
+          state: task.state,
+        };
+      });
+    } catch (error) {
+      release(false);
+      return this.fullHistoryError(error);
+    }
+  }
   async prepareHistoryGrant(input: {
     creatorId: string;
     expectedAuthorId: string;
