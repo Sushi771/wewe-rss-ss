@@ -2105,6 +2105,10 @@ export class TrpcRouter {
       .input(
         z
           .object({
+            rootReviewId: z
+              .string()
+              .regex(/^unbound-[a-f0-9]{64}$/)
+              .optional(),
             creatorIds: z
               .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
               .length(3),
@@ -2121,6 +2125,10 @@ export class TrpcRouter {
       .input(
         z
           .object({
+            rootReviewId: z
+              .string()
+              .regex(/^unbound-[a-f0-9]{64}$/)
+              .optional(),
             creatorIds: z
               .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
               .length(3),
