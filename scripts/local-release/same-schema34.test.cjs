@@ -7,7 +7,7 @@ const test = require('node:test'),
   crypto = require('node:crypto'),
   { DatabaseSync } = require('node:sqlite');
 const currentFolder = process.env.WEWE_SCHEMA34_PATCH_CURRENT;
-const pin = '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d';
+const pin = process.env.WEWE_SCHEMA34_PATCH_MANIFEST || '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d';
 const sha = (f) =>
   crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 test(

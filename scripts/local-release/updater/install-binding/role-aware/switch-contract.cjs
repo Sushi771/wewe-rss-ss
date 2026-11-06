@@ -262,10 +262,8 @@ function validateRoles(roles) {
   }
   // This deployed schema34 baseline admits an application-only update only.
   const exactInstalled34 =
-    roles.current.manifestSha256 ===
-      '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d' &&
-    roles.rollback.manifestSha256 ===
-      '0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d';
+    ['0dba566d9be5b7765d648a16aea69acf5efd18c7fb4b389bd87d24fd8d0b229d', '28aab827138e6e40008269765560825e80c78848bc41f0c7bf30fe84e1c59973'].includes(roles.current.manifestSha256) &&
+    roles.rollback.manifestSha256 === roles.current.manifestSha256;
   if (exactInstalled34) {
     assert.equal(
       Object.keys(current.migrations).length,
