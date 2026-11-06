@@ -219,6 +219,46 @@ function validateRoles(roles) {
       current.schemaSha256,
       'RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION',
     );
+  // Exact deployed baseline; diagnostic table is the sole additive migration.
+  if (
+    roles.current.manifestSha256 ===
+      '0e550eade929ac0c8d119f94a9b45c976b1f176c03ad5c525dbd7807f01a0d83' &&
+    roles.rollback.manifestSha256 === roles.current.manifestSha256
+  ) {
+    assert.equal(
+      Object.keys(current.migrations).length,
+      34,
+      'RECEIPT_BASELINE_34_REQUIRED',
+    );
+    assert.equal(
+      Object.keys(candidate.migrations).length,
+      35,
+      'RECEIPT_CANDIDATE_35_REQUIRED',
+    );
+    assert.equal(
+      candidate.schemaSha256,
+      current.schemaSha256,
+      'RECEIPT_PRISMA_SCHEMA_CHANGED',
+    );
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(candidate.migrations).filter(
+          ([name]) => !(name in current.migrations),
+        ),
+      ),
+      {
+        '20261106110000_xhs_round_source_receipt':
+          '8eab15e0d8c40d87607d1acd83b575c7aa454832d9756f022393edb15d23426b',
+      },
+      'RECEIPT_MIGRATION_CHANGED',
+    );
+    assert.equal(
+      roles.candidate.manifest.prisma.engineCommit,
+      roles.current.manifest.prisma.engineCommit,
+      'RECEIPT_ENGINE_CHANGED',
+    );
+    return roles;
+  }
   const exactUnboundBaseline =
     roles.current.manifestSha256 ===
       '9bdd1b22027c422761ba7a5aa9925855e0a3c8b88b08be43f5d88b40d889822e' &&

@@ -1,3 +1,4 @@
+import { createRoundSourceReceipt } from './round-source-receipt';
 import { randomUUID } from 'node:crypto';
 import {
   admitUnboundRequest,
@@ -31,14 +32,25 @@ export async function runApprovedThreePages(
   if (reviews.length !== 1) throw Error('APPROVED_NEW_ROUND_REQUIRED');
   const bindings = JSON.parse(reviews[0].creator_bindings_json),
     scope = JSON.parse(reviews[0].scope_json);
-  if (scope.creatorIds?.length !== 3 || scope.maxListPages !== 1)
+  const continuation = scope.reviewKind === 'remaining-creators-review-v1';
+  if (
+    (continuation
+      ? ![1, 2].includes(scope.creatorIds?.length)
+      : scope.creatorIds?.length !== 3) ||
+    scope.maxListPages !== 1
+  )
     throw Error('EXACT_THREE_EXISTING_CREATORS_REQUIRED');
   const results: Array<Awaited<ReturnType<typeof saveRoundPage>>> = [];
   for (const creatorId of scope.creatorIds as string[]) {
     const authorId = bindings[creatorId];
     let profile: any;
     for (const phase of ['profile', 'list'] as const) {
-      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+      if (
+        [
+          'replacement-session-authentication-review-v1',
+          'remaining-creators-review-v1',
+        ].includes(scope.reviewKind)
+      )
         runtime.assertReplacementSession(scope.sessionBinding);
       const request: RoundRequest = {
         operationId: randomUUID(),
@@ -68,9 +80,15 @@ export async function runApprovedThreePages(
       );
       if (wait > 60000) throw Error('XHS_REQUEST_RATE_PAUSED');
       if (wait) await runtime.waitForSourceRate(wait);
-      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+      if (
+        [
+          'replacement-session-authentication-review-v1',
+          'remaining-creators-review-v1',
+        ].includes(scope.reviewKind)
+      )
         runtime.assertReplacementSession(scope.sessionBinding);
       let owner: string | undefined;
+      const sourceReceipt = createRoundSourceReceipt(write, reviewId, request);
       try {
         const value: any = await dispatchUnboundContext<any>(
           binding,
@@ -82,11 +100,16 @@ export async function runApprovedThreePages(
               return reserveRoundBudgetRisk(tx, reviewId, request, Date.now());
             }); // COMMIT before operation enters transport.
             if (
-              scope.reviewKind ===
-              'replacement-session-authentication-review-v1'
+              [
+                'replacement-session-authentication-review-v1',
+                'remaining-creators-review-v1',
+              ].includes(scope.reviewKind)
             )
               runtime.assertReplacementSession(scope.sessionBinding);
-            return unboundRoundContext.run({ reviewId, request }, operation);
+            await sourceReceipt.start();
+            return sourceReceipt.run(() =>
+              unboundRoundContext.run({ reviewId, request }, operation),
+            );
           },
           (permit) =>
             phase === 'profile'
@@ -94,10 +117,16 @@ export async function runApprovedThreePages(
               : runtime.listReviewedContext(binding, profile, null, permit),
         );
         if (!owner) throw Error('DURABLE_REQUEST_BINDING_REQUIRED');
+        sourceReceipt.observe('parse');
+        await sourceReceipt.drain();
+        sourceReceipt.observe('storage');
+        await sourceReceipt.drain();
         const saved = await write(async (tx) => {
           let receipt: any;
           if (phase === 'list')
             receipt = await saveRoundPage(tx, creatorId, authorId, value);
+          sourceReceipt.complete();
+          await sourceReceipt.persist(tx);
           await settleUnboundRequest(
             tx,
             reviewId,
@@ -114,9 +143,16 @@ export async function runApprovedThreePages(
         else results.push(saved);
       } catch (error) {
         if (owner) {
+          sourceReceipt.fail(error);
+          try {
+            await sourceReceipt.drain();
+          } catch {
+            /* terminal attempts its own durable write */
+          }
           const code = runtime.reviewedFailureCode();
           try {
             await write(async (tx) => {
+              await sourceReceipt.persist(tx);
               await settleUnboundRequest(
                 tx,
                 reviewId,
@@ -143,8 +179,8 @@ export async function runApprovedThreePages(
   return {
     reviewId,
     accounts: results,
-    sourceRequests: 6,
-    pages: 3,
+    sourceRequests: results.length * 2,
+    pages: results.length,
     automaticFutureRounds: false,
   };
 }

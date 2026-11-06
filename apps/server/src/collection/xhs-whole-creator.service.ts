@@ -1073,12 +1073,23 @@ export class XhsWholeCreatorService implements OnModuleInit {
     const binding = this.runtime.replacementSessionForReview().binding;
     return this.confirmUnboundThreePageRound(input, binding);
   }
-  async prepareUnboundThreePageRound(input: { creatorIds: string[] }) {
+  async prepareUnboundThreePageRound(input: {
+    creatorIds: string[];
+    rootReviewId?: string;
+  }) {
     await this.readyForMutation();
     this.assertLegacyPendingIdle();
+    const continuation = input.rootReviewId
+      ? {
+          rootReviewId: input.rootReviewId,
+          sessionBinding: this.runtime.replacementSessionForReview().binding,
+        }
+      : undefined;
     const plan = await this.db.$transaction((tx) =>
-      prepareUnboundRound(tx, input.creatorIds),
+      prepareUnboundRound(tx, input.creatorIds, continuation),
     );
+    if (continuation)
+      this.runtime.assertReplacementSession(continuation.sessionBinding);
     this.assertLegacyPendingIdle();
     return {
       digest: plan.digest,
@@ -1096,7 +1107,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
     );
     if (grants.length === 1) {
       const scope = JSON.parse(grants[0].scope_json);
-      if (scope.reviewKind === 'replacement-session-authentication-review-v1')
+      if (
+        [
+          'replacement-session-authentication-review-v1',
+          'remaining-creators-review-v1',
+        ].includes(scope.reviewKind)
+      )
         this.runtime.assertReplacementSession(scope.sessionBinding);
     }
     this.starting.add('unbound-three-page-round');
@@ -1116,14 +1132,29 @@ export class XhsWholeCreatorService implements OnModuleInit {
       creatorIds: string[];
       digest: string;
       acknowledgedUnknownScope: true;
+      rootReviewId?: string;
     },
     authBinding?: string,
   ) {
     await this.readyForMutation();
-    const assertIdle = (own = false) =>
-      authBinding
+    const continuation = input.rootReviewId
+      ? {
+          rootReviewId: input.rootReviewId,
+          sessionBinding: this.runtime.replacementSessionForReview().binding,
+        }
+      : undefined;
+    if (continuation && (authBinding || this.runtime.hasBlockingSourceState()))
+      throw new Error('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    const assertIdle = (own = false) => {
+      if (continuation) {
+        this.runtime.assertReplacementSession(continuation.sessionBinding);
+        if (this.runtime.hasBlockingSourceState())
+          throw new Error('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+      }
+      return authBinding
         ? this.assertAuthSessionReviewIdle(authBinding, own)
         : this.assertLegacyPendingIdle(own);
+    };
     assertIdle();
     this.starting.add('legacy-pending-review');
     try {
@@ -1191,7 +1222,18 @@ export class XhsWholeCreatorService implements OnModuleInit {
                     host,
                     now,
                   )
-              : confirmUnboundRound;
+              : (
+                  tx: any,
+                  ids: string[],
+                  digest: string,
+                  host: any,
+                  now: bigint,
+                ) =>
+                  confirmUnboundRound(tx, ids, digest, host, now, continuation);
+            if (continuation)
+              this.runtime.assertReplacementSession(
+                continuation.sessionBinding,
+              );
             return confirm(
               tx,
               input.creatorIds,

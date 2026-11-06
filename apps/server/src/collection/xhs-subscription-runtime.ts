@@ -1,3 +1,4 @@
+import { roundSourceReceiptContext } from './round-source-receipt';
 import { projectWriterGate } from './project-writer-boundary';
 import {
   safeSourceFailure,
@@ -216,6 +217,7 @@ export class XhsSubscriptionRuntime
     }
   }
   observeSourceStage(stage: SafeSourceStage, status?: number, notSent = false) {
+    roundSourceReceiptContext.getStore()?.observe(stage, status, notSent);
     const g = this.wholeSourceGroup.getStore();
     if (!g?.generationId || g.closed || !this.receiptWriter) return;
     if (

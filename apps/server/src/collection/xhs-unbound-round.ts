@@ -1,3 +1,8 @@
+import {
+  prepareRemainingScope,
+  assertRemainingAdmission,
+} from './round-continuation';
+import { classifyReviewedRestrictions } from './xhs-reviewed-restrictions';
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
@@ -40,7 +45,19 @@ const restricted = (v: any): boolean => {
   return Object.values(v).some((x) => typeof x === 'object' && restricted(x));
 };
 
-export async function prepareUnboundRound(tx: RoundTx, creatorIds: string[]) {
+export async function prepareUnboundRound(
+  tx: RoundTx,
+  creatorIds: string[],
+  continuation?: { rootReviewId: string; sessionBinding: string },
+) {
+  const remaining = continuation
+    ? await prepareRemainingScope(
+        tx,
+        creatorIds,
+        continuation.rootReviewId,
+        continuation.sessionBinding,
+      )
+    : undefined;
   check(
     creatorIds.length === 3 &&
       new Set(creatorIds).size === 3 &&
@@ -112,6 +129,9 @@ export async function prepareUnboundRound(tx: RoundTx, creatorIds: string[]) {
     budgets.some((r) => r.id === 'xhs:source-total'),
     'SOURCE_BUDGET_REQUIRED',
   );
+  const historicalRestrictions = remaining
+    ? classifyReviewedRestrictions(tasks, jobs, BigInt(risk[0].updated_at))
+    : undefined;
   const plan = {
     kind: 'unbound-owner-new-round-v1',
     originalRisk: risk[0],
@@ -125,7 +145,20 @@ export async function prepareUnboundRound(tx: RoundTx, creatorIds: string[]) {
     ),
     budgetSnapshot: budgets,
     scope: {
-      creatorIds: [...creatorIds].sort(),
+      creatorIds: remaining
+        ? remaining.creatorIdsRemaining
+        : [...creatorIds].sort(),
+      ...(remaining
+        ? {
+            reviewKind: 'remaining-creators-review-v1',
+            continuationRootReviewId: remaining.rootReviewId,
+            originalCreatorIds: [...creatorIds].sort(),
+            originalRequests: remaining.lineage.allRequests,
+            sessionBinding: remaining.sessionBinding,
+            historicalRestrictions,
+            authenticationVerified: false,
+          }
+        : {}),
       maxListPages: 1,
       maxNotesPerCreator: 30,
       maxMediaPerNote: 20,
@@ -133,7 +166,14 @@ export async function prepareUnboundRound(tx: RoundTx, creatorIds: string[]) {
       comments: false,
       replies: false,
     },
-    stateDigest: hash({ risk, tasks, jobs, creators, budgets }),
+    stateDigest: hash({
+      risk,
+      tasks,
+      jobs,
+      creators,
+      budgets,
+      ...(remaining ? { remaining } : {}),
+    }),
   };
   return { ...plan, digest: hash(plan) };
 }
@@ -151,9 +191,10 @@ export async function confirmUnboundRound(
   digest: string,
   host: RoundHost,
   now: bigint,
+  continuation?: { rootReviewId: string; sessionBinding: string },
 ) {
   await host.assertQuiescent();
-  const plan = await prepareUnboundRound(tx, creatorIds);
+  const plan = await prepareUnboundRound(tx, creatorIds, continuation);
   check(plan.digest === digest, 'REVIEW_STATE_CHANGED');
   await host.authorizePlan(plan);
   await host.assertPolicyInstalled();
@@ -206,6 +247,8 @@ export async function admitUnboundRequest(
   check(reviews.length === 1, 'APPROVED_NEW_ROUND_REQUIRED');
   const review = reviews[0],
     scope = JSON.parse(review.scope_json);
+  if (scope.reviewKind === 'remaining-creators-review-v1')
+    await assertRemainingAdmission(tx, reviewId, scope, r);
   check(
     (
       await rows(

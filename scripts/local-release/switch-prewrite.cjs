@@ -264,12 +264,13 @@ function catalog() {
     data.format !== 1 ||
     Object.keys(data.profiles || {})
       .sort()
-      .join(',') !== 'canonical27,canonical33,canonical34'
+      .join(',') !== 'canonical27,canonical33,canonical34,canonical35'
   )
     fail('SWITCH_SCHEMA_CONTRACT_INVALID');
   const a = data.profiles.canonical27,
     b = data.profiles.canonical33,
-    c = data.profiles.canonical34;
+    c = data.profiles.canonical34,
+    d = data.profiles.canonical35;
   if (
     a.migrations.length !== 27 ||
     b.migrations.length !== 33 ||
@@ -391,6 +392,12 @@ function bindRoles(roles, contract) {
   }
   if (
     !(
+      (bound.candidate.profile === 'canonical35' &&
+        bound.current.profile === 'canonical34' &&
+        bound.rollback.profile === 'canonical34' &&
+        roles.current.manifestSha256 ===
+          '0e550eade929ac0c8d119f94a9b45c976b1f176c03ad5c525dbd7807f01a0d83' &&
+        roles.rollback.manifestSha256 === roles.current.manifestSha256) ||
       bound.candidate.profile === 'canonical33' ||
       (bound.candidate.profile === 'canonical34' &&
         bound.current.profile === 'canonical34' &&
