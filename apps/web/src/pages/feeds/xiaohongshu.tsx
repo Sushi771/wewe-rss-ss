@@ -1,3 +1,4 @@
+import XhsMemoryConnection from '@web/components/XhsMemoryConnection';
 import { toast } from 'sonner';
 import XhsBatchSubscription from '@web/components/XhsBatchSubscription';
 import type { BatchApi } from '@web/utils/xhs-subscription-batch';
@@ -2333,6 +2334,15 @@ export default function Xiaohongshu() {
                   断开本机会话
                 </Button>
               </div>
+              <XhsMemoryConnection
+                disabled={busy || !connection.data?.canConnect}
+                onConnected={async () => {
+                  await Promise.all([
+                    connection.refetch(),
+                    utils.xiaohongshu.capability.invalidate(),
+                  ]);
+                }}
+              />
               <p className="text-xs text-neutral-500">
                 连接信息仅由本机安全工具处理。恢复后需重新识别链接；断开不删除已保存笔记。
               </p>
