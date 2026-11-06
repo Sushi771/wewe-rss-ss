@@ -1,3 +1,4 @@
+import { assertUnboundDispatch } from './xhs-unbound-round';
 import {
   assertLegacyXhsSourceReady,
   readLegacyXhsSourceFence,
@@ -68,6 +69,21 @@ export class XhsSourceRiskStore {
       throw new XhsSubscriptionError(UNAVAILABLE);
     return rows[0];
   }
+  async assertUnboundRoundAdmission(tx?: Prisma.TransactionClient) {
+    try {
+      await assertUnboundDispatch(tx ?? this.db);
+    } catch (error) {
+      const code =
+        error instanceof Error &&
+        [
+          'APPROVED_NEW_ROUND_REQUIRED',
+          'DURABLE_REQUEST_BINDING_REQUIRED',
+        ].includes(error.message)
+          ? REVIEW
+          : UNAVAILABLE;
+      throw new XhsSubscriptionError(code);
+    }
+  }
   async read() {
     try {
       const row = await this.rows(this.db);
@@ -94,6 +110,7 @@ export class XhsSourceRiskStore {
     );
   }
   async begin() {
+    await this.assertUnboundRoundAdmission();
     const owner = randomUUID();
     try {
       await this.write(async (tx) => {

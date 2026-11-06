@@ -1,3 +1,6 @@
+import { prepareUnboundRound, confirmUnboundRound } from './xhs-unbound-round';
+import { runApprovedThreePages } from './round-runner';
+import { assertLegacyXhsSourceReady } from './xhs-legacy-source-fence';
 import { safeXhsAvatarUrl } from './xhs-profile';
 import { reviewLegacyUnknown, legacyProofMatches } from './xhs-legacy-review';
 import {
@@ -1025,6 +1028,119 @@ export class XhsWholeCreatorService implements OnModuleInit {
       creatorId: result.creatorId,
       noteKey: result.noteKey,
     };
+  }
+  async prepareUnboundThreePageRound(input: { creatorIds: string[] }) {
+    await this.readyForMutation();
+    this.assertLegacyPendingIdle();
+    const plan = await this.db.$transaction((tx) =>
+      prepareUnboundRound(tx, input.creatorIds),
+    );
+    this.assertLegacyPendingIdle();
+    return {
+      digest: plan.digest,
+      creatorIds: plan.scope.creatorIds,
+      originalOutcome: 'unknown',
+      maxListPages: 1,
+    };
+  }
+  async executeUnboundThreePageRound(input: { reviewId: string }) {
+    await this.readyForMutation();
+    this.assertLegacyPendingIdle();
+    this.starting.add('unbound-three-page-round');
+    try {
+      return await runApprovedThreePages(
+        (fn) => this.write((tx) => fn(tx)),
+        this.runtime,
+        input.reviewId,
+        (tx) => assertLegacyXhsSourceReady(tx as any),
+      );
+    } finally {
+      this.starting.delete('unbound-three-page-round');
+    }
+  }
+  async confirmUnboundThreePageRound(input: {
+    creatorIds: string[];
+    digest: string;
+    acknowledgedUnknownScope: true;
+  }) {
+    await this.readyForMutation();
+    this.assertLegacyPendingIdle();
+    this.starting.add('legacy-pending-review');
+    try {
+      let backupSha256 = '',
+        database = '',
+        version = '';
+      const result = await sqliteWrites.protectedWrite(
+        async () => {
+          this.assertLegacyPendingIdle(true);
+          const rows = await this.db.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const main = rows.find((row) => row.name === 'main');
+          if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          database = await realpath(main.file);
+          version = await legacyReviewDatabaseFingerprint(database);
+          const report = await createVerifiedSqliteBackup();
+          const verified = report as {
+            source?: unknown;
+            backup?: unknown;
+            sha256?: unknown;
+            integrityCheck?: unknown;
+            recoveryOrigin?: { format?: unknown; kind?: unknown };
+          };
+          if (
+            typeof verified.source !== 'string' ||
+            (await realpath(verified.source)) !== database ||
+            typeof verified.backup !== 'string' ||
+            !verified.backup ||
+            typeof verified.sha256 !== 'string' ||
+            !/^[a-f0-9]{64}$/.test(verified.sha256) ||
+            verified.integrityCheck !== 'ok' ||
+            verified.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+            verified.recoveryOrigin.kind !== 'protected'
+          )
+            throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          backupSha256 = verified.sha256;
+        },
+        () =>
+          this.write(async (tx) => {
+            this.assertLegacyPendingIdle(true);
+            const rows = await tx.$queryRawUnsafe<
+              Array<{ name: string; file: string }>
+            >('PRAGMA database_list');
+            const main = rows.find((row) => row.name === 'main');
+            if (
+              !main?.file ||
+              (await realpath(main.file)) !== database ||
+              (await legacyReviewDatabaseFingerprint(database)) !== version
+            )
+              throw new Error('XHS_DATABASE_CHANGED');
+            return confirmUnboundRound(
+              tx,
+              input.creatorIds,
+              input.digest,
+              {
+                assertQuiescent: async () => this.assertLegacyPendingIdle(true),
+                authorizePlan: async (plan) => {
+                  if (
+                    input.acknowledgedUnknownScope !== true ||
+                    plan.digest !== input.digest
+                  )
+                    throw new Error('PLAN_NOT_AUTHORIZED');
+                },
+                assertPolicyInstalled: async () =>
+                  this.runtime.assertUnboundPolicyInstalled(),
+                verifyBackup: async () => backupSha256,
+              },
+              BigInt(Date.now()),
+            );
+          }),
+      );
+      await this.runtime.refreshAfterHistoryHandoff();
+      return result;
+    } finally {
+      this.starting.delete('legacy-pending-review');
+    }
   }
   async confirmLegacyPendingOwnerReview(input: {
     digest: string;

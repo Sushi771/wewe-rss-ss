@@ -153,7 +153,7 @@ describe('legacy unbound pending review on isolated SQLite', () => {
       ),
     ).rejects.toThrow();
   });
-  it('allows an unrelated account while retaining the excluded target fence', async () => {
+  it('keeps the global unknown hold for another account even after cooldown without changing budgets', async () => {
     const preview = await db.$transaction((tx) =>
       prepareLegacyPendingReview(tx),
     );
@@ -183,6 +183,8 @@ describe('legacy unbound pending review on isolated SQLite', () => {
       noteIds: [],
     };
     await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('other-task','other-creator','running',${JSON.stringify(task)},400)`;
+    const budgetSnapshot =
+      await db.$queryRaw`SELECT id,request_limit,used,next_at,interval_ms FROM xhs_request_budgets ORDER BY id`;
     const api = jest.fn(async (request: any) => ({
       status: 200,
       url: request.url,
@@ -204,14 +206,33 @@ describe('legacy unbound pending review on isolated SQLite', () => {
         a1: 'synthetic-a1',
         webSession: 'synthetic-session',
       });
+      // Advance only the test clock past cooldown; an unbound unknown still
+      // blocks unrelated accounts globally. Preserve the
+      // original used/limit/next_at rows, including the unknown exclusion charge.
+      const [budget] = await db.$queryRaw<
+        Array<{ used: number; next_at: bigint; interval_ms: number }>
+      >`SELECT used,next_at,interval_ms FROM xhs_request_budgets WHERE id='xhs:source-total'`;
+      const clock = jest
+        .spyOn(Date, 'now')
+        .mockReturnValue(
+          Math.max(Date.now(), Number(budget.next_at)) +
+            Number(budget.interval_ms),
+        );
       (runtime as any).adapter.restoreDefaultAuthorAccess('other-author');
-      await runtime.withTaskScope(
-        { taskId: 'other-task', creatorId: 'other-creator' },
-        () => runtime.list('other-author', null),
-      );
-      expect(api).toHaveBeenCalledTimes(1);
+      await expect(
+        runtime.withTaskScope(
+          { taskId: 'other-task', creatorId: 'other-creator' },
+          () => runtime.list('other-author', null),
+        ),
+      ).rejects.toThrow('XHS_REQUEST_RATE_PAUSED');
+      clock.mockRestore();
+      expect(api).not.toHaveBeenCalled();
+      expect(
+        await db.$queryRaw`SELECT id,request_limit,used,next_at,interval_ms FROM xhs_request_budgets ORDER BY id`,
+      ).toEqual(budgetSnapshot);
       expect(await hasTaskDetailUnknown(db as any, creator, note)).toBe(true);
     } finally {
+      jest.restoreAllMocks();
       runtime.onModuleDestroy();
     }
   });

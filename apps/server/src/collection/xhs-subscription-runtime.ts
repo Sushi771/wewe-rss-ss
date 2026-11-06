@@ -649,6 +649,13 @@ export class XhsSubscriptionRuntime
     this.riskStore ??= store;
   }
   /** Called only after a committed, explicitly confirmed history handoff. */
+  assertUnboundPolicyInstalled() {
+    if (
+      !this.riskStore ||
+      typeof this.riskStore.assertUnboundRoundAdmission !== 'function'
+    )
+      throw new Error('SOURCE_POLICY_NOT_INSTALLED');
+  }
   async refreshAfterHistoryHandoff() {
     if (!this.riskStore) return failure('XHS_SOURCE_RISK_UNAVAILABLE');
     const risk = await this.riskStore.read();
@@ -1009,7 +1016,8 @@ export class XhsSubscriptionRuntime
       context.started = true;
       const generation = this.generation,
         signal = this.sessionAbort.signal;
-      return context.dispatch(() => {
+      return context.dispatch(async () => {
+        await this.riskStore?.assertUnboundRoundAdmission();
         this.reviewedReadyCheck()();
         if (generation !== this.generation || signal.aborted)
           return failure('XHS_SESSION_CHANGED');
@@ -1027,7 +1035,8 @@ export class XhsSubscriptionRuntime
       reviewed.started = true;
       const generation = this.generation,
         signal = this.sessionAbort.signal;
-      return reviewed.dispatch(() => {
+      return reviewed.dispatch(async () => {
+        await this.riskStore?.assertUnboundRoundAdmission();
         this.requireSession();
         if (generation !== this.generation || signal.aborted)
           return failure('XHS_SESSION_CHANGED');
@@ -1050,6 +1059,7 @@ export class XhsSubscriptionRuntime
       | 'ready'
       | 'source-dispatch' = 'budget-check';
     const ready = async (tx?: Prisma.TransactionClient) => {
+      await this.riskStore?.assertUnboundRoundAdmission(tx);
       const batch = this.batchDispatchScope.getStore();
       if (batch?.isCancelled()) return failure('XHS_TASK_CANCELLED');
       if (batch) await batch.assertReady(tx);

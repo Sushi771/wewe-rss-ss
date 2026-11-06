@@ -2067,6 +2067,52 @@ export class TrpcRouter {
           this.xhsWhole!.confirmHistoryHandoff(input),
         );
       }),
+    prepareUnboundThreePageRound: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorIds: z
+              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
+              .length(3),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareUnboundThreePageRound(input),
+        );
+      }),
+    confirmUnboundThreePageRound: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            creatorIds: z
+              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))
+              .length(3),
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedUnknownScope: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.confirmUnboundThreePageRound(input),
+        );
+      }),
+    executeUnboundThreePageRound: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({ reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/) })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.executeUnboundThreePageRound(input),
+        );
+      }),
     prepareLegacyPendingOwnerReview:
       this.trpcService.protectedProcedure.mutation(({ ctx }) => {
         this.requireLocalXhsAccess(ctx);

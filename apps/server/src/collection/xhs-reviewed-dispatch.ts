@@ -332,3 +332,38 @@ export async function dispatchReviewedSource<T, R>(
     return result;
   });
 }
+
+/** Append inside xhs-reviewed-dispatch.ts; consumes the SAME private permit map.
+ * Server-only entry. No old job/attempt is resumed or used as an authority.
+ */
+export async function dispatchUnboundContext<T>(
+  binding: ContextBinding,
+  execute: <V>(operation: () => Promise<V>) => Promise<V>,
+  transport: (permit: object) => Promise<T>,
+) {
+  if (
+    !['profile', 'list'].includes(binding.phase) ||
+    !binding.jobId.startsWith('unbound-') ||
+    !binding.id ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(binding.authorId) ||
+    binding.noteId !== ''
+  )
+    return bad();
+  const permit = {};
+  let entered = false;
+  contextPermits.set(permit, {
+    binding,
+    dispatch: async <V>(operation: () => Promise<V>) => {
+      if (entered) return bad();
+      entered = true;
+      return execute(operation);
+    },
+  });
+  try {
+    const result = await transport(permit);
+    if (!entered) return bad();
+    return result;
+  } finally {
+    contextPermits.delete(permit);
+  }
+}
