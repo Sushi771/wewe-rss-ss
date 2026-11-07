@@ -41,6 +41,15 @@ function open(file: string): Connection {
   };
 }
 function selfIdentity(): Identity {
+  if (process.platform === 'linux') {
+    const raw = linuxSelf();
+    return {
+      pid: raw.pid,
+      startIdentity: raw.startUtc,
+      executableHash: hash(readFileSync(raw.executable)),
+      commandHash: hash(raw.commandLine),
+    };
+  }
   const exe = path.join(
     process.env.SystemRoot || 'C:\\Windows',
     'System32/WindowsPowerShell/v1.0/powershell.exe',
@@ -60,6 +69,17 @@ function selfIdentity(): Identity {
     startIdentity: start,
     executableHash: hash(readFileSync(process.execPath)),
     commandHash: hash(JSON.stringify(process.argv)),
+  };
+}
+function linuxSelf() {
+  const stat = readFileSync('/proc/self/stat', 'utf8');
+  const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+  const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  return {
+    pid: process.pid,
+    startUtc: `linux:${boot}:${ticks}`,
+    executable: process.execPath,
+    commandLine: JSON.stringify(process.argv),
   };
 }
 describe('preserving checkpoint to synthetic database proof', () => {
@@ -110,7 +130,7 @@ describe('preserving checkpoint to synthetic database proof', () => {
     const worker = path.join(root, 'owned-worker.cjs');
     writeFileSync(
       worker,
-      `const {DatabaseSync}=require('node:sqlite');const{execFileSync}=require('node:child_process');const path=require('node:path');const db=new DatabaseSync(process.argv[2]);const exe=path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe');const start=execFileSync(exe,['-NoProfile','-NonInteractive','-Command','([System.Diagnostics.Process]::GetProcessById('+process.pid+')).StartTime.ToUniversalTime().ToString("o")'],{encoding:'utf8',windowsHide:true,timeout:5000}).trim();process.send({pid:process.pid,startUtc:start,executable:process.execPath,commandLine:JSON.stringify(process.argv)});process.on('message',m=>{if(m==='stop'){db.close();process.exit(0)}});`,
+      `const {DatabaseSync}=require('node:sqlite');const{execFileSync}=require('node:child_process');const path=require('node:path'),{readFileSync}=require('node:fs');const db=new DatabaseSync(process.argv[2]);let start;if(process.platform==='linux'){const s=readFileSync('/proc/self/stat','utf8');start='linux:'+readFileSync('/proc/sys/kernel/random/boot_id','utf8').trim()+':'+s.slice(s.lastIndexOf(')')+2).split(' ')[19]}else{const exe=path.join(process.env.SystemRoot,'System32/WindowsPowerShell/v1.0/powershell.exe');start=execFileSync(exe,['-NoProfile','-NonInteractive','-Command','([System.Diagnostics.Process]::GetProcessById('+process.pid+')).StartTime.ToUniversalTime().ToString("o")'],{encoding:'utf8',windowsHide:true,timeout:5000}).trim()}process.send({pid:process.pid,startUtc:start,executable:process.execPath,commandLine:JSON.stringify(process.argv)});process.on('message',m=>{if(m==='stop'){db.close();process.exit(0)}});`,
     );
     child = spawn(process.execPath, [worker, file], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],

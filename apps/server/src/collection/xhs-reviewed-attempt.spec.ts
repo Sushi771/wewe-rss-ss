@@ -1,5 +1,9 @@
 import { dispatchReviewedWholeSource } from './xhs-source-request-policy';
-import { consumeReviewedTransportPermit } from './xhs-reviewed-dispatch';
+import {
+  consumeReviewedTransportPermit,
+  dispatchReviewedSource as dispatchReviewedDirect,
+  type RecoveryWriter,
+} from './xhs-reviewed-dispatch';
 const dispatchReviewedSource = (
   db: any,
   scope: any,
@@ -499,6 +503,209 @@ describe('reviewed attempt transactional handoff', () => {
           >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`
         )[0].used,
       ).toBe(8);
+    },
+  );
+  async function assertPreservedDispatchEvidence(charged: boolean) {
+    const rows = await db.$queryRaw<Array<{ document: string }>>`
+      SELECT document FROM xhs_whole_creator_jobs WHERE id='job'`;
+    const job = JSON.parse(rows[0].document);
+    expect(job.sourceFence).toMatchObject({
+      marker: 'xhs:dispatch-pending:whole:old',
+      phase: 'detail',
+      noteId: 'note',
+      state: 'started',
+    });
+    expect(job.unknownReview.originalCode).toBe('XHS_DOWNLOAD_BLOCKED');
+    expect(
+      await db.$queryRaw`
+      SELECT id,used FROM xhs_request_budgets
+      WHERE id IN ('job','xhs:source-total','xhs:dispatch-pending:whole:old') ORDER BY id
+    `,
+    ).toEqual([
+      { id: 'job', used: charged ? 7 : 6 },
+      { id: 'xhs:dispatch-pending:whole:old', used: 1 },
+      { id: 'xhs:source-total', used: charged ? 9 : 8 },
+    ]);
+    return job;
+  }
+  function directCall(
+    id: string,
+    writer: RecoveryWriter,
+    reader: RecoveryWriter | undefined,
+    network: () => Promise<number>,
+  ) {
+    return dispatchReviewedDirect(
+      writer,
+      input,
+      id,
+      descriptor,
+      () => {},
+      (permit) =>
+        consumeReviewedTransportPermit(permit, input).dispatch(network),
+      async (_tx, value) => value,
+      undefined,
+      reader,
+    );
+  }
+  it('starts a single physical send only after both writes and the fresh reader finish', async () => {
+    const a = await prepared();
+    let writing = false,
+      reading = false,
+      commits = 0,
+      readComplete = false;
+    const writer: RecoveryWriter = async (work) => {
+      writing = true;
+      try {
+        const result = await db.$transaction(work);
+        commits++;
+        return result;
+      } finally {
+        writing = false;
+      }
+    };
+    const reader: RecoveryWriter = async (work) => {
+      reading = true;
+      try {
+        return await db.$transaction(work);
+      } finally {
+        reading = false;
+        readComplete = true;
+      }
+    };
+    const network = jest.fn(async () => {
+      expect(writing).toBe(false);
+      expect(reading).toBe(false);
+      expect(commits).toBe(2);
+      expect(readComplete).toBe(true);
+      const rows = await db.$queryRaw<Array<{ document: string }>>`
+        SELECT document FROM xhs_whole_creator_jobs WHERE id='job'`;
+      expect(
+        JSON.parse(rows[0].document).reviewAttempt.dispatch.transportEntered,
+      ).toBe(true);
+      return 42;
+    });
+    await expect(directCall(a.id, writer, reader, network)).resolves.toBe(42);
+    expect(network).toHaveBeenCalledTimes(1);
+    expect(commits).toBe(3);
+    await assertPreservedDispatchEvidence(true);
+  });
+  it('keeps consumed unknown and charges when the fresh reader fails without sending', async () => {
+    const a = await prepared();
+    const network = jest.fn(async () => 1);
+    const reader: RecoveryWriter = async () => {
+      throw new Error('synthetic reader failure');
+    };
+    await expect(directCall(a.id, write, reader, network)).rejects.toThrow(
+      'synthetic reader failure',
+    );
+    expect(network).not.toHaveBeenCalled();
+    const job = await assertPreservedDispatchEvidence(true);
+    expect(job.reviewAttempt.state).toBe('consumed');
+    expect(job.reviewAttempt.dispatch.transportEntered).toBe(true);
+  });
+  it('never sends if the second write rolls back after its callback succeeds', async () => {
+    const a = await prepared();
+    let transactions = 0;
+    const writer: RecoveryWriter = (work) =>
+      db.$transaction(async (tx) => {
+        const value = await work(tx);
+        if (++transactions === 2) throw new Error('synthetic commit failure');
+        return value;
+      });
+    const readerCalled = jest.fn();
+    const reader: RecoveryWriter = (work) => {
+      readerCalled();
+      return db.$transaction(work);
+    };
+    const network = jest.fn(async () => 1);
+    await expect(directCall(a.id, writer, reader, network)).rejects.toThrow(
+      'synthetic commit failure',
+    );
+    expect(network).not.toHaveBeenCalled();
+    expect(readerCalled).not.toHaveBeenCalled();
+    const job = await assertPreservedDispatchEvidence(true);
+    expect(job.reviewAttempt.state).toBe('consumed');
+    expect(job.reviewAttempt.dispatch.transportEntered).not.toBe(true);
+  });
+  it('rejects durable platform risk changed after entry commit before any physical send', async () => {
+    const a = await prepared();
+    const reader: RecoveryWriter = async (work) => {
+      await db.$executeRaw`UPDATE xhs_source_risk SET code='XHS_SOURCE_RATE_LIMIT_BLOCKED' WHERE id='source'`;
+      return db.$transaction(work);
+    };
+    const network = jest.fn(async () => 1);
+    await expect(directCall(a.id, write, reader, network)).rejects.toThrow();
+    expect(network).not.toHaveBeenCalled();
+    await assertPreservedDispatchEvidence(true);
+    expect(
+      await db.$queryRaw`SELECT state,code FROM xhs_source_risk WHERE id='source'`,
+    ).toEqual([{ state: 'blocked', code: 'XHS_SOURCE_RATE_LIMIT_BLOCKED' }]);
+  });
+  it('fails closed without a reader before consuming a reviewed single attempt', async () => {
+    const a = await prepared();
+    const network = jest.fn(async () => 1);
+    await expect(directCall(a.id, write, undefined, network)).rejects.toThrow();
+    expect(network).not.toHaveBeenCalled();
+    const job = await assertPreservedDispatchEvidence(false);
+    expect(job.reviewAttempt.state).toBe('prepared');
+  });
+  it.each([false, true])(
+    'retains response-time cooldown after a slow reader (longer existing deadline=%s)',
+    async (longerDeadline) => {
+      const a = await prepared();
+      let clock = Date.now();
+      let deadline = 0;
+      const nowSpy = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+      try {
+        const reader: RecoveryWriter = async (work) => {
+          const value = await db.$transaction(work);
+          clock += 20000;
+          return value;
+        };
+        const network = jest.fn(async () => {
+          if (longerDeadline) {
+            deadline = clock + 60000;
+            await db.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(deadline)}
+              WHERE id IN ('job','xhs:source-total')`;
+          }
+          clock += 1000;
+          return 1;
+        });
+        await expect(directCall(a.id, write, reader, network)).resolves.toBe(1);
+        const budgets = await db.$queryRaw<
+          Array<{
+            id: string;
+            used: number;
+            request_limit: number;
+            next_at: bigint;
+            interval_ms: number;
+          }>
+        >`SELECT id,used,request_limit,next_at,interval_ms FROM xhs_request_budgets
+          WHERE id IN ('job','xhs:source-total') ORDER BY id`;
+        expect(
+          budgets.map(({ id, used, request_limit }) => ({
+            id,
+            used,
+            request_limit,
+          })),
+        ).toEqual([
+          { id: 'job', used: 7, request_limit: 310 },
+          { id: 'xhs:source-total', used: 9, request_limit: 312 },
+        ]);
+        for (const row of budgets) {
+          expect(Number(row.next_at)).toBeGreaterThanOrEqual(
+            clock + row.interval_ms,
+          );
+          if (longerDeadline) expect(Number(row.next_at)).toBe(deadline);
+        }
+        await assertPreservedDispatchEvidence(true);
+        await expect(
+          directCall(a.id, write, reader, network),
+        ).rejects.toThrow();
+        expect(network).toHaveBeenCalledTimes(1);
+      } finally {
+        nowSpy.mockRestore();
+      }
     },
   );
 });

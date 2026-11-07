@@ -1,3 +1,4 @@
+import * as incremental from './incremental-write';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { LocalArticleStore, ArticlePreparation } from '../article-local-save';
 import { xhsLocalSnapshotPublisher } from './xhs-local-snapshot';
@@ -637,7 +638,6 @@ describe('whole creator durable offline closure', () => {
       });
       bindXhsSourceTotalBudget(db as any, runtime);
       let jobId = '',
-        reserved = false,
         injected = false;
       const subscriptions: any = {
         refresh: async () => {
@@ -658,57 +658,40 @@ describe('whole creator durable offline closure', () => {
         { refreshMetrics: async () => ({ collectedAt: 1 }) } as any,
       );
       nativeLanes.push(() => (whole as any).lane);
-      const originalReserve = XhsSqliteBudgetStore.prototype.reserve;
-      const reserve = jest
-        .spyOn(XhsSqliteBudgetStore.prototype, 'reserve')
-        .mockImplementation(async function (
-          this: XhsSqliteBudgetStore,
-          id,
-          now,
-        ) {
-          const result = await originalReserve.call(this, id, now);
-          if (id === jobId && result) reserved = true;
+      const query = db.$queryRaw.bind(db);
+      const originalAdmission = (runtime as any).sourceAdmission;
+      const boundary = jest
+        .spyOn(runtime as any, 'sourceAdmission')
+        .mockImplementation(async (...args: any[]) => {
+          if (mode === 'before-fence' && !injected) {
+            expect(
+              await query`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`,
+            ).toEqual([]);
+            injected = true;
+            await whole.cancel(jobId);
+          }
+          const result = await originalAdmission(...args);
           return result;
         });
-      const query = db.$queryRaw.bind(db);
-      const read = jest.spyOn(db, '$queryRaw').mockImplementation((async (
-        ...args: any[]
-      ) => {
-        const result = await (query as any)(...args);
-        if (
-          mode === 'before-fence' &&
-          reserved &&
-          !injected &&
-          String(args[0]).includes('SELECT * FROM xhs_request_budgets') &&
-          args.includes('xhs:source-total')
-        ) {
-          injected = true;
-          await whole.cancel(jobId);
-        }
-        return result;
-      }) as any);
-      const unsafeQuery = db.$queryRawUnsafe.bind(db);
-      const boundary = jest
-        .spyOn(db, '$queryRawUnsafe')
-        .mockImplementation((async (...args: any[]) => {
-          const result = await (unsafeQuery as any)(...args);
-          // This is after the first write helper has released its file lock, but
-          // before the second helper acquires admission and the SQLite write lock.
-          if (
-            mode === 'after-fence' &&
-            reserved &&
-            !injected &&
-            args[0] === 'PRAGMA database_list'
-          ) {
-            const markers = await query<Array<{ id: string }>>`
-            SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
-            if (markers.length) {
-              injected = true;
-              await whole.cancel(jobId);
+      const originalWrite = incremental.incrementalWrite;
+      const writeBoundary = jest
+        .spyOn(incremental, 'incrementalWrite')
+        .mockImplementation(
+          async (...args: Parameters<typeof originalWrite>) => {
+            const result = await originalWrite(...args);
+            if (mode === 'after-fence' && !injected) {
+              const markers = await query<
+                Array<{ id: string }>
+              >`SELECT id FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`;
+              if (markers.length) {
+                expect(markers).toHaveLength(1);
+                injected = true;
+                await whole.cancel(jobId);
+              }
             }
-          }
-          return result;
-        }) as any);
+            return result;
+          },
+        );
       try {
         const started = await whole.start({
           creatorId,
@@ -731,8 +714,7 @@ describe('whole creator durable offline closure', () => {
       } finally {
         await (whole as any).lane;
         boundary.mockRestore();
-        read.mockRestore();
-        reserve.mockRestore();
+        writeBoundary.mockRestore();
         runtime.onModuleDestroy();
         await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total'`;
       }
@@ -934,13 +916,16 @@ describe('whole creator durable offline closure', () => {
     };
     subscriptions.confirmedLocalArchives = subscriptions.confirmedLocalSaves;
     let actualId = '';
-    const runtime: any = {
-      withRequestBudget: async (b: any, id: string, work: any) => {
-        actualId = id;
-        budget = { admit: () => b.admit(id) };
-        return work();
+    const runtime: any = Object.assign(
+      new XhsSubscriptionRuntime({ enabled: () => false }),
+      {
+        withRequestBudget: async (b: any, id: string, work: any) => {
+          actualId = id;
+          budget = { admit: () => b.admit(id) };
+          return work();
+        },
       },
-    };
+    );
     let service = new XhsWholeCreatorService(
       db as any,
       subscriptions,
@@ -1094,7 +1079,7 @@ describe('whole creator durable offline closure', () => {
     const service = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     const schedule = jest
@@ -1142,9 +1127,9 @@ describe('whole creator durable offline closure', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       subscriptions,
-      {
+      Object.assign(new XhsSubscriptionRuntime({ enabled: () => false }), {
         withRequestBudget: async (_b: any, _id: string, work: any) => work(),
-      } as any,
+      }),
       {} as any,
     );
     const started = await whole.start({
@@ -1233,9 +1218,13 @@ describe('whole creator durable offline closure', () => {
         return savedResult;
       },
     );
-    const runtime: any = {
-      withRequestBudget: async (_budget: any, _id: string, work: any) => work(),
-    };
+    const runtime: any = Object.assign(
+      new XhsSubscriptionRuntime({ enabled: () => false }),
+      {
+        withRequestBudget: async (_budget: any, _id: string, work: any) =>
+          work(),
+      },
+    );
     const whole = new XhsWholeCreatorService(
       db as any,
       subscriptions,

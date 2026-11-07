@@ -5,6 +5,7 @@ import {
   attemptDigest,
   startReviewedContextStage,
   enterReviewedContextStage,
+  assertEnteredReviewedContextStage,
   settleReviewedContextStage,
 } from './xhs-reviewed-attempt';
 import { ownsDispatch } from './xhs-dispatch-owner';
@@ -77,7 +78,9 @@ export async function dispatchReviewedContextStage<T>(
   ready: () => void | Promise<void>,
   transport: (permit: object) => Promise<T>,
   admit?: (tx?: Tx) => Promise<void>,
+  reader?: RecoveryWriter,
 ) {
+  if (!reader) return bad();
   await admit?.();
   await ready();
   let started:
@@ -110,9 +113,23 @@ export async function dispatchReviewedContextStage<T>(
         );
         await ready();
         await admit?.(tx);
-        response = operation();
-        void response.catch(() => {});
       });
+      // A successful commit is followed by a fresh, coherent durable recheck.
+      // The transport promise must not inherit the write's expired ALS scope.
+      await reader(async (tx) => {
+        await assertEnteredReviewedContextStage(
+          tx,
+          binding.jobId,
+          binding.id,
+          started!.marker,
+          started!.owner,
+        );
+        await ready();
+        await admit?.(tx);
+      });
+      await ready();
+      response = operation();
+      void response.catch(() => {});
       return await response!;
     } catch (error) {
       if (response)
@@ -153,7 +170,9 @@ export async function dispatchReviewedSource<T, R>(
   transport: (permit: ReviewedTransportPermit) => Promise<T>,
   checkpoint: (tx: Tx, value: T) => Promise<R>,
   admit?: (tx?: Tx) => Promise<void>,
+  reader?: RecoveryWriter,
 ) {
+  if (!reader) return bad();
   const expectedState = input.generationId ? 'partial' : 'paused';
   if (
     input.maxRequests !== 1 ||
@@ -166,7 +185,11 @@ export async function dispatchReviewedSource<T, R>(
   await admit?.();
   await ready();
   const marker = 'xhs:dispatch-pending:review:' + id;
-  const owner = await write(async (tx) => {
+  const pendingRows = (tx: Tx) =>
+    tx.$queryRaw<
+      Array<{ id: string; used: number; request_limit: number }>
+    >`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%' ORDER BY id`;
+  const consumed = await write(async (tx) => {
     await admit?.(tx);
     const now = Date.now();
     const attempt = await consumeReviewedAttempt(tx, input, id, now);
@@ -217,63 +240,98 @@ export async function dispatchReviewedSource<T, R>(
       await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND document=${jobRows[0].document}`;
     if (saved !== 1) return bad();
     await tx.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES(${marker},1,1,${BigInt(now)},0)`;
-    return attempt.owner;
+    return {
+      owner: attempt.owner,
+      document: JSON.stringify(job),
+      pending: JSON.stringify(await pendingRows(tx)),
+    };
   });
+  const owner = consumed.owner;
   // Consumption and charge are durable before transport; a crash here stays consumed/unknown.
   await ready();
   if (!ownsDispatch(owner, owner)) return bad();
+  const checkedEntry = async (tx: Tx, entered: boolean) => {
+    await noUnresolvedRecovery(tx);
+    const rows = await tx.$queryRaw<
+      Array<{
+        document: string;
+        creator_id: string;
+        enabled: number | boolean;
+        author: string;
+      }>
+    >`SELECT j.document,j.creator_id,c.enabled,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state=${expectedState}`;
+    if (rows.length !== 1) return bad();
+    if (
+      !entered &&
+      (rows[0].document !== consumed.document ||
+        JSON.stringify(await pendingRows(tx)) !== consumed.pending)
+    )
+      return bad();
+    const job = JSON.parse(rows[0].document),
+      a = job.reviewAttempt;
+    if (
+      (rows[0].enabled !== 1 && rows[0].enabled !== true) ||
+      rows[0].author !== input.authorId ||
+      a?.dispatch?.creatorId !== rows[0].creator_id ||
+      a?.id !== id ||
+      a.state !== 'consumed' ||
+      a.dispatch?.marker !== marker ||
+      (entered
+        ? a.dispatch.transportEntered !== true
+        : !!a.dispatch.transportEntered) ||
+      !ownsDispatch(a.dispatch.owner, owner)
+    )
+      return bad();
+    const risk = await tx.$queryRaw<
+      Array<{ code: string }>
+    >`SELECT code FROM xhs_source_risk WHERE id='source' AND state='blocked'`;
+    void risk;
+    await assertReviewedRisk(tx, job, owner.nonce);
+    const writers = await tx.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
+    if (writers.length) return bad();
+    if (input.generationId) {
+      const children = await tx.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') LIMIT 1`;
+      if (children.length) return bad();
+    }
+    return { rows, job, a };
+  };
   const atEntry = async <V>(operation: () => Promise<V>) => {
-    let response: Promise<V> | undefined;
-    await write(async (tx) => {
-      await noUnresolvedRecovery(tx);
-      const rows = await tx.$queryRaw<
-        Array<{
-          document: string;
-          creator_id: string;
-          enabled: number | boolean;
-          author: string;
-        }>
-      >`SELECT j.document,j.creator_id,c.enabled,c.external_author_id AS author FROM xhs_whole_creator_jobs j JOIN xhs_creators c ON c.id=j.creator_id WHERE j.id=${input.jobId} AND j.state=${expectedState}`;
-      if (rows.length !== 1) return bad();
-      const job = JSON.parse(rows[0].document),
-        a = job.reviewAttempt;
-      if (
-        (rows[0].enabled !== 1 && rows[0].enabled !== true) ||
-        rows[0].author !== input.authorId ||
-        a?.dispatch?.creatorId !== rows[0].creator_id ||
-        a?.id !== id ||
-        a.state !== 'consumed' ||
-        a.dispatch?.marker !== marker ||
-        a.dispatch.transportEntered ||
-        !ownsDispatch(a.dispatch.owner, owner)
-      )
-        return bad();
-      const risk = await tx.$queryRaw<
-        Array<{ code: string }>
-      >`SELECT code FROM xhs_source_risk WHERE id='source' AND state='blocked'`;
-      void risk;
-      await assertReviewedRisk(tx, job, owner.nonce);
-      if (input.generationId) {
-        const writers = await tx.$queryRaw<
-          Array<{ id: string }>
-        >`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1`;
-        const children = await tx.$queryRaw<
-          Array<{ id: string }>
-        >`SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') LIMIT 1`;
-        if (writers.length || children.length) return bad();
-      }
+    const committed = await write(async (tx) => {
+      const { rows, job, a } = await checkedEntry(tx, false);
       await ready();
       a.dispatch.transportEntered = true;
+      const document = JSON.stringify(job);
       const n =
-        await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${input.jobId} AND state=${expectedState} AND document=${rows[0].document}`;
+        await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${document} WHERE id=${input.jobId} AND state=${expectedState} AND document=${rows[0].document}`;
       if (n !== 1) return bad();
       await admit?.(tx);
-      response = operation();
-      void response.catch(() => {});
       const at = Date.now();
       await tx.$executeRaw`UPDATE xhs_request_budgets SET next_at=${BigInt(at)}+interval_ms WHERE id IN (${input.jobId},'xhs:source-total')`;
+      const pending = await pendingRows(tx);
+      if (
+        !pending.some(
+          (p) => p.id === marker && p.used === 1 && p.request_limit === 1,
+        )
+      )
+        return bad();
+      return { document, pending: JSON.stringify(pending) };
     });
-    return await response!;
+    await reader(async (tx) => {
+      const { rows } = await checkedEntry(tx, true);
+      if (
+        rows[0].document !== committed.document ||
+        JSON.stringify(await pendingRows(tx)) !== committed.pending
+      )
+        return bad();
+      await ready();
+      await admit?.(tx);
+    });
+    await ready();
+    return await operation();
   };
   const permit = {};
   permits.set(permit, {
@@ -328,6 +386,9 @@ export async function dispatchReviewedSource<T, R>(
     const removed =
       await tx.$executeRaw`DELETE FROM xhs_request_budgets WHERE id=${marker}`;
     if (removed !== 1) return bad();
+    // Cooling starts no earlier than the successfully received response.
+    const settledAt = BigInt(Date.now());
+    await tx.$executeRaw`UPDATE xhs_request_budgets SET next_at=MAX(next_at,${settledAt}+interval_ms) WHERE id IN (${input.jobId},'xhs:source-total')`;
     await releaseReviewedRisk(tx, job, owner.nonce);
     return result;
   });

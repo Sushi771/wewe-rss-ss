@@ -69,6 +69,31 @@ const reject = (e: Evidence) =>
   expect(() => validateMaintenance(scope, e, 7000)).toThrow(
     'LEGACY_MAINTENANCE_UNPROVEN',
   );
+it('accepts the exact Linux boot/start identity emitted by the project writer', () => {
+  const e = fixture();
+  const start = 'linux:00000000-0000-4000-8000-000000000001:123456';
+  e.lock.holder.startIdentity = start;
+  e.writers.expected[0].startIdentity = start;
+  e.writers.stopped[0].identity.startIdentity = start;
+  expect(() => validateMaintenance(scope, e, 7000)).not.toThrow();
+  e.writers.stopped[0].identity.startIdentity =
+    'linux:00000000-0000-4000-8000-000000000001:123457';
+  reject(e);
+  e.writers.stopped[0].identity.startIdentity =
+    'linux:00000000-0000-4000-8000-000000000002:123456';
+  reject(e);
+});
+it.each([
+  'linux:unproved:123',
+  'linux:00000000-0000-4000-8000-000000000001:',
+  'linux:00000000-0000-4000-8000-000000000001:-1',
+  'linux:00000000-0000-4000-8000-000000000001:123456789012345678901',
+  'linux:00000000-0000-4000-8000-000000000001:1 trailing',
+])('rejects malformed native Linux identity %s', (start) => {
+  const e = fixture();
+  e.lock.holder.startIdentity = start;
+  reject(e);
+});
 it('accepts only complete scope-bound facts, preserving missing owner and unknown result', async () => {
   const observe = jest.fn(async () => fixture());
   const verifier = makeVerifier(observe);

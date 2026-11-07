@@ -237,7 +237,10 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     // expired dispatch ALS inherited by response-event receipt callbacks.
     db.$use(async (params, next) =>
       ['queryRaw', 'executeRaw'].includes(params.action)
-        ? sqliteWrites.write(() => next(params))
+        ? sqliteWrites.write(
+            () => next(params),
+            params.runInTransaction === true,
+          )
         : next(params),
     );
   }, 40000);
@@ -415,7 +418,10 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
         });
         db.$use(async (params, next) =>
           ['queryRaw', 'executeRaw'].includes(params.action)
-            ? sqliteWrites.write(() => next(params))
+            ? sqliteWrites.write(
+                () => next(params),
+                params.runInTransaction === true,
+              )
             : next(params),
         );
         const mode = await db.$queryRawUnsafe<Array<{ journal_mode: string }>>(

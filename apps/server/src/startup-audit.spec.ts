@@ -20,6 +20,7 @@ import {
 import { PrismaService } from './prisma/prisma.service';
 import { TrpcService } from './trpc/trpc.service';
 import * as snapshotStatus from './collection/sqlite-snapshot-guard';
+import { projectWriterGate } from './collection/project-writer-boundary';
 
 describe('startup audit lifecycle', () => {
   const global = globalThis as any;
@@ -122,30 +123,51 @@ describe('startup audit lifecycle', () => {
     }
   });
   it('Prisma middleware protects nested/raw/background writes and restores them only after success', async () => {
+    const previousUrl = process.env.DATABASE_URL;
+    const directory = fs.mkdtempSync(
+      path.join(tmpdir(), 'wewe-startup-middleware-'),
+    );
+    const database = path.join(directory, 'fixture.sqlite');
+    fs.writeFileSync(database, '', { flag: 'wx' });
+    const url = `file:${database.replace(/\\/g, '/')}`;
+    process.env.DATABASE_URL = url;
+    const lease = projectWriterGate().writerForUrl(url);
     let middleware: any;
     jest.spyOn(PrismaService.prototype, '$use').mockImplementation((fn) => {
       middleware = fn;
     });
-    const client = new PrismaService();
-    const next = jest.fn(async () => 'executed');
-    global.__weweStartupAudit = { status: 'verifying' };
-    expect(await middleware({ action: 'findMany' }, next)).toBe('executed');
-    for (const action of [
-      'create',
-      'update',
-      'upsert',
-      'deleteMany',
-      'executeRaw',
-      'queryRaw',
-    ])
-      await expect(middleware({ action }, next)).rejects.toThrow('正在检查');
-    global.__weweStartupAudit.status = 'failed';
-    await expect(middleware({ action: 'update' }, next)).rejects.toThrow(
-      '检查失败',
-    );
-    global.__weweStartupAudit.status = 'ready';
-    expect(await middleware({ action: 'update' }, next)).toBe('executed');
-    await client.$disconnect();
+    let client: PrismaService | undefined;
+    try {
+      client = new PrismaService();
+      const next = jest.fn(async () => 'executed');
+      global.__weweStartupAudit = { status: 'verifying' };
+      expect(await middleware({ action: 'findMany' }, next)).toBe('executed');
+      for (const action of [
+        'create',
+        'update',
+        'upsert',
+        'deleteMany',
+        'executeRaw',
+        'queryRaw',
+      ])
+        await expect(middleware({ action }, next)).rejects.toThrow('正在检查');
+      global.__weweStartupAudit.status = 'failed';
+      await expect(middleware({ action: 'update' }, next)).rejects.toThrow(
+        '检查失败',
+      );
+      expect(next).toHaveBeenCalledTimes(1);
+      global.__weweStartupAudit.status = 'ready';
+      expect(await middleware({ action: 'update' }, next)).toBe('executed');
+      expect(next).toHaveBeenCalledTimes(2);
+    } finally {
+      await client?.$disconnect();
+      await lease.close();
+      if (previousUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousUrl;
+      expect(path.dirname(directory)).toBe(tmpdir());
+      expect(path.basename(directory)).toMatch(/^wewe-startup-middleware-/);
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
   it('tRPC batched queries remain usable and mutations/GET login-result cannot start protected work', async () => {
     const service = new TrpcService(

@@ -12,6 +12,7 @@ import { SubscriptionDiscoveryValidator } from '../collection/subscription-add';
 import { CollectionService } from '../collection/collection.service';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
 import { Wechat2RssProvider } from '../collection/providers/wechat2rss';
+import * as sourceGates from '../collection/wechat2rss-source-gate';
 
 // Actual router, paid Provider, SQLite transactions and consistent backup.
 // Only upstream responses and the native adapter are synthetic; no platform calls.
@@ -70,6 +71,13 @@ describe('explicit add source through original router (offline SQLite)', () => {
     await fs.rm(path.join(root, 'backups'), { recursive: true, force: true });
     delete process.env.WEWE_ACCEPTANCE_MODE;
     delete process.env.PRIVATE_ONLINE_MODE;
+    // Each test owns this migrated SQLite database. Preserve the real gate
+    // across service restarts within a case, without sharing failed intents
+    // between independent test scenarios or opening an ambient database.
+    await prisma.$executeRaw`UPDATE Wechat2RssSourceGate SET state = 'idle', token = NULL, status = NULL WHERE id = 1`;
+    jest
+      .spyOn(sourceGates, 'defaultWechat2RssSourceGate')
+      .mockReturnValue(new sourceGates.Wechat2RssSourceGate(prisma));
     await prisma.article.deleteMany();
     await prisma.feed.deleteMany();
     await prisma.account.deleteMany();
@@ -124,6 +132,8 @@ describe('explicit add source through original router (offline SQLite)', () => {
         );
       if (url.pathname === `/feed/${number}.json`)
         return new Response(JSON.stringify({ items: [] }));
+      if (/^\/feed\/\d{5,15}\.xml$/.test(url.pathname))
+        return new Response('<rss><channel></channel></rss>');
       if (url.pathname === '/addurl')
         return new Response(
           JSON.stringify({
@@ -719,8 +729,17 @@ describe('explicit add source through original router (offline SQLite)', () => {
       articleUrl,
       source: 'wechat2rss',
     });
-    expect(later).toMatchObject({ sourceBindingChanged: true });
-    expect(events.filter((x) => x === '/addurl')).toHaveLength(1);
+    expect(later).toMatchObject({
+      status: 'failed',
+      accepted: false,
+      upstreamSubmitted: false,
+      sourceBindingChanged: false,
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(events).not.toContain('/addurl');
+    expect(
+      await prisma.$queryRaw`SELECT state FROM Wechat2RssSourceGate WHERE id = 1`,
+    ).toEqual([{ state: 'pending' }]);
     expect(native.discover).not.toHaveBeenCalled();
   });
 
@@ -1389,7 +1408,7 @@ describe('explicit add source through original router (offline SQLite)', () => {
     service.onModuleDestroy();
   });
 
-  it('uncertain /addurl response stays pending across restart with no replay or raw error', async () => {
+  it('uncertain /addurl response keeps the source pending across restart with no replay or raw error', async () => {
     process.env.WECHAT2RSS_ENABLED = '1';
     const original = request.getMockImplementation()!;
     let adds = 0;
@@ -1417,12 +1436,15 @@ describe('explicit add source through original router (offline SQLite)', () => {
         source: 'wechat2rss',
       }),
     ).toMatchObject({
-      status: 'pending',
+      status: 'failed',
       accepted: false,
       upstreamSubmitted: false,
-      code: 'ADD_RESULT_UNCONFIRMED',
+      code: 'ADD_FAILED',
     });
     expect(adds).toBe(1);
+    expect(
+      await prisma.$queryRaw`SELECT state FROM Wechat2RssSourceGate WHERE id = 1`,
+    ).toEqual([{ state: 'pending' }]);
     expect(await prisma.feed.count()).toBe(0);
   });
 

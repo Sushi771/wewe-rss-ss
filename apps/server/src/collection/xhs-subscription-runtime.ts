@@ -104,6 +104,13 @@ type RequestAdmission = {
   id: string;
   failure?: unknown;
   failureBeforeDispatch?: boolean;
+  receivedFullDetail?: {
+    operationId: string;
+    reviewId: string;
+    taskId: string;
+    creatorId: string;
+    target: string;
+  };
   parent?: RequestAdmission;
   sourceTotalCovered?: boolean;
 };
@@ -1231,7 +1238,7 @@ export class XhsSubscriptionRuntime
           continue;
         }
         try {
-          return await dispatchFullHistoryRequest(
+          const result = await dispatchFullHistoryRequest(
             this.fullHistoryWriter,
             request,
             {
@@ -1291,6 +1298,18 @@ export class XhsSubscriptionRuntime
               notSent: (error: unknown) => error instanceof XhsPreDispatchError,
             },
           );
+          if (physical.phase === 'detail') {
+            const admission = this.budgetScope.getStore();
+            if (admission)
+              admission.receivedFullDetail = {
+                operationId: request.operationId,
+                reviewId: full.reviewId,
+                taskId: request.taskId,
+                creatorId: request.creatorId,
+                target: request.target,
+              };
+          }
+          return result;
         } catch (error) {
           if (
             error instanceof Error &&
@@ -1761,6 +1780,7 @@ export class XhsSubscriptionRuntime
     if (admission) {
       delete admission.failure;
       delete admission.failureBeforeDispatch;
+      delete admission.receivedFullDetail;
     }
     if (!this.riskStore && this.options.requirePersistentRisk)
       throw new XhsPreDispatchError('XHS_SOURCE_RISK_UNAVAILABLE');
@@ -1924,14 +1944,76 @@ export class XhsSubscriptionRuntime
         riskOwner = undefined;
         this.persistedRisk = 'XHS_SOURCE_RISK_REVIEW_REQUIRED';
       }
-      const safeDetailMismatch =
-        !!riskOwner &&
+      let confirmedFullDetailMismatch = false;
+      const fullNote = this.fullHistoryNote.getStore();
+      const detailReceipt = admission?.receivedFullDetail;
+      if (
+        full &&
+        fullNote &&
+        detailReceipt &&
+        detailReceipt.reviewId === full.reviewId &&
+        detailReceipt.taskId === full.jobId &&
+        detailReceipt.creatorId === full.creatorId &&
+        detailReceipt.target === fullNote &&
+        this.fullHistoryReader &&
         !this.wholeSourceGroup.getStore() &&
         !this.stopCode &&
-        error instanceof XhsDetailIdentityMismatchError &&
-        taskScope?.current?.owner === riskOwner &&
-        taskScope.current.phase === 'detail' &&
-        taskScope.current.confirmedResponse === true;
+        error instanceof XhsDetailIdentityMismatchError
+      ) {
+        let receivedProof = false;
+        try {
+          this.assertFullScopeSession(full.sessionBinding);
+          receivedProof = await this.fullHistoryReader(async (tx) => {
+            const received = await tx.$queryRawUnsafe<
+              Array<{ operation_id: string; outcome: string }>
+            >(
+              "SELECT operation_id,outcome FROM xhs_unbound_owner_requests WHERE operation_id=? AND review_id=? AND task_id=? AND creator_id=? AND phase='detail' AND logical_target=?",
+              detailReceipt.operationId,
+              full.reviewId,
+              full.jobId,
+              full.creatorId,
+              fullNote,
+            );
+            const risk = await tx.$queryRawUnsafe<
+              Array<{
+                state: string;
+                owner: string | null;
+                code: string | null;
+                http_status: number | null;
+                endpoint: string | null;
+              }>
+            >(
+              "SELECT state,owner,code,http_status,endpoint FROM xhs_source_risk WHERE id='source'",
+            );
+            return (
+              received.length === 1 &&
+              received[0].outcome === 'response-received' &&
+              risk.length === 1 &&
+              risk[0].state === 'clear' &&
+              risk[0].owner === null &&
+              risk[0].code === null &&
+              risk[0].http_status === null &&
+              risk[0].endpoint === null
+            );
+          });
+        } catch {
+          // No proof of this exact settled response: retain the ordinary stop.
+        }
+        if (generation !== this.generation)
+          return failure('XHS_SESSION_CHANGED');
+        if (this.stopCode) return failure(this.stopCode);
+        this.assertFullScopeSession(full.sessionBinding);
+        confirmedFullDetailMismatch = receivedProof;
+      }
+      const safeDetailMismatch =
+        confirmedFullDetailMismatch ||
+        (!!riskOwner &&
+          !this.wholeSourceGroup.getStore() &&
+          !this.stopCode &&
+          error instanceof XhsDetailIdentityMismatchError &&
+          taskScope?.current?.owner === riskOwner &&
+          taskScope.current.phase === 'detail' &&
+          taskScope.current.confirmedResponse === true);
       if (riskOwner) {
         const known =
           admission?.failure instanceof XhsSubscriptionError

@@ -388,42 +388,107 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(state.busy).toBe(false);
     expect(scope.active.current).toBe(false);
   });
-  it('skips paused creators, queues sequential list work and stops at a partial result', async () => {
-    const { scope, state } = harness();
+  function persistentHarness() {
+    const h = harness(),
+      scope = h.scope;
+    const id = '00000000-0000-4000-8000-000000000001';
+    const initial = {
+      id,
+      state: 'running',
+      items: ['a', 'b'].map((creatorId, position) => ({
+        position,
+        creatorId,
+        operationId: 'operation-' + position,
+        state: 'queued',
+      })),
+    };
+    const saved = new Map<string, string>(),
+      updates: any[] = [];
+    Object.assign(scope, batchExports, {
+      batchChecked: true,
+      capability: { data: { canRefresh: true } },
+      stopRequested: { current: false },
+      batchRef: { current: null },
+      window: {
+        localStorage: {
+          getItem: (k: string) => saved.get(k) ?? null,
+          setItem: (k: string, v: string) => saved.set(k, v),
+          removeItem: (k: string) => saved.delete(k),
+        },
+      },
+      crypto: { randomUUID: () => id },
+      setBatchChecked: jest.fn(),
+      createBatch: { mutateAsync: jest.fn().mockResolvedValue(initial) },
+      advanceBatch: { mutateAsync: jest.fn() },
+      rememberBatch: (value: any) => {
+        scope.batchRef.current = value;
+        updates.push(value);
+      },
+    });
+    scope.utils.xiaohongshu.activeRefreshBatch = {
+      fetch: jest.fn().mockResolvedValue(null),
+    };
+    scope.utils.xiaohongshu.refreshBatchStatus = {
+      fetch: jest.fn().mockResolvedValue(initial),
+    };
+    scope.advanceCurrentBatch = evaluate('advanceCurrentBatch', scope);
+    return { ...h, initial, updates, saved };
+  }
+  it('filters paused creators and stops the durable batch at a partial receipt without replay', async () => {
+    const { scope, initial, updates } = persistentHarness();
+    scope.advanceBatch.mutateAsync.mockResolvedValue({
+      ...initial,
+      state: 'paused',
+      items: [{ ...initial.items[0], state: 'partial' }, initial.items[1]],
+    });
     await evaluate('handleRefreshAll', scope)();
-    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
-      [{ id: 'a', scope: 'recent' }],
-    ]);
-    expect(scope.queuedCreators.current).toEqual(['b']);
-    watch(scope).onTask({ ...terminal('partial'), kind: 'list' });
-    expect(scope.queuedCreators.current).toEqual([]);
-    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(1);
-    expect(state.task.state).toBe('partial');
+    expect(scope.createBatch.mutateAsync).toHaveBeenCalledWith({
+      batchId: initial.id,
+      ids: ['a', 'b'],
+    });
+    expect(scope.advanceBatch.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(updates[updates.length - 1].state).toBe('paused');
+    expect(scope.fullCollectionApi.refreshFull.mutate).not.toHaveBeenCalled();
   });
-  it('advances a completed creator once and retains busy state for the next queued task', async () => {
-    const { scope, state } = harness();
+  it('advances each durable creator receipt sequentially without creating replacement operations', async () => {
+    const { scope, initial, updates } = persistentHarness();
+    scope.advanceBatch.mutateAsync
+      .mockResolvedValueOnce({
+        ...initial,
+        items: [{ ...initial.items[0], state: 'complete' }, initial.items[1]],
+      })
+      .mockResolvedValueOnce({
+        ...initial,
+        state: 'complete',
+        items: initial.items.map((i: any) => ({ ...i, state: 'complete' })),
+      });
     await evaluate('handleRefreshAll', scope)();
-    watch(scope).onTask({ ...terminal(), kind: 'list' });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(scope.fullCollectionApi.refreshFull.mutate.mock.calls).toEqual([
-      [{ id: 'a', scope: 'recent' }],
-      [{ id: 'b', scope: 'recent' }],
+    expect(scope.advanceBatch.mutateAsync.mock.calls).toEqual([
+      [{ batchId: initial.id }],
+      [{ batchId: initial.id }],
     ]);
-    expect(state.busy).toBe(true);
+    expect(scope.createBatch.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(updates[updates.length - 1]).toMatchObject({
+      state: 'complete',
+      items: initial.items.map((i: any) => ({ ...i, state: 'complete' })),
+    });
   });
-  it('retains the completed receipt when the next creator fails without replaying', async () => {
-    const { scope, state } = harness();
+  it('retains completed durable receipts and saved batch identity when the next advance fails', async () => {
+    const { scope, initial, updates, saved, state } = persistentHarness();
+    scope.advanceBatch.mutateAsync
+      .mockResolvedValueOnce({
+        ...initial,
+        items: [{ ...initial.items[0], state: 'complete' }, initial.items[1]],
+      })
+      .mockRejectedValueOnce(Error('synthetic queue failure'));
     await evaluate('handleRefreshAll', scope)();
-    scope.fullCollectionApi.refreshFull.mutate.mockRejectedValue(
-      new Error('synthetic queue failure'),
-    );
-    watch(scope).onTask({ ...terminal(), kind: 'list' });
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(scope.fullCollectionApi.refreshFull.mutate).toHaveBeenCalledTimes(2);
-    expect(state.error).toContain('未开始');
+    expect(scope.advanceBatch.mutateAsync).toHaveBeenCalledTimes(2);
+    expect(updates[updates.length - 1].items[0]).toMatchObject({
+      state: 'complete',
+      operationId: 'operation-0',
+    });
+    expect(saved.get('xhs-refresh-batch')).toBe(initial.id);
+    expect(state.error).not.toBe('');
     expect(state.busy).toBe(false);
   });
   it('prevents duplicate actions and releases its guard when no task was started', async () => {
@@ -502,7 +567,10 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
   });
   it('clears remaining creator work on cancel, sends one request and retains the busy guard until confirmation', async () => {
     const { scope, state } = harness();
-    await evaluate('handleRefreshAll', scope)();
+    scope.taskRunning.current = true;
+    scope.active.current = true;
+    scope.queuedCreators.current = ['b'];
+    state.busy = true;
     const cancel = evaluate('handleCancelTask', scope);
     await cancel();
     await cancel();

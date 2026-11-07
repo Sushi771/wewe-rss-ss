@@ -806,6 +806,7 @@ export function dispatchReviewedWholeSource<T, R>(
     transport,
     (tx, value) => checkpoint(tx as Prisma.TransactionClient, value),
     (tx) => assertLegacyXhsSourceReady(tx ?? db),
+    (fn) => db.$transaction((tx) => fn(tx)),
   );
 }
 export function dispatchReviewedWholeContext<T>(
@@ -820,5 +821,6 @@ export function dispatchReviewedWholeContext<T>(
     ready,
     transport,
     (tx) => assertLegacyXhsSourceReady(tx ?? db),
+    (fn) => db.$transaction((tx) => fn(tx)),
   );
 }

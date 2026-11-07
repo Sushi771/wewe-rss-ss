@@ -68,13 +68,19 @@ describe('legacy XHS facts close every candidate source lane', () => {
       ))
         await db.$executeRawUnsafe(sql);
     }
-    oldSql = await fs.readFile(
-      path.resolve(
-        __dirname,
-        '../../test/redbook-isolated/fixtures/legacy-refresh-schema.sql',
-      ),
-      'utf8',
-    );
+    oldSql = (
+      await fs.readFile(
+        path.resolve(
+          __dirname,
+          '../../test/redbook-isolated/fixtures/legacy-refresh-schema.sql',
+        ),
+        'utf8',
+      )
+    )
+      // Current migrations use the complete BIGINT timestamp profile. Keep
+      // these legacy tables coherent with the existing subscription table.
+      .replace('"started_at" INTEGER NOT NULL', '"started_at" BIGINT NOT NULL')
+      .replace('"created_at" INTEGER NOT NULL', '"created_at" BIGINT NOT NULL');
     await db.xhsCreator.create({
       data: {
         id: 'legacy-a',
@@ -357,6 +363,10 @@ describe('legacy XHS facts close every candidate source lane', () => {
     jest
       .spyOn(attempts, 'enterReviewedContextStage')
       .mockResolvedValue(undefined as any);
+    // This case supplies synthetic stage ports, not a durable context record.
+    const entered = jest
+      .spyOn(attempts, 'assertEnteredReviewedContextStage')
+      .mockResolvedValue(undefined);
     const settled = jest
       .spyOn(attempts, 'settleReviewedContextStage')
       .mockResolvedValue(undefined as any);
@@ -374,6 +384,7 @@ describe('legacy XHS facts close every candidate source lane', () => {
         transport,
       ),
     ).resolves.toEqual({ received: true });
+    expect(entered).toHaveBeenCalledTimes(1);
     expect(settled).toHaveBeenCalledTimes(1);
     expect(await new XhsSourceRiskStore(db as any).read()).toBe(
       LEGACY_XHS_REVIEW,

@@ -1,3 +1,4 @@
+import { approveSyntheticScheduledPolicy } from '../../test/fixtures/xhs-scheduled-policy';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -85,7 +86,9 @@ describe('durable synthetic source risk fence', () => {
     expect(transport).toHaveBeenCalledTimes(1);
   });
   let db: PrismaClient, folder: string;
-  beforeAll(async () => {
+  // Each case owns its synthetic database, including immutable review history.
+  // Teardown destroys the fixture; it never deletes audit rows to relax guards.
+  beforeEach(async () => {
     folder = await fs.mkdtemp(path.join(os.tmpdir(), 'xhs-risk-synthetic-'));
     db = new PrismaClient({
       datasources: {
@@ -133,7 +136,7 @@ describe('durable synthetic source risk fence', () => {
       await db.$executeRaw`DELETE FROM xhs_creators WHERE id='parse-creator'`;
     }
   });
-  afterAll(async () => {
+  afterEach(async () => {
     await db.$disconnect();
     await fs.rm(folder, { recursive: true, force: true });
   }, 40000);
@@ -3696,7 +3699,7 @@ describe('durable synthetic source risk fence', () => {
           displayName: 'Synthetic',
         },
       });
-    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,1000) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=1000`;
     const api = jest.fn(async (request: any) => {
       const note =
         request.method === 'POST'
@@ -3773,6 +3776,11 @@ describe('durable synthetic source risk fence', () => {
     });
     const service: any = new XhsSubscriptionService(db as any, runtime);
     service.write = async (_bytes: number, fn: any) => db.$transaction(fn);
+    const policy = await approveSyntheticScheduledPolicy(
+      db,
+      runtime,
+      records.map((r) => r.id),
+    );
     try {
       for (const r of records) {
         current = r;
@@ -3784,6 +3792,7 @@ describe('durable synthetic source risk fence', () => {
         });
         await service.lane;
         const task = await service.task({ taskId: started.taskId });
+
         expect(task).toMatchObject(
           r === records[0]
             ? {
@@ -3808,6 +3817,7 @@ describe('durable synthetic source risk fence', () => {
         )[0].state,
       ).toBe('clear');
     } finally {
+      await policy.cleanup();
       runtime.onModuleDestroy();
       for (const r of records) {
         await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id=${r.id}`;
@@ -3828,7 +3838,7 @@ describe('durable synthetic source risk fence', () => {
         displayName: 'Synthetic',
       },
     });
-    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=0`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,1000) ON CONFLICT(id) DO UPDATE SET request_limit=100,used=0,next_at=0,interval_ms=1000`;
     const api = jest.fn(async (request: any) => ({
       status: 200,
       url: request.url,
@@ -3865,6 +3875,9 @@ describe('durable synthetic source risk fence', () => {
     (runtime as any).adapter.restoreDefaultAuthorAccess(author);
     const service: any = new XhsSubscriptionService(db as any, runtime);
     service.write = async (_bytes: number, fn: any) => db.$transaction(fn);
+    const policy = await approveSyntheticScheduledPolicy(db, runtime, [
+      creator,
+    ]);
     try {
       for (const round of ['2026-11-01/09:15', '2026-11-01/14:00']) {
         const started = await service.scheduleCreatorPhase({
@@ -3876,12 +3889,28 @@ describe('durable synthetic source risk fence', () => {
         expect((await service.task({ taskId: started.taskId })).state).toBe(
           'completed',
         );
+        const beforeRepeat = await db.$queryRawUnsafe(
+          'SELECT id,used,next_at FROM xhs_request_budgets ORDER BY id',
+        );
+        const requestsBeforeRepeat = await db.$queryRawUnsafe(
+          'SELECT operation_id,outcome FROM xhs_unbound_owner_requests ORDER BY operation_id',
+        );
         await service.scheduleCreatorPhase({
           round,
           creatorId: creator,
           phase: 'basic',
         });
         await service.lane;
+        expect(
+          await db.$queryRawUnsafe(
+            'SELECT id,used,next_at FROM xhs_request_budgets ORDER BY id',
+          ),
+        ).toEqual(beforeRepeat);
+        expect(
+          await db.$queryRawUnsafe(
+            'SELECT operation_id,outcome FROM xhs_unbound_owner_requests ORDER BY operation_id',
+          ),
+        ).toEqual(requestsBeforeRepeat);
       }
       expect(
         api.mock.calls.filter(([r]: any) =>
@@ -3893,6 +3922,7 @@ describe('durable synthetic source risk fence', () => {
       >`SELECT document FROM xhs_metric_snapshots WHERE owner_kind='creator' AND owner_id=${creator}`;
       expect(JSON.parse(rows[0].document).values.fans).toBe(82);
     } finally {
+      await policy.cleanup();
       runtime.onModuleDestroy();
       await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id=${creator}`;
       await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id=${creator}`;

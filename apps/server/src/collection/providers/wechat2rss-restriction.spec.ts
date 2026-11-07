@@ -43,13 +43,16 @@ describe('private provider restriction classification', () => {
     ).rejects.toBeInstanceOf(Wechat2RssRestrictionError);
   });
 
-  it('retains a generic error for ordinary HTTP failures', async () => {
+  it('retains a bounded HTTP classification for ordinary failures', async () => {
     jest
       .spyOn(global, 'fetch')
       .mockResolvedValueOnce(new Response('x', { status: 500 }));
     const { provider } = fixture();
-    await expect(provider.listSubscriptions()).rejects.toThrow(
-      'WECHAT2RSS_REQUEST_FAILED',
-    );
+    const error = await provider.listSubscriptions().catch((error) => error);
+    expect(error).toMatchObject({
+      message: 'WECHAT2RSS_HTTP_STATUS',
+      httpStatus: 500,
+    });
+    expect(String(error)).not.toMatch(/secret|private-response|https?:/);
   });
 });

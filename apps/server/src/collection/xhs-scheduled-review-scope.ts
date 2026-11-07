@@ -26,7 +26,7 @@ const rows = (tx: RoundTx, sql: string, ...args: unknown[]) =>
 async function reviews(tx: RoundTx) {
   return rows(
     tx,
-    'SELECT * FROM xhs_unbound_owner_reviews ORDER BY approved_at,id',
+    'SELECT id,plan_digest,original_risk_json,original_outcome,old_task_ids_json,old_job_ids_json,creator_bindings_json,budget_snapshot_json,scope_json,backup_sha256,CAST(approved_at AS TEXT) AS approved_at FROM xhs_unbound_owner_reviews ORDER BY xhs_unbound_owner_reviews.approved_at,xhs_unbound_owner_reviews.id',
   );
 }
 async function baseline(tx: RoundTx, excludedOperation?: string) {
@@ -314,7 +314,7 @@ export async function prepareScheduledTaskReview(
     check(
       task.length === 1 &&
         task[0].creator_id === input.creatorId &&
-        ['queued', 'running'].includes(task[0].state),
+        ['queued', 'running', 'completed', 'partial'].includes(task[0].state),
       'SCHEDULED_TASK_BINDING_CHANGED',
     );
     const doc = JSON.parse(task[0].document);
@@ -326,6 +326,30 @@ export async function prepareScheduledTaskReview(
         (doc.schedule?.batch ?? 0) === (input.batch ?? 0),
       'SCHEDULED_TASK_BINDING_CHANGED',
     );
+    if (['completed', 'partial'].includes(task[0].state)) {
+      const completed =
+        task[0].state === 'completed' &&
+        doc.state === 'completed' &&
+        doc.failed === 0;
+      const localPartial =
+        task[0].state === 'partial' &&
+        doc.state === 'partial' &&
+        ['XHS_DETAIL_PARSE_FAILED', 'XHS_LOCAL_PRE_DISPATCH_FAILED'].includes(
+          doc.code,
+        ) &&
+        Number.isSafeInteger(doc.failed) &&
+        doc.failed > 0 &&
+        doc.remaining === 0;
+      check(
+        (completed || localPartial) &&
+          !doc.sourceActive &&
+          !doc.sourceUnknowns?.length,
+        'SCHEDULED_TASK_BINDING_CHANGED',
+      );
+      // A clock observation of this exact settled task grants no new work,
+      // session binding, review or request budget. Failed/unknown tasks stay closed.
+      return undefined;
+    }
   }
   const prior = (await reviews(tx)).filter((r) => {
     const s = JSON.parse(r.scope_json);

@@ -252,6 +252,8 @@ describe('finite project maintenance and separately confirmed legacy attempt (sy
       (permit) =>
         consumeReviewedTransportPermit(permit, a.scope).dispatch(transport),
       checkpointWrite,
+      undefined,
+      (fn) => db.$transaction(fn as any) as any,
     );
   }
   it('records actual closed-connection maintenance but leaves the original unknown and consumed budgets intact', async () => {

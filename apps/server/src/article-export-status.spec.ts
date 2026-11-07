@@ -27,11 +27,18 @@ const article = {
 
 describe('body media status with synthetic bytes and mocked requests only', () => {
   let root: string;
+  const originalDatabaseUrl = process.env.DATABASE_URL;
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), 'wewe-export-status-'));
+    await writeFile(join(root, 'fixture.db'), '');
+    process.env.DATABASE_URL = 'file:' + join(root, 'fixture.db');
     jest.mocked(images.fetchAllowedImage).mockReset();
   });
-  afterEach(async () => rm(root, { recursive: true, force: true }));
+  afterEach(async () => {
+    if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = originalDatabaseUrl;
+    await rm(root, { recursive: true, force: true });
+  });
 
   it('marks rejected browser sources unknown, retaining text without a fetch', async () => {
     const invalid = {

@@ -90,6 +90,8 @@ describe('feed task recovery callbacks (actual UI, offline)', () => {
               useRef: (value: unknown) => ({ current: value }),
               useState: (value: unknown) => [value, () => {}],
             };
+          if (id === '@web/components/SubscriptionPrimitives')
+            return { SubscriptionProgress: 'SubscriptionProgress' };
           if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx };
           if (id === '@nextui-org/react')
             return { Button: 'Button', Progress: 'Progress' };

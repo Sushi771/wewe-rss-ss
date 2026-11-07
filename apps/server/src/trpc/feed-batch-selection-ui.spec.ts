@@ -1,3 +1,4 @@
+import { wechatOriginalUrl } from '../../../web/src/utils/wechat-original-url';
 import { exportArticleBatches } from '../../../web/src/utils/export-article-batches';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -212,44 +213,73 @@ function listFixture(initialItems: string[]) {
       jsx: ts.JsxEmit.ReactJSX,
     },
   }).outputText;
+  const primitives = { exports: {} as any };
   const requireMock = (name: string) =>
-    name === '@web/utils/article-body-state'
-      ? { articleBodyState }
-      : name === 'react'
-        ? react
-        : name === 'react/jsx-runtime'
-          ? { jsx, jsxs: jsx }
-          : name === '@nextui-org/react'
-            ? Object.fromEntries(
-                [
-                  'Checkbox',
-                  'Button',
-                  'Spinner',
-                  'Modal',
-                  'ModalContent',
-                  'ModalHeader',
-                  'ModalBody',
-                ].map((n) => [n, n]),
-              )
-            : name === '@web/utils/trpc'
-              ? { trpc }
-              : name === '@web/utils/feed-selection'
-                ? { getLoadedSelection }
-                : name === '@web/utils/use-article-list-position'
-                  ? {
-                      useArticleListPosition: () => ({
-                        scrollRef: { current: null },
-                        capturePosition() {},
-                        cancelRestore() {},
-                        rememberForReader() {},
-                        restoreAfterReader() {},
-                      }),
-                    }
-                  : name === 'react-router-dom'
-                    ? { useParams: () => params }
-                    : name === '@wewe-rss/shared'
-                      ? { formatShanghaiPublicationTime: () => 'fixture-time' }
-                      : {};
+    name === '@web/components/SubscriptionPrimitives'
+      ? primitives.exports
+      : name === '@web/utils/wechat-original-url'
+        ? { wechatOriginalUrl }
+        : name === '@web/utils/article-body-state'
+          ? { articleBodyState }
+          : name === 'react'
+            ? react
+            : name === 'react/jsx-runtime'
+              ? { jsx, jsxs: jsx }
+              : name === '@nextui-org/react'
+                ? Object.fromEntries(
+                    [
+                      'Checkbox',
+                      'Button',
+                      'Spinner',
+                      'Modal',
+                      'ModalContent',
+                      'ModalHeader',
+                      'ModalBody',
+                    ].map((n) => [n, n]),
+                  )
+                : name === '@web/utils/trpc'
+                  ? { trpc }
+                  : name === '@web/utils/feed-selection'
+                    ? { getLoadedSelection }
+                    : name === '@web/utils/use-article-list-position'
+                      ? {
+                          useArticleListPosition: () => ({
+                            scrollRef: { current: null },
+                            capturePosition() {},
+                            cancelRestore() {},
+                            rememberForReader() {},
+                            restoreAfterReader() {},
+                          }),
+                        }
+                      : name === 'react-router-dom'
+                        ? { useParams: () => params }
+                        : name === '@wewe-rss/shared'
+                          ? {
+                              formatShanghaiPublicationTime: () =>
+                                'fixture-time',
+                            }
+                          : {};
+  new Function(
+    'require',
+    'exports',
+    'module',
+    ts.transpileModule(
+      fs.readFileSync(
+        path.resolve(
+          __dirname,
+          '../../../web/src/components/SubscriptionPrimitives.tsx',
+        ),
+        'utf8',
+      ),
+      {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2021,
+          module: ts.ModuleKind.CommonJS,
+          jsx: ts.JsxEmit.ReactJSX,
+        },
+      },
+    ).outputText,
+  )(requireMock, primitives.exports, primitives);
   new Function('require', 'exports', 'module', compiled)(
     requireMock,
     mod.exports,
@@ -261,7 +291,9 @@ function listFixture(initialItems: string[]) {
       : Array.isArray(node)
         ? node.flatMap(all)
         : typeof node === 'object'
-          ? [node, ...all(node.props?.children)]
+          ? typeof node.type === 'function'
+            ? all(node.type(node.props))
+            : [node, ...all(node.props?.children)]
           : [node];
   }
   function render() {

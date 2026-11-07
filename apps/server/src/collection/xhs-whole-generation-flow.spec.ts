@@ -1,3 +1,4 @@
+import * as incremental from './incremental-write';
 jest.mock('./xhs-legacy-review', () => ({
   ...jest.requireActual('./xhs-legacy-review'),
   assertLegacyDatabase: jest.fn(async () => undefined),
@@ -236,7 +237,10 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     // expired dispatch ALS inherited by response-event receipt callbacks.
     db.$use(async (params, next) =>
       ['queryRaw', 'executeRaw'].includes(params.action)
-        ? sqliteWrites.write(() => next(params))
+        ? sqliteWrites.write(
+            () => next(params),
+            params.runInTransaction === true,
+          )
         : next(params),
     );
   }, 40000);
@@ -414,7 +418,10 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
         });
         db.$use(async (params, next) =>
           ['queryRaw', 'executeRaw'].includes(params.action)
-            ? sqliteWrites.write(() => next(params))
+            ? sqliteWrites.write(
+                () => next(params),
+                params.runInTransaction === true,
+              )
             : next(params),
         );
         const mode = await db.$queryRawUnsafe<Array<{ journal_mode: string }>>(
@@ -2245,6 +2252,7 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
     'expired-context',
     'binding-mismatch',
     'source-preblocked',
+    'postcommit-risk',
   ] as const)(
     'recovers only one excluded note through bounded context: %s',
     async (mode) => {
@@ -2448,6 +2456,45 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
           contextId: context.id,
           confirmUnknownRetry: true,
         });
+      if (mode === 'postcommit-risk') {
+        const before = await currentBudget(),
+          calls = api.mock.calls.length;
+        let changed = false;
+        const originalWrite = incremental.incrementalWrite;
+        const changeRisk = jest
+          .spyOn(incremental, 'incrementalWrite')
+          .mockImplementation(
+            async (...args: Parameters<typeof originalWrite>) => {
+              const value = await originalWrite(...args);
+              const context = (await read()).reviewContext;
+              if (
+                !changed &&
+                context?.state === 'started' &&
+                context.stages.at(-1)?.transportEntered === true
+              ) {
+                changed = true;
+                await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',owner=NULL WHERE id='source'`;
+              }
+              return value;
+            },
+          );
+        try {
+          await expect(executeContext()).rejects.toThrow();
+        } finally {
+          changeRisk.mockRestore();
+        }
+        expect(changed).toBe(true);
+        expect(api.mock.calls.length).toBe(calls);
+        expect(await currentBudget()).toEqual(
+          before.map((row) => ({ ...row, used: row.used + 1 })),
+        );
+        expect((await read()).reviewContext.stages.at(-1)).toMatchObject({
+          state: 'started',
+          transportEntered: true,
+        });
+        await assertUnknownPreserved();
+        return;
+      }
       if (
         [
           'session-missing',

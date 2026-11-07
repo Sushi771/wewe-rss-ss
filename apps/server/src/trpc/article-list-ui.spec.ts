@@ -1,3 +1,4 @@
+import { wechatOriginalUrl } from '../../../web/src/utils/wechat-original-url';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as vm from 'node:vm';
@@ -78,34 +79,34 @@ function evaluate(expression: string, scope: Record<string, unknown>) {
 }
 
 describe('actual WeChat article-list mobile layout contract and handlers (offline, not visual acceptance)', () => {
-  it('gives the mobile title its own bounded column and moves metadata to a second row', () => {
-    const row = literal(elementWithClass('article-row'), 'className');
-    const title = literal(elementWithClass('compact-title'), 'className');
-    const metadata = literal(elementWithClass('col-start-2'), 'className');
-    expect(row).toContain('!grid'); // Overrides the later .compact-row display:flex rule.
-    expect(row).toContain('grid-cols-[24px_minmax(0,1fr)]');
-    expect(title).toContain('min-w-0');
-    expect(title).toContain('!whitespace-normal'); // Overrides .compact-title nowrap.
-    expect(metadata).toContain('min-w-0');
-    expect(metadata).toContain('w-auto');
-    expect(metadata.split(/\s+/)).not.toContain('w-[300px]');
-  });
-  it('removes the fixed information header on mobile and preserves desktop flex, nowrap and 300px metadata', () => {
-    expect(
-      literal(elementWithClass('compact-col-metadata'), 'className'),
-    ).toContain('!hidden md:!flex');
-    expect(
-      literal(elementWithClass('compact-col-title'), 'className'),
-    ).toContain('whitespace-nowrap');
+  it('uses the shared bounded mobile grid and second-row metadata', () => {
     expect(literal(elementWithClass('article-row'), 'className')).toContain(
-      'md:!flex',
+      'content-article-row',
     );
     expect(literal(elementWithClass('compact-title'), 'className')).toContain(
-      'md:!whitespace-nowrap',
+      'min-w-0',
     );
-    expect(literal(elementWithClass('col-start-2'), 'className')).toContain(
-      'md:w-[300px]',
+    expect(literal(elementWithClass('compact-title'), 'className')).toContain(
+      '!whitespace-normal',
     );
+    expect(elementWithClass('content-article-metadata')).toBeDefined();
+    const css = fs.readFileSync(
+      path.resolve(__dirname, '../../../web/src/index.css'),
+      'utf8',
+    );
+    expect(css).toContain('grid-template-columns: 24px minmax(0, 1fr);');
+    expect(css).toContain('grid-column: 2;');
+  });
+  it('uses the reading container breakpoint for a bounded desktop metadata column', () => {
+    const css = fs.readFileSync(
+      path.resolve(__dirname, '../../../web/src/index.css'),
+      'utf8',
+    );
+    expect(css).toContain('@container reading (min-width: 900px)');
+    expect(css).toContain(
+      'grid-template-columns: 24px minmax(0, 1fr) minmax(200px, 300px);',
+    );
+    expect(css).toContain('grid-column: 3;');
   });
   it.each([true, false])(
     'retains per-article checkbox selection (%s)',
@@ -128,29 +129,48 @@ describe('actual WeChat article-list mobile layout contract and handlers (offlin
     },
   );
   it.each([true, false])(
-    'retains cached-body reading and uncached source navigation (%s)',
+    'opens only stored official source URLs independently of cached body (%s)',
     (bodyCached) => {
-      const event = { preventDefault: jest.fn() };
-      const setReadingId = jest.fn();
-      evaluate(handler(elementWithClass('compact-title'), 'onClick'), {
-        item: { id: 'a', bodyCached },
-        setReadingId,
-        position: { rememberForReader: jest.fn() },
-      })(event);
-      expect(event.preventDefault).toHaveBeenCalledTimes(bodyCached ? 1 : 0);
-      expect(setReadingId.mock.calls).toEqual(bodyCached ? [['a']] : []);
+      const node = elementWithClass('compact-title'),
+        capture = jest.fn();
+      const item = {
+        id: 'internal-id',
+        bodyCached,
+        sourceUrl: 'https://mp.weixin.qq.com/s/synthetic',
+        title: 'Synthetic',
+      };
+      expect(evaluate(handler(node, 'href'), { item, wechatOriginalUrl })).toBe(
+        item.sourceUrl,
+      );
+      expect(literal(node, 'target')).toBe('_blank');
+      evaluate(handler(node, 'onClick'), {
+        position: { capturePosition: capture },
+      })({});
+      expect(capture).toHaveBeenCalledTimes(1);
+      expect(
+        evaluate(handler(node, 'href'), {
+          item: { ...item, sourceUrl: 'https://evil.example/' },
+          wechatOriginalUrl,
+        }),
+      ).toBeUndefined();
+      expect(
+        evaluate(handler(node, 'aria-disabled'), {
+          item: { ...item, sourceUrl: undefined },
+          wechatOriginalUrl,
+        }),
+      ).toBe(true);
     },
   );
   it('keeps sorting and clears old selection when the sort changes', () => {
     const select = elements.find(
-      (node) => literal(node, 'aria-label') === '文章排序',
+      (node) => node.tagName.getText(ast) === 'ContentSortControls',
     );
     const setSort = jest.fn();
     const changed = jest.fn();
-    evaluate(handler(select!, 'onChange'), {
+    evaluate(handler(select!, 'onSortChange'), {
       setSort,
       onSelectionChange: changed,
-    })({ target: { value: 'likeCount' } });
+    })('likeCount');
     expect(setSort).toHaveBeenCalledWith('likeCount');
     expect(changed.mock.calls[0][0].size).toBe(0);
   });

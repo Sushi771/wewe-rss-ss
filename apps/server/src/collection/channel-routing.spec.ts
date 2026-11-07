@@ -45,6 +45,7 @@ describe('backend collection routing', () => {
   let root: string;
   let prisma: PrismaClient;
   let service: TrpcService;
+  const services: TrpcService[] = [];
   const ids = Array.from({ length: 12 }, (_, i) => `MP_WXS_${1000000000 + i}`);
   const article = (id: string) => {
     const number = id.replace('MP_WXS_', '');
@@ -134,6 +135,13 @@ describe('backend collection routing', () => {
       {} as any,
       new CollectionService(prisma as any),
     );
+    services.push(service);
+  });
+
+  afterEach(async () => {
+    for (const instance of services.splice(0)) {
+      await instance.onModuleDestroy();
+    }
   });
 
   afterAll(async () => {
@@ -144,8 +152,13 @@ describe('backend collection routing', () => {
       path.dirname(root) === os.tmpdir() &&
       path.basename(root).startsWith('wewe-backend-route-')
     )
-      await fs.rm(root, { recursive: true, force: true });
-  });
+      await fs.rm(root, {
+        recursive: true,
+        force: true,
+        maxRetries: 5,
+        retryDelay: 100,
+      });
+  }, 15_000);
 
   it('uses the same confirmed latest-body adapter for manual and scheduled updates', async () => {
     await prisma.feed.update({
@@ -505,6 +518,7 @@ describe('backend collection routing', () => {
       {} as any,
       new CollectionService(prisma as any),
     );
+    services.push(restarted);
     const cached = await restarted.refreshMpArticlesAndUpdateFeed(
       ids[0],
       1,
@@ -561,6 +575,7 @@ describe('backend collection routing', () => {
       {} as any,
       new CollectionService(prisma as any),
     );
+    services.push(restarted);
     const result = await restarted.refreshMpArticlesAndUpdateFeed(
       ids[0],
       1,
@@ -575,6 +590,8 @@ describe('backend collection routing', () => {
   });
 
   it('exports a parsed provider body and its image as a local attachment', async () => {
+    const originalDatabaseUrl = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = 'file:' + path.join(root, 'test.db');
     const identity = article(ids[0]);
     const imageUrl = 'https://mmbiz.qpic.cn/offline.png';
     const page = parseWechat2RssJsonFeed(
@@ -640,6 +657,8 @@ describe('backend collection routing', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0][0].toString()).toBe(imageUrl);
     } finally {
+      if (originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = originalDatabaseUrl;
       fetchMock.mockRestore();
     }
   }, 15_000);

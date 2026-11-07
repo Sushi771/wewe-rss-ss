@@ -12,8 +12,45 @@ const tool =
     ? require('./identity-tool.cjs').identityTool()
     : undefined;
 async function prepareWriterSelf() {
-  if (process.platform !== 'win32') return;
   if (observed) return observed;
+  if (process.platform === 'linux') {
+    const stat = fs.readFileSync('/proc/self/stat', 'utf8');
+    const ticks = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+    const boot = fs
+      .readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')
+      .trim();
+    assert.equal(Number(stat.slice(0, stat.indexOf(' '))), process.pid);
+    assert(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(boot));
+    assert(/^[0-9]{1,20}$/.test(ticks));
+    const executable = fs.realpathSync.native('/proc/self/exe');
+    assert.equal(executable, fs.realpathSync.native(process.execPath));
+    const command = fs.readFileSync('/proc/self/cmdline');
+    assert(command.length > 0);
+    const commandLine = command.toString('utf8');
+    assert(Buffer.from(commandLine).equals(command));
+    const startUtc = `linux:${boot}:${ticks}`;
+    const record = Object.freeze({
+      pid: process.pid,
+      startUtc,
+      executableHash: hash(fs.readFileSync(executable)),
+      commandHash: hash(command),
+    });
+    const key = Symbol.for('wewe.project-writer-self.v1');
+    if (globalThis[key]) assert.deepEqual(globalThis[key], record);
+    globalThis[key] = record;
+    observed = Object.freeze({
+      pid: process.pid,
+      startUtc,
+      executable,
+      commandLine,
+    });
+    return observed;
+  }
+  assert.equal(
+    process.platform,
+    'win32',
+    'identity fixture requires a supported native observation',
+  );
   assert(
     tool,
     'verified native identity tool must be available for Windows fixtures',
@@ -80,7 +117,6 @@ if (require.main === module) {
     path = require('node:path');
   test.before(prepareWriterSelf);
   test('fixture identity is real, cached and shared with the unchanged writer gate', async () => {
-    if (process.platform !== 'win32') return;
     const identity = await prepareWriterSelf();
     assert.equal(identity.pid, process.pid);
     assert.equal(await prepareWriterSelf(), identity);
@@ -89,6 +125,110 @@ if (require.main === module) {
       hash(identity.commandLine),
     );
   });
+  for (const kind of [
+    'valid',
+    'wrong-pid',
+    'bad-boot',
+    'bad-ticks',
+    'wrong-executable',
+    'empty-command',
+    'changed-cache',
+    'invalid-utf8-command',
+  ]) {
+    test('Linux fixture observes kernel identity: ' + kind, async () => {
+      const executable = '/fixture/node';
+      const fields = Array(20).fill('0');
+      fields[0] = 'S';
+      fields[19] = kind === 'bad-ticks' ? 'unknown' : '123456';
+      const command =
+        kind === 'invalid-utf8-command'
+          ? Buffer.from([0xff])
+          : Buffer.from(kind === 'empty-command' ? '' : 'node\0fixture\0');
+      const context = {
+        module: { exports: {} },
+        Buffer,
+        process: { pid: 123, platform: 'linux', execPath: executable },
+        require(id) {
+          if (id === 'node:fs')
+            return {
+              realpathSync: {
+                native: () =>
+                  kind === 'wrong-executable' ? '/foreign/node' : executable,
+              },
+              readFileSync(file) {
+                if (file === '/proc/self/stat')
+                  return `${kind === 'wrong-pid' ? 124 : 123} (owned fixture) ${fields.join(' ')}`;
+                if (file === '/proc/sys/kernel/random/boot_id')
+                  return kind === 'bad-boot'
+                    ? 'invalid'
+                    : '00000000-0000-4000-8000-000000000001\n';
+                if (file === '/proc/self/cmdline') return command;
+                if (file === executable) return Buffer.from('owned executable');
+                throw Error('unexpected fixture read');
+              },
+            };
+          if (id === 'node:child_process')
+            return {
+              execFileSync() {
+                throw Error('Linux fixture must not invoke Windows tooling');
+              },
+            };
+          return require(id);
+        },
+      };
+      // Model a foreign /proc/self/exe result independently from execPath.
+      const originalRequire = context.require;
+      if (kind === 'wrong-executable')
+        context.require = (id) => {
+          const value = originalRequire(id);
+          if (id === 'node:fs')
+            value.realpathSync.native = (file) =>
+              file === '/proc/self/exe' ? '/foreign/node' : executable;
+          return value;
+        };
+      vm.createContext(context);
+      const prior =
+        kind === 'changed-cache'
+          ? { pid: 123, startUtc: 'different cached identity' }
+          : undefined;
+      if (prior) {
+        context.priorIdentity = prior;
+        vm.runInContext(
+          "globalThis[Symbol.for('wewe.project-writer-self.v1')] = priorIdentity",
+          context,
+        );
+      }
+      vm.runInContext(fs.readFileSync(__filename, 'utf8'), context, {
+        filename: __filename,
+      });
+      if (kind !== 'valid') {
+        await assert.rejects(context.module.exports.prepareWriterSelf());
+        assert.equal(
+          vm.runInContext(
+            "globalThis[Symbol.for('wewe.project-writer-self.v1')]",
+            context,
+          ),
+          prior,
+        );
+        return;
+      }
+      const result = await context.module.exports.prepareWriterSelf();
+      assert.equal(result.pid, 123);
+      assert.equal(
+        result.startUtc,
+        'linux:00000000-0000-4000-8000-000000000001:123456',
+      );
+      assert.equal(result.commandLine, command.toString('utf8'));
+      assert.equal(await context.module.exports.prepareWriterSelf(), result);
+      assert.equal(
+        vm.runInContext(
+          "globalThis[Symbol.for('wewe.project-writer-self.v1')].commandHash",
+          context,
+        ),
+        hash(command),
+      );
+    });
+  }
   for (const kind of [
     'wrong-pid',
     'wrong-executable',

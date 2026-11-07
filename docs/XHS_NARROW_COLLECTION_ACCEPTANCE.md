@@ -85,3 +85,134 @@ configuration, and synthetic databases. Their matching failures establish
 baseline failures for those selected cases. They do not establish that every
 remaining full-suite failure is harmless. The full CI result must continue to
 be reported independently from these scoped checks.
+
+## Cross-platform identity fixture correction
+
+The writer gate already identifies a Linux process using its boot UUID and
+kernel start ticks. The legacy maintenance validator now accepts that exact
+existing format as well as the previous Windows forms; holder comparisons,
+executable and command hashes, and quiescence observations remain required.
+The test preparation helper observes `/proc/self` on Linux instead of returning
+no identity. Windows still uses the existing native observation tool.
+
+Local checks passed 16 identity-fixture cases and 50 legacy maintenance,
+controller, and project-adapter cases. Synthetic Linux cases reject a changed
+boot, ticks, PID, executable, malformed command bytes, and a conflicting cached
+identity. Actual Linux execution remains subject to the exact candidate's CI;
+these local results do not establish a passing full CI or installation.
+
+## Provider and AppModule fixture alignment (2026-11-07)
+
+The bounded Wechat2RSS response and prepared-refresh tests now provide the
+real persistent source gate with explicit temporary SQLite databases. Failed
+response scenarios use independent fixture gates; service restarts within a
+single subscription test retain their pending gate. The subscription transport
+also supplies a valid synthetic RSS response for optional avatar reads. Its
+previous missing route incorrectly left the real source gate pending and
+caused later cases to stop before their intended requests.
+
+The assertions follow the current bounded failure contract: HTTP 429 remains
+a source-wide restriction, ordinary HTTP errors retain their status, and an
+oversized article body preserves proved article metadata with BODY_TOO_LARGE.
+An uncertain request remains durably pending, including after service restart;
+the tests retain no-replay, no-native-fallback and no-secret-disclosure checks.
+
+Startup middleware now receives an owned SQLite file and real writer lease
+instead of relying on an ambient DATABASE_URL. The browser opt-in and recovery
+hold AppModule fixtures use actual PrismaService instances and migrated,
+isolated SQLite schemas required by the newer local recovery hooks. The hold
+fixture uses the real startup guard and verifies unchanged database bytes,
+directory entries and queued-state content with zero outbound fetch calls.
+App shutdown, Prisma disconnection and writer-lease closure complete before
+fixture cleanup. No platform requests or production database/backup access
+were used; any snapshot checks operate only on owned temporary fixtures.
+
+Local targeted Jest results on Node 24.11.1 / Windows:
+
+| Suite                                 | Passed | Existing skipped |
+| ------------------------------------- | -----: | ---------------: |
+| wechat2rss-response.spec.ts           |     17 |                0 |
+| wechat2rss-prepared-refresh.spec.ts   |      8 |                0 |
+| wechat2rss-restriction.spec.ts        |      5 |                0 |
+| subscription-source-selection.spec.ts |     39 |                0 |
+| startup-audit.spec.ts                 |      9 |                0 |
+| browser-task.opt-in.spec.ts           |      9 |                0 |
+| recovery-hold-app-integration.spec.ts |      1 |                1 |
+
+These seven suites passed 88 tests. The recovery-hold HTTP case was already
+skipped in the baseline; this change adds no skip and does not claim that case
+passed. Prettier, scoped ESLint and diff whitespace checks passed. These scoped
+results do not establish a passing full CI, Linux execution or installation.
+
+### UI 与媒体导出 fixture 的有限归因证据
+
+UI 的 6 个目标 suite 共 74 个用例分批通过。修正仅涉及过期测试合同：VM 加载真实官方原文 URL 校验与共享选择控件；文章列表按现有 container 布局、官方原文链接和共享排序验证；小红书批量操作按现有持久批次与回执推进验证。原有选择、禁用、取消和完成回执断言保留。模块注册及 recovery bootstrap 在当前候选原样通过，没有为旧日志盲改产品。
+
+媒体/导出 4 个目标文件共 67 条业务断言通过。其中 article-export-status、article-local-layout、wechat2rss-single-download 三个完整 suite 共 45 个用例通过。前两者原失败来自缺失测试自有 DATABASE_URL，导致真实媒体安全锁按设计默认关闭；现在使用临时文件绑定，未 mock 掉安全锁。严格单篇下载明确断言 WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE、无 Markdown 发布、源缓存不变、私有错误不泄露及无原文回退；没有将媒体失败放宽为成功。
+
+channel-routing 的完整 22 条业务断言通过，包括解析正文与实际 PNG 附件字节核对，但本机 Windows 在套级清理时仍返回临时数据库 EBUSY。已调用并 await 测试自有服务的生命周期关闭返回（该方法停止 continuation timers），Prisma disconnect 已 await；有限重试与有界清理时间未解决文件锁，未杀进程或绕锁。因此该 suite 仍是清理环境阻塞，不能记录为完整 suite 通过。锁的实际持有者尚未证明，若需继续应只读识别本测试及其原生数据库子进程的文件句柄。
+
+以上为定向、合成来源和临时输出证据，不代表完整 CI、真实平台采集或生产安装验收通过。
+
+## XHS request safety and fixture isolation
+
+The scheduled review reader casts only `approved_at` to text for Prisma's
+SQLite INTEGER decoder. Ordering still uses the original numeric column and
+ID. The request admission projection now includes the review ID required by
+the existing exact-binding check. Tests cover 9, 10 and a real millisecond epoch,
+wrong review rejection, and a correctly persisted started receipt.
+
+Repeated observation of an exactly bound completed task, or an exhausted
+article-local partial task with an explicitly allowed code, grants no new
+review, request budget, session binding or work. New unknown evidence, wrong
+bindings and unsupported partial outcomes remain blocked. Synthetic terminal
+observations verify unchanged review, request and budget rows.
+
+Bounded reviewed-context transport starts after the entry transaction commits.
+A fresh database reader rechecks the durable stage, marker, owner, unresolved
+requests, writers, budgets and source risk before transport. Missing readers,
+failed commits and failed readers stop before sending; consumed charges and
+attempt markers are retained. Port tests prove this ordering and failure
+control flow. A separate real SQLite bounded-context case changes durable risk
+after entry commits and verifies zero subsequent API calls; port assertions
+alone are not represented as durable database evidence.
+
+A typed detail identity mismatch is article-local only when the runtime can
+prove this operation's exact review/task/creator/target receipt was settled as
+`response-received`, with all durable source-risk restriction fields clear.
+An older settled response cannot substitute for the current operation. Reader
+failure, an unknown outcome or a changed binding preserves the ordinary stop.
+Session generation and restrictions are checked again after the reader awaits.
+
+The risk fixtures now create and destroy a separate migrated temporary SQLite
+database per case. Immutable review history is retained throughout each case;
+no audit deletion or guard bypass is used to isolate subsequent tests. The
+scheduled Redbook suite passed all 17 cases, retaining same-account continuation
+after a proved article-local parse failure, cross-account continuation, and
+source-wide stops for uncertain or restricted responses. Every synthetic GET
+and POST remains charged, including failed requests. No workflow changes or
+new test skips are included in these XHS corrections. Complete candidate CI
+and production installation remain separate acceptance results.
+
+The complete risk and original-link group passed 185/185 tests across
+`xhs-source-risk-store.spec.ts`, `xhs-p0-source-risk-full.spec.ts` and
+`xhs-original-link-access.spec.ts` in the normal isolated test environment.
+This includes the existing scheduled-comment and repeat-observation assertions;
+restricted-environment runs are not counted as candidate validation.
+
+The exact detail-receipt regression passed 15 synthetic control-flow cases
+using the real runtime catch path and a synthetic reader/admission port. It
+checks current-operation binding, unknown and risk refusal, reader failure, and
+session/restriction changes across the await. It does not represent a second
+real SQLite integration result. The separate scheduled-read SQLite regression
+also passed its epoch ordering, actual admission and terminal-observation
+checks.
+
+The same expired writer-admission cause was reproduced in the single reviewed
+request path. Its operation now begins after entry commit and a fresh durable
+reader, with exact consumed/entered document and pending-marker snapshots.
+Existing creator, owner, risk, unresolved-recovery and writer checks remain;
+legacy schemas retain their original conditional subscription-table access.
+Successful single-request checkpointing preserves any longer existing cooldown
+and applies at least a full interval after the received response. Unknown or
+failed requests retain their consumed permit, charge and unresolved marker.

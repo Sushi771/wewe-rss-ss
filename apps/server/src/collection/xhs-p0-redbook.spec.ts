@@ -11,6 +11,7 @@ import { XhsSourceParseError } from './xhs-subscription-errors';
 import { XhsBatchSubscriptionService } from './xhs-batch-subscription.service';
 import { XhsScheduledRunner } from './xhs-scheduled-runner';
 import { scheduledTaskId } from './xhs-scheduled-admission';
+import { approveSyntheticScheduledPolicy } from '../../test/fixtures/xhs-scheduled-policy';
 
 jest.setTimeout(60000);
 import { applyFixtureMigrations } from '../../test/redbook-isolated/fixture-migrations';
@@ -562,12 +563,43 @@ it.each(['parse', 'restricted', 'unknown'] as const)(
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
     await applyFixtureMigrations(db);
+    let detailRequests = 0;
     const api = jest.fn(async (request: any) => {
+      const url = new URL(request.url);
+      if (request.method === 'GET') {
+        const author = url.searchParams.get('user_id');
+        const notes =
+          author === 'author-a'
+            ? ['a-bad', 'a-good']
+            : author === 'author-b'
+              ? ['b-good']
+              : [];
+        return {
+          status: 200,
+          url: request.url,
+          body: {
+            success: true,
+            code: 0,
+            data: url.pathname.endsWith('/user_posted')
+              ? {
+                  notes: notes.map((note_id) => ({
+                    note_id,
+                    user: { user_id: author },
+                    xsec_token: 'synthetic-token',
+                  })),
+                  has_more: false,
+                  cursor: '',
+                }
+              : {},
+          },
+        };
+      }
+      detailRequests++;
       const note = JSON.parse(request.body).source_note_id,
         owner = note === 'b-good' ? 'author-b' : 'author-a';
-      if (api.mock.calls.length === 1 && mode === 'unknown')
+      if (detailRequests === 1 && mode === 'unknown')
         throw Error('synthetic unknown transport');
-      if (api.mock.calls.length === 1 && mode === 'restricted')
+      if (detailRequests === 1 && mode === 'restricted')
         return {
           status: 403,
           url: request.url,
@@ -608,62 +640,42 @@ it.each(['parse', 'restricted', 'unknown'] as const)(
       enabled: () => true,
       api,
       requirePersistentRisk: true,
+      profileParser: (_raw, author) => ({
+        id: author,
+        name: 'Synthetic',
+        profileUrl: `https://www.xiaohongshu.com/user/profile/${author}`,
+        metrics: {
+          values: { fans: 1, following: null },
+          collectedAt: 2,
+          contract: 'synthetic',
+          evidence: 'source-only',
+        },
+      }),
     });
+    let policy:
+      | Awaited<ReturnType<typeof approveSyntheticScheduledPolicy>>
+      | undefined;
+    let service: any;
     try {
       for (const id of ['a', 'b'])
         await db.xhsCreator.create({
           data: {
             id,
             externalAuthorId: `author-${id}`,
-            profileUrl: `https://example.invalid/${id}`,
+            profileUrl: `https://www.xiaohongshu.com/user/profile/author-${id}`,
             displayName: id,
             enabled: true,
           },
         });
-      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0)`;
+      await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,1000)`;
       runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
       bindXhsSourceTotalBudget(db as any, runtime);
       await runtime.connectSession({
         a1: 'synthetic-a1',
         webSession: 'synthetic-session',
       });
-      for (const [author, notes] of [
-        ['author-a', ['a-bad', 'a-good']],
-        ['author-b', ['b-good']],
-      ] as const) {
-        (runtime as any).adapter.restoreDefaultAuthorAccess(author);
-        for (const note of notes)
-          (runtime as any).adapter.tokens.set(JSON.stringify([author, note]), {
-            token: 'synthetic-token',
-            source: 'pc_user',
-            expiresAt: Date.now() + 60000,
-          });
-      }
-      jest.spyOn(runtime, 'resolve').mockImplementation(
-        async (url) =>
-          ({
-            inputKind: 'profile',
-            author: { id: url.split('/').pop() },
-          }) as any,
-      );
-      jest.spyOn(runtime, 'list').mockImplementation(
-        async (author) =>
-          ({
-            authorId: author,
-            nextCursor: null,
-            notes: (author === 'author-a'
-              ? ['a-bad', 'a-good']
-              : ['b-good']
-            ).map((noteId) => ({
-              authorId: author,
-              noteId,
-              title: 'Synthetic',
-              publishedAt: 0,
-              kind: 'image-text',
-            })),
-          }) as any,
-      );
-      const service: any = new XhsSubscriptionService(db as any, runtime);
+      policy = await approveSyntheticScheduledPolicy(db, runtime, ['a', 'b']);
+      service = new XhsSubscriptionService(db as any, runtime);
       service.write = async (_bytes: number, fn: any) => db.$transaction(fn);
       const runner = new XhsScheduledRunner(db as any, {
         scheduleCreatorPhase: service.scheduleCreatorPhase.bind(service),
@@ -708,9 +720,17 @@ it.each(['parse', 'restricted', 'unknown'] as const)(
           service.task({ taskId: scheduledTaskId(round, 'b', 'basic') }),
         ).rejects.toThrow();
       }
+      expect(
+        (
+          await db.$queryRaw<
+            Array<{ used: number }>
+          >`SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'`
+        )[0].used,
+      ).toBe(api.mock.calls.length);
       expect(globalFetch).not.toHaveBeenCalled();
-      await service.onModuleDestroy();
     } finally {
+      await service?.onModuleDestroy();
+      await policy?.cleanup();
       runtime.onModuleDestroy();
       globalFetch.mockRestore();
       await db.$disconnect();

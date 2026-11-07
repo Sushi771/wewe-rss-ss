@@ -37,7 +37,7 @@ describe('XHS durable batches on an isolated SQLite database', () => {
     calls = [];
     receipt = new Map();
     source = {
-      refresh: jest.fn(async (id: string, op: string) => {
+      legacyRefresh: jest.fn(async (id: string, op: string) => {
         calls.push(id);
         receipt.set(op, {
           state: 'complete',
@@ -117,7 +117,7 @@ describe('XHS durable batches on an isolated SQLite database', () => {
     const id = randomUUID();
     await batches.create(id, ['a', 'b']);
     await expect(batches.create(randomUUID(), ['b'])).rejects.toThrow();
-    source.refresh.mockImplementation(async (_id: string, op: string) =>
+    source.legacyRefresh.mockImplementation(async (_id: string, op: string) =>
       receipt.set(op, {
         state: 'complete',
         outcome: { status: 'partial', added: 1, message: 'pagination' },

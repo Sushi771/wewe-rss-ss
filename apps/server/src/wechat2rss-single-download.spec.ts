@@ -419,21 +419,28 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
     expect(calls).toEqual([]);
   });
 
-  it('retains cached text and reports incomplete media when an image fails', async () => {
+  it('retains source cache but publishes no Markdown when strict single-download media fails', async () => {
     jest
       .mocked(images.fetchAllowedImage)
       .mockRejectedValue(new Error('unsafe upstream detail'));
+    const snapshot = JSON.stringify(feed);
     const prepare = await prepareWechat2RssSingleDownload(url);
     expect(images.fetchAllowedImage).not.toHaveBeenCalled();
-    await expect(prepare(folder)).resolves.toMatchObject({
-      mediaComplete: false,
+    const error = await prepare(folder).catch((error) => error);
+    expect(error).toMatchObject({
+      diagnostic: {
+        code: 'WECHAT2RSS_SINGLE_IMAGES_UNAVAILABLE',
+        stage: 'article',
+      },
     });
+    expect(error.message).not.toContain('unsafe upstream detail');
     expect(
       (await readdir(folder)).filter((name) => name.endsWith('.md')),
-    ).toEqual(['index.md']);
+    ).toEqual([]);
+    expect(JSON.stringify(feed)).toBe(snapshot);
+    expect(images.fetchAllowedImage).toHaveBeenCalledTimes(1);
     expect(axios.get).not.toHaveBeenCalled();
   });
-
   it('does not invent absent engagement metrics from arbitrary feed fields', async () => {
     feed = { items: [item({ readCount: 999, likeCount: 888, favorite: 777 })] };
     const selected = await registry

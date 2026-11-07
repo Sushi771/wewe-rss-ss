@@ -62,6 +62,8 @@ const time = (v: unknown): v is number =>
 const startIdentity = (v: unknown) =>
   typeof v === 'string' &&
   (/^[0-9]{15,20}$/.test(v) ||
+    // Same boot/start identity emitted by the Linux project-writer gate.
+    /^linux:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}:[0-9]{1,20}$/.test(v) ||
     (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}Z$/.test(v) &&
       Number.isFinite(Date.parse(v))));
 const identity = (v: Identity) =>

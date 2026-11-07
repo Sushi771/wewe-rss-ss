@@ -1,12 +1,48 @@
 import { Wechat2RssProvider } from './wechat2rss';
 import { refreshSubmissionFailure } from '../refresh-response-receipt';
+import { PrismaClient } from '@prisma/client';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { Wechat2RssSourceGate } from '../wechat2rss-source-gate';
 
 describe('prepared update interface (offline)', () => {
-  afterEach(() => jest.restoreAllMocks());
+  let database: PrismaClient;
+  let gate: Wechat2RssSourceGate;
+  let root: string;
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'wewe-prepared-gate-'));
+    database = new PrismaClient({
+      datasources: {
+        db: { url: `file:${join(root, 'fixture.sqlite').replace(/\\/g, '/')}` },
+      },
+    });
+    const migration = readFileSync(
+      resolve(
+        __dirname,
+        '../../../prisma/migrations/20261014000000_wechat2rss_source_gate/migration.sql',
+      ),
+      'utf8',
+    );
+    for (const statement of migration
+      .split(';')
+      .map((s) => s.trim())
+      .filter(Boolean))
+      await database.$executeRawUnsafe(statement);
+    gate = new Wechat2RssSourceGate(database);
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await database?.$disconnect();
+    expect(dirname(root)).toBe(tmpdir());
+    expect(basename(root)).toMatch(/^wewe-prepared-gate-/);
+    rmSync(root, { recursive: true, force: true });
+  });
   it('prepares subscribed identities without updates, then sends one GET per closure', async () => {
     const provider = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'fixture-token',
+      gate,
     );
     jest.spyOn(provider, 'listSubscriptions').mockResolvedValue([
       {
@@ -33,6 +69,7 @@ describe('prepared update interface (offline)', () => {
     const provider = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'fixture-token',
+      gate,
     );
     jest.spyOn(provider, 'listSubscriptions').mockResolvedValue([
       {
@@ -46,7 +83,10 @@ describe('prepared update interface (offline)', () => {
       .mockResolvedValue(new Response('private fixture body', { status: 429 }));
     const submit =
       await provider.prepareRefreshSubscription('MP_WXS_1234567890');
-    await expect(submit()).rejects.toThrow('WECHAT2RSS_RATE_LIMITED');
+    await expect(submit()).rejects.toMatchObject({
+      message: 'WECHAT2RSS_SOURCE_RESTRICTED',
+      status: 429,
+    });
   });
   it.each([
     ['', 'WECHAT2RSS_EMPTY_BODY', 'body'],
@@ -70,6 +110,7 @@ describe('prepared update interface (offline)', () => {
       const provider = new Wechat2RssProvider(
         'http://127.0.0.1:18080/',
         'fixture-token',
+        gate,
       );
       jest.spyOn(provider, 'listSubscriptions').mockResolvedValue([
         {
@@ -107,6 +148,7 @@ describe('prepared update interface (offline)', () => {
     const provider = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'fixture-token',
+      gate,
     );
     jest.spyOn(provider, 'listSubscriptions').mockResolvedValue([
       {
@@ -141,6 +183,7 @@ describe('prepared update interface (offline)', () => {
     const provider = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'fixture-token',
+      gate,
     );
     jest.spyOn(provider, 'listSubscriptions').mockResolvedValue([
       {

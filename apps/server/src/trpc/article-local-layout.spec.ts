@@ -38,6 +38,8 @@ describe('all cached article local/ZIP export entry points share isolated image 
   beforeEach(async () => {
     delete process.env.PRIVATE_ONLINE_MODE;
     root = await fs.mkdtemp(join(tmpdir(), 'wewe-layout-router-'));
+    await fs.writeFile(join(root, 'fixture.db'), '');
+    process.env.DATABASE_URL = 'file:' + join(root, 'fixture.db');
     items = [article(), article('WX_1234567890_2247000002_1')];
     jest.spyOn(axios, 'get').mockRejectedValue(new Error('NO_NETWORK'));
     jest.spyOn(global, 'fetch').mockRejectedValue(new Error('NO_NETWORK'));

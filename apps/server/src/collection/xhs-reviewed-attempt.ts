@@ -714,12 +714,13 @@ export async function settleReviewedContextStage(
   return { state: 'settled' as const };
 }
 /** Recheck the durable stage and source gate at the physical transport entry. */
-export async function enterReviewedContextStage(
+async function checkedReviewedContextStage(
   tx: Tx,
   jobId: string,
   id: string,
   marker: string,
   owner: ReturnType<typeof createDispatchOwner>,
+  entered: boolean,
 ) {
   if (!owner) return bad();
   await noUnresolvedRecovery(tx);
@@ -748,7 +749,7 @@ export async function enterReviewedContextStage(
     !excludedGenerationFence(job, s.noteId) ||
     stage?.state !== 'started' ||
     stage.marker !== marker ||
-    stage.transportEntered ||
+    (entered ? stage.transportEntered !== true : !!stage.transportEntered) ||
     !ownsDispatch(stage.owner, owner)
   )
     return bad();
@@ -785,9 +786,36 @@ export async function enterReviewedContextStage(
     )
   )
     return bad();
+  return { job, stage, document: rows[0].document };
+}
+/** Recheck the committed stage, exact owner, unknown fences and durable risk. */
+export async function assertEnteredReviewedContextStage(
+  tx: Tx,
+  jobId: string,
+  id: string,
+  marker: string,
+  owner: ReturnType<typeof createDispatchOwner>,
+) {
+  await checkedReviewedContextStage(tx, jobId, id, marker, owner, true);
+}
+export async function enterReviewedContextStage(
+  tx: Tx,
+  jobId: string,
+  id: string,
+  marker: string,
+  owner: ReturnType<typeof createDispatchOwner>,
+) {
+  const { job, stage, document } = await checkedReviewedContextStage(
+    tx,
+    jobId,
+    id,
+    marker,
+    owner,
+    false,
+  );
   stage.transportEntered = true;
   const n =
-    await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${rows[0].document}`;
+    await tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=${JSON.stringify(job)} WHERE id=${jobId} AND state='partial' AND document=${document}`;
   if (n !== 1) return bad();
   return { state: 'entered' as const };
 }

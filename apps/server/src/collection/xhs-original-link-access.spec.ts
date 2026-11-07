@@ -693,9 +693,17 @@ describe('protected transient original links and durable source budgets (offline
       feed: { updateDelayTime: 0 },
     });
     const poisoned = {
-      $queryRaw: jest.fn(async () => {
-        throw Error('https://evil.invalid/?xsec_token=synthetic-private-error');
-      }),
+      $queryRaw: jest.fn(
+        async (sql: TemplateStringsArray, ...values: any[]) => {
+          // Preserve the real legacy schema/receipt gate. Inject the private
+          // adapter error at the intended policy read, after that gate succeeds.
+          if (String(sql).includes('SELECT * FROM xhs_request_budgets'))
+            throw Error(
+              'https://evil.invalid/?xsec_token=synthetic-private-error',
+            );
+          return db.$queryRaw(sql, ...values);
+        },
+      ),
       xhsNote: {
         findUnique: async () => {
           throw Error('synthetic-private-error');

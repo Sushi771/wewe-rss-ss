@@ -1,4 +1,9 @@
 import { Test } from '@nestjs/testing';
+beforeAll(
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Observe the test process through the existing native identity fixture.
+  require('../../../scripts/local-release/writer-self.fixture.test.cjs')
+    .prepareWriterSelf,
+);
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { json } from 'express';
@@ -12,7 +17,7 @@ import {
   mkdir,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { load } from 'cheerio';
 import { AppModule } from './app.module';
@@ -24,6 +29,8 @@ import * as picker from './article-folder-picker';
 import { LocalArticleStore } from './article-local-save';
 import { BrowserTaskBroker } from './browser-task';
 import { ArticleDownloadController } from './article-download.controller';
+import { projectWriterGate } from './collection/project-writer-boundary';
+import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 import {
   readBrowserTaskOptIn,
   browserTaskApplication,
@@ -47,6 +54,8 @@ describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic of
     file: string,
     destination: string,
     app: NestExpressApplication | undefined;
+  let prisma: PrismaService;
+  let writerLease: { close(): void };
   const originalUrl =
     'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5MA%3D%3D&mid=2247000001&idx=1&sn=abcd';
   const sample = observation();
@@ -94,7 +103,22 @@ describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic of
     file = join(directory, 'approval.json');
     destination = join(directory, 'notes');
     await mkdir(destination);
-    process.env.DATABASE_URL = 'file:' + join(directory, 'unused.sqlite');
+    const database = join(directory, 'fixture.sqlite');
+    await writeFile(database, '', { flag: 'wx' });
+    process.env.DATABASE_URL = `file:${database.replace(/\\/g, '/')}`;
+    process.env.XHS_SUBSCRIPTION_LIVE_ENABLED = '0';
+    writerLease = projectWriterGate().writerForUrl(process.env.DATABASE_URL);
+    prisma = new PrismaService();
+    // Actual AppModule now recovers its local XHS task tables at startup. Give
+    // it a migrated, owned database while all platform access stays disabled.
+    const migrations = resolve(__dirname, '../prisma/migrations');
+    for (const name of (await readdir(migrations)).sort()) {
+      if (name === 'migration_lock.toml') continue;
+      for (const statement of splitSqliteStatements(
+        await readFile(join(migrations, name, 'migration.sql'), 'utf8'),
+      ))
+        await prisma.$executeRawUnsafe(statement);
+    }
     await writeFile(
       join(directory, '.article-download-settings.json'),
       JSON.stringify({ directory: destination, askEveryTime: false }),
@@ -104,8 +128,12 @@ describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic of
   afterEach(async () => {
     await app?.close();
     app = undefined;
+    await prisma?.$disconnect();
+    await writerLease?.close();
     jest.restoreAllMocks();
     process.env = { ...previous };
+    expect(dirname(directory)).toBe(tmpdir());
+    expect(basename(directory)).toMatch(/^wewe-explicit-opt-in-/);
     await rm(directory, { recursive: true, force: true });
   });
   async function application(enabled = true) {
@@ -114,7 +142,7 @@ describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic of
       imports: [browserTaskApplication(opted)],
     })
       .overrideProvider(PrismaService)
-      .useValue({})
+      .useValue(prisma)
       .overrideProvider(WereadService)
       .useValue({})
       .overrideProvider(CollectionService)

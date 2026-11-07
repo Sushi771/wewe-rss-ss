@@ -1,5 +1,10 @@
 import { Wechat2RssProvider } from './wechat2rss';
 import { WECHAT2RSS_CACHE_RESPONSE_LIMIT as LIMIT } from './wechat2rss-response';
+import { PrismaClient } from '@prisma/client';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { Wechat2RssSourceGate } from '../wechat2rss-source-gate';
 
 const id = 'MP_WXS_1234567890';
 const listed = {
@@ -10,8 +15,35 @@ const listed = {
   nextUpdateTime: null,
   paused: false,
 };
-const client = () =>
-  new Wechat2RssProvider('http://127.0.0.1:18080/', 'synthetic-secret');
+const databases: Array<{ db: PrismaClient; root: string }> = [];
+async function client() {
+  // Independent response scenarios must not reuse a source left pending by a
+  // rejected response. Exercise the real durable gate on explicit test SQLite.
+  const root = mkdtempSync(join(tmpdir(), 'wewe-response-gate-'));
+  const db = new PrismaClient({
+    datasources: {
+      db: { url: `file:${join(root, 'fixture.sqlite').replace(/\\/g, '/')}` },
+    },
+  });
+  databases.push({ db, root });
+  const migration = readFileSync(
+    resolve(
+      __dirname,
+      '../../../prisma/migrations/20261014000000_wechat2rss_source_gate/migration.sql',
+    ),
+    'utf8',
+  );
+  for (const statement of migration
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean))
+    await db.$executeRawUnsafe(statement);
+  return new Wechat2RssProvider(
+    'http://127.0.0.1:18080/',
+    'synthetic-secret',
+    new Wechat2RssSourceGate(db),
+  );
+}
 // encoding/json's default HTML-safe JSON string escaping. This proves a
 // serializer-compatible boundary, not the bytes of an uncaptured production response.
 const escapedJson = (value: unknown) =>
@@ -51,7 +83,17 @@ function streamResponse(text: string, status = 200, chunk = 65536) {
   );
 }
 describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
-  afterEach(() => jest.restoreAllMocks());
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await Promise.all(
+      databases.splice(0).map(async ({ db, root }) => {
+        await db.$disconnect();
+        expect(dirname(root)).toBe(tmpdir());
+        expect(basename(root)).toMatch(/^wewe-response-gate-/);
+        rmSync(root, { recursive: true, force: true });
+      }),
+    );
+  });
   it('accepts every article in a 4,003,033-byte HTML-escaped JSON feed without another request', async () => {
     const feed = largeFeed(),
       wire = escapedJson(feed);
@@ -60,7 +102,9 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
     const request = jest
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse(wire));
-    const page = await client().fetchListedArticles(listed, listed.name);
+    const page = await (
+      await client()
+    ).fetchListedArticles(listed, listed.name);
     expect(page.articles).toHaveLength(24);
     expect(page.bodyMissing).toBe(0);
     expect(page.articles.map((a) => a.title)).toEqual(
@@ -79,7 +123,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse('private upstream body', 503));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toMatchObject({
       message: 'WECHAT2RSS_HTTP_STATUS',
       httpStatus: 503,
@@ -90,7 +134,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse('not JSON synthetic-secret'));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow('WECHAT2RSS_INVALID_JSON');
   });
   it('keeps explicit throttling and empty-body categories', async () => {
@@ -98,14 +142,14 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse('private', 429));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toMatchObject({
-      message: 'WECHAT2RSS_RATE_LIMITED',
-      httpStatus: 429,
+      message: 'WECHAT2RSS_SOURCE_RESTRICTED',
+      status: 429,
     });
     request.mockResolvedValue(new Response(null, { status: 200 }));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow('WECHAT2RSS_EMPTY_BODY');
   });
   it.each([
@@ -127,7 +171,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       expect(response.body).not.toBeNull();
       const request = jest.spyOn(global, 'fetch').mockResolvedValue(response);
       await expect(
-        client().fetchListedArticles(listed, listed.name),
+        (await client()).fetchListedArticles(listed, listed.name),
       ).rejects.toMatchObject({
         message: expected,
         ...(kind === 'whitespace'
@@ -148,7 +192,8 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse(wire));
     expect(
-      (await client().fetchListedArticles(listed, listed.name)).articles,
+      (await (await client()).fetchListedArticles(listed, listed.name))
+        .articles,
     ).toEqual([]);
     expect(request).toHaveBeenCalledTimes(1);
   });
@@ -178,7 +223,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
         }),
       );
       await expect(
-        client().fetchListedArticles(listed, listed.name),
+        (await client()).fetchListedArticles(listed, listed.name),
       ).rejects.toMatchObject({
         message: 'WECHAT2RSS_RESPONSE_TOO_LARGE',
         responseBytes: LIMIT + 1,
@@ -193,7 +238,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
     jest
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse(' '.repeat(4_000_001)));
-    await expect(client().checkAccountStatus()).rejects.toMatchObject({
+    await expect((await client()).checkAccountStatus()).rejects.toMatchObject({
       message: 'WECHAT2RSS_RESPONSE_TOO_LARGE',
       responseLimitBytes: 4_000_000,
     });
@@ -206,8 +251,8 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse(JSON.stringify(feed), 200, 1));
     expect(
-      (await client().fetchListedArticles(listed, listed.name)).articles[0]
-        .contentHtml,
+      (await (await client()).fetchListedArticles(listed, listed.name))
+        .articles[0].contentHtml,
     ).toContain('正文🙂');
   });
   it.each(['headers', 'body'])(
@@ -236,7 +281,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
           );
         });
       await expect(
-        client().fetchListedArticles(listed, listed.name),
+        (await client()).fetchListedArticles(listed, listed.name),
       ).rejects.toThrow('WECHAT2RSS_REQUEST_TIMEOUT');
       expect(AbortSignal.timeout).toHaveBeenCalledWith(10000);
       expect(request).toHaveBeenCalledTimes(1);
@@ -248,11 +293,11 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       .spyOn(global, 'fetch')
       .mockRejectedValue(Error('http://private/?k=synthetic-secret'));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow(/^WECHAT2RSS_NETWORK_ERROR$/);
     request.mockResolvedValue(new Response(new Uint8Array([255])));
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow(/^WECHAT2RSS_INVALID_ENCODING$/);
   });
   it('checks elapsed time between chunks even before an abort timer can run', async () => {
@@ -271,7 +316,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
         ),
       );
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow('WECHAT2RSS_REQUEST_TIMEOUT');
     expect(pull).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -284,9 +329,18 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
     const request = jest
       .spyOn(global, 'fetch')
       .mockResolvedValue(streamResponse(JSON.stringify(feed)));
-    await expect(
-      client().fetchListedArticles(listed, listed.name),
-    ).rejects.toThrow('WECHAT2RSS_BODY_TOO_LARGE');
+    const page = await (
+      await client()
+    ).fetchListedArticles(listed, listed.name);
+    expect(page.articles).toHaveLength(1);
+    expect(page.articles[0]).toMatchObject({
+      title: feed.items[0].title,
+      contentHtml: null,
+    });
+    expect(page.bodyMissing).toBe(1);
+    expect(page.bodyFailures).toEqual([
+      { id: page.articles[0].id, code: 'BODY_TOO_LARGE' },
+    ]);
     // Keep the item-count fixture below the transport limit so it exercises the parser.
     request.mockResolvedValue(
       streamResponse(
@@ -299,7 +353,7 @@ describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
       ),
     );
     await expect(
-      client().fetchListedArticles(listed, listed.name),
+      (await client()).fetchListedArticles(listed, listed.name),
     ).rejects.toThrow('WECHAT2RSS_FEED_TOO_LARGE');
   });
 });
