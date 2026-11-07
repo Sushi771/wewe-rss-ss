@@ -510,7 +510,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
   }
   async prepareFullHistoryUnknownReview(input: Omit<FullHistoryUnknownInput,'sessionBinding'>) {
     await this.readyForMutation();
-    try { return await this.db.$transaction(tx => prepareFullHistoryUnknownReview(tx,{...input,sessionBinding:this.runtime.fullScopeSessionBinding()})); }
+    try {
+      const plan = await this.db.$transaction(tx => prepareFullHistoryUnknownReview(tx,{...input,sessionBinding:this.runtime.fullScopeSessionBinding()}));
+      return JSON.parse(JSON.stringify({ digest: plan.digest, scope: plan.scope, allUnresolvedRequests: plan.allUnresolvedRequests, ownerOperationBinding: plan.ownerOperationBinding }, (_, value) => typeof value === 'bigint' ? String(value) : value));
+    }
     catch(error) {return this.fullHistoryError(error);}
   }
   async confirmFullHistoryUnknownReview(
@@ -606,7 +609,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     await this.readyForMutation();
     try {
       const plan = await this.db.$transaction(tx => prepareScheduledPolicy(tx, input));
-      return { digest: plan.digest, scope: plan.scope };
+      return JSON.parse(JSON.stringify({ digest: plan.digest, scope: plan.scope }, (_, value) => typeof value === 'bigint' ? String(value) : value));
     } catch (error) { return this.fullHistoryError(error); }
   }
   async confirmScheduledPolicy(
