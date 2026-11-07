@@ -26,7 +26,13 @@ export async function savedSessionRequest(
       input &&
       [input.a1, input.webSession].some(
         (value) =>
-          !value || value.length > 8192 || /[;\s\x00-\x1f\x7f]/.test(value),
+          !value ||
+          value.length > 8192 ||
+          /[;\s]/.test(value) ||
+          Array.from(value).some((character) => {
+            const code = character.charCodeAt(0);
+            return code <= 0x1f || code === 0x7f;
+          }),
       )
     )
       throw new Error('invalid');

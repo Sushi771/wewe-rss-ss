@@ -59,7 +59,7 @@ export default function XhsSavedConnection() {
   useLayoutEffect(() => {
     const fields = [first.current, second.current];
     return () => {
-      generation.current++;
+      generation.current += 1;
       request.current?.abort();
       for (const field of fields) if (field) field.value = '';
     };

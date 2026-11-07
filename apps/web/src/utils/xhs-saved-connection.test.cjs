@@ -114,3 +114,30 @@ test('status reads only connectionStatus and returns safe booleans', async () =>
     restoreFailed: true,
   });
 });
+
+test('all C0 and DEL characters reject before synthetic transport and clear inputs', async () => {
+  for (const code of [
+    ...Array.from({ length: 32 }, (_, index) => index),
+    0x7f,
+  ]) {
+    let calls = 0;
+    const input = {
+      a1: 'synthetic' + String.fromCharCode(code) + 'value',
+      webSession: 'synthetic-b',
+      replaceSaved: false,
+      autoRestore: false,
+    };
+    await assert.rejects(
+      savedSessionRequest(
+        host(async () => {
+          calls++;
+          throw new Error('must not send');
+        }),
+        input,
+      ),
+    );
+    assert.equal(calls, 0);
+    assert.equal(input.a1, '');
+    assert.equal(input.webSession, '');
+  }
+});
