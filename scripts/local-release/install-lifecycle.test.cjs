@@ -855,11 +855,35 @@ test('new unexplained output during copying stops success and preserves that unk
     assert(!fs.existsSync(path.join(f.root, 'candidate')));
     assert(!fs.existsSync(path.join(f.root, 'rollback')));
   }));
+// Exercise the same normalized package layout and candidate-relative require
+// used by the installed driver, not just modules in the source checkout.
+const exact813Package = fs.mkdtempSync(
+  path.join(os.tmpdir(), 'exact813-package-'),
+);
+const exact813Copied = require('./build.cjs').copyRuntimeClosure(
+  path.resolve(__dirname, '../..'),
+  exact813Package,
+);
+test.after(() => {
+  assert(
+    path
+      .resolve(exact813Package)
+      .startsWith(path.join(os.tmpdir(), 'exact813-package-')),
+  );
+  fs.rmSync(exact813Package, { recursive: true, force: true });
+});
 for (const contractPath of [
   './switch-contract.cjs',
   './updater/install-binding/role-aware/switch-contract.cjs',
 ]) {
-  const exact813Contract = require(contractPath);
+  const relative = contractPath.slice(2);
+  const entry = path.join(exact813Package, relative);
+  assert.equal(fileHash(entry), exact813Copied[relative].sha256);
+  assert.equal(
+    exact813Copied[relative].source,
+    `scripts/local-release/${relative}`,
+  );
+  const exact813Contract = require(entry);
   function exact813Roles() {
     const files = {
       'runtime/node.exe': '1'.repeat(64),
