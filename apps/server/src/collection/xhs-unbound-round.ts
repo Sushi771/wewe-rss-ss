@@ -380,8 +380,15 @@ export async function assertUnboundDispatch(tx: RoundTx) {
       admitted[0].logical_target === r.target,
     'DURABLE_REQUEST_BINDING_REQUIRED',
   );
-  const reviews = await rows(tx, 'SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?', context!.reviewId);
-  if (reviews.length === 1 && JSON.parse(reviews[0].scope_json).reviewKind === SCHEDULED_ROUND_KIND)
+  const reviews = await rows(
+    tx,
+    'SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?',
+    context!.reviewId,
+  );
+  if (
+    reviews.length === 1 &&
+    JSON.parse(reviews[0].scope_json).reviewKind === SCHEDULED_ROUND_KIND
+  )
     await assertScheduledDispatch(tx, context!.reviewId, r);
 }
 
@@ -408,7 +415,9 @@ export async function settleUnboundRequest(
     );
     const pageLimit =
       reviews.length === 1 &&
-      [FULL_HISTORY_KIND, SCHEDULED_ROUND_KIND].includes(JSON.parse(reviews[0].scope_json).reviewKind)
+      [FULL_HISTORY_KIND, SCHEDULED_ROUND_KIND].includes(
+        JSON.parse(reviews[0].scope_json).reviewKind,
+      )
         ? 60
         : 30;
     check(

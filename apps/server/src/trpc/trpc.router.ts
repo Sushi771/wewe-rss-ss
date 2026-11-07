@@ -141,20 +141,47 @@ export function isLocalXhsStatusRequest(input: {
   );
 }
 
-const xhsFullHistoryInput = z.object({
-  bindings: z.array(z.object({ creatorId: z.string().uuid(), jobId: z.string().uuid() }).strict()).length(3),
-  maxRequests: z.number().int().min(1).max(100000),
-  phaseLimits: z.object({
-    profile: z.number().int().nonnegative().max(100000),
-    list: z.number().int().nonnegative().max(100000),
-    detail: z.number().int().nonnegative().max(100000),
-    media: z.number().int().nonnegative().max(100000),
-  }).strict(),
-}).strict();
+const xhsFullHistoryInput = z
+  .object({
+    bindings: z
+      .array(
+        z
+          .object({ creatorId: z.string().uuid(), jobId: z.string().uuid() })
+          .strict(),
+      )
+      .length(3),
+    maxRequests: z.number().int().min(1).max(100000),
+    phaseLimits: z
+      .object({
+        profile: z.number().int().nonnegative().max(100000),
+        list: z.number().int().nonnegative().max(100000),
+        detail: z.number().int().nonnegative().max(100000),
+        media: z.number().int().nonnegative().max(100000),
+      })
+      .strict(),
+  })
+  .strict();
 
-const xhsFullUnknownInput = z.object({reviewId:z.string().regex(/^unbound-[a-f0-9]{64}$/),operationId:z.string().uuid(),creatorId:z.string().uuid(),jobId:z.string().uuid(),expectedTarget:z.string().regex(/^[A-Za-z0-9_-]{1,128}:[a-f0-9]{64}$/)}).strict();
-const xhsFullNarrowInput = z.object({reviewId:z.string().regex(/^unbound-[a-f0-9]{64}$/),creatorId:z.string().uuid(),jobId:z.string().uuid()}).strict();
-const xhsScheduledPolicyInput = xhsFullHistoryInput.omit({bindings:true}).extend({creatorIds:z.array(z.string().uuid()).length(3)}).strict();
+const xhsFullUnknownInput = z
+  .object({
+    reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),
+    operationId: z.string().uuid(),
+    creatorId: z.string().uuid(),
+    jobId: z.string().uuid(),
+    expectedTarget: z.string().regex(/^[A-Za-z0-9_-]{1,128}:[a-f0-9]{64}$/),
+  })
+  .strict();
+const xhsFullNarrowInput = z
+  .object({
+    reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),
+    creatorId: z.string().uuid(),
+    jobId: z.string().uuid(),
+  })
+  .strict();
+const xhsScheduledPolicyInput = xhsFullHistoryInput
+  .omit({ bindings: true })
+  .extend({ creatorIds: z.array(z.string().uuid()).length(3) })
+  .strict();
 
 @Injectable()
 export class TrpcRouter {
@@ -2133,54 +2160,116 @@ export class TrpcRouter {
       }),
     prepareFullHistoryUnknownReview: this.trpcService.protectedProcedure
       .input(xhsFullUnknownInput)
-      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.prepareFullHistoryUnknownReview(input));}),
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareFullHistoryUnknownReview(input),
+        );
+      }),
     confirmFullHistoryUnknownReview: this.trpcService.protectedProcedure
-      .input(xhsFullUnknownInput.extend({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownOwner:z.literal(true),acknowledgedIncompleteNoteExclusion:z.literal(true),acknowledgedDuplicateDirectoryRead:z.literal(true)}).strict())
-      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.confirmFullHistoryUnknownReview(input));}),
+      .input(
+        xhsFullUnknownInput
+          .extend({
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedUnknownOwner: z.literal(true),
+            acknowledgedIncompleteNoteExclusion: z.literal(true),
+            acknowledgedDuplicateDirectoryRead: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.confirmFullHistoryUnknownReview(input),
+        );
+      }),
     prepareFullHistoryNarrowReview: this.trpcService.protectedProcedure
       .input(xhsFullNarrowInput)
-      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.prepareFullHistoryNarrowReview(input));}),
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareFullHistoryNarrowReview(input),
+        );
+      }),
     confirmFullHistoryNarrowReview: this.trpcService.protectedProcedure
-      .input(xhsFullNarrowInput.extend({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownExclusions:z.literal(true),acknowledgedDuplicateDirectoryRead:z.literal(true)}).strict())
-      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.confirmFullHistoryNarrowReview(input));}),
+      .input(
+        xhsFullNarrowInput
+          .extend({
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedUnknownExclusions: z.literal(true),
+            acknowledgedDuplicateDirectoryRead: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.confirmFullHistoryNarrowReview(input),
+        );
+      }),
     prepareScheduledPolicy: this.trpcService.protectedProcedure
       .input(xhsScheduledPolicyInput)
-      .mutation(({input,ctx}) => {
+      .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() => this.xhsWhole!.prepareScheduledPolicy(input));
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareScheduledPolicy(input),
+        );
       }),
     confirmScheduledPolicy: this.trpcService.protectedProcedure
-      .input(xhsScheduledPolicyInput.extend({
-        digest:z.string().regex(/^[a-f0-9]{64}$/),
-        acknowledgedRecurringCollection:z.literal(true),
-        acknowledgedUnknownScope:z.literal(true),
-        acknowledgedDuplicateDirectoryRead:z.literal(true),
-      }).strict())
-      .mutation(({input,ctx}) => {
+      .input(
+        xhsScheduledPolicyInput
+          .extend({
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedRecurringCollection: z.literal(true),
+            acknowledgedUnknownScope: z.literal(true),
+            acknowledgedDuplicateDirectoryRead: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() => this.xhsWhole!.confirmScheduledPolicy(input));
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.confirmScheduledPolicy(input),
+        );
       }),
     prepareWholeCreatorFullHistory: this.trpcService.protectedProcedure
       .input(xhsFullHistoryInput)
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() => this.xhsWhole!.prepareWholeCreatorFullHistory(input));
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.prepareWholeCreatorFullHistory(input),
+        );
       }),
     confirmWholeCreatorFullHistory: this.trpcService.protectedProcedure
-      .input(xhsFullHistoryInput.extend({
-        digest: z.string().regex(/^[a-f0-9]{64}$/),
-        acknowledgedUnknownScope: z.literal(true),
-        acknowledgedDuplicateDirectoryRead: z.literal(true),
-      }).strict())
+      .input(
+        xhsFullHistoryInput
+          .extend({
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedUnknownScope: z.literal(true),
+            acknowledgedDuplicateDirectoryRead: z.literal(true),
+          })
+          .strict(),
+      )
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() => this.xhsWhole!.confirmWholeCreatorFullHistory(input));
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.confirmWholeCreatorFullHistory(input),
+        );
       }),
     executeWholeCreatorFullHistory: this.trpcService.protectedProcedure
-      .input(z.object({ reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/), jobId: z.string().uuid() }).strict())
+      .input(
+        z
+          .object({
+            reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),
+            jobId: z.string().uuid(),
+          })
+          .strict(),
+      )
       .mutation(({ input, ctx }) => {
         this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() => this.xhsWhole!.executeWholeCreatorFullHistory(input));
+        return this.xhsSourceOperation(() =>
+          this.xhsWhole!.executeWholeCreatorFullHistory(input),
+        );
       }),
     prepareUnboundThreePageRound: this.trpcService.protectedProcedure
       .input(

@@ -689,7 +689,12 @@ export class XhsSubscriptionRuntime
         tx,
         {
           ...input,
-          taskId: scheduledTaskId(input.round, input.creatorId, input.phase, input.batch ?? 0),
+          taskId: scheduledTaskId(
+            input.round,
+            input.creatorId,
+            input.phase,
+            input.batch ?? 0,
+          ),
           sessionBinding,
         },
         BigInt(Date.now()),

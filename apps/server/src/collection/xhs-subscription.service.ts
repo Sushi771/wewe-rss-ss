@@ -85,7 +85,13 @@ export type XhsListedNote = {
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
   withScheduledReview?<T>(
-    input: { round: string; creatorId: string; authorId: string; phase: 'basic' | 'media'; batch?: number },
+    input: {
+      round: string;
+      creatorId: string;
+      authorId: string;
+      phase: 'basic' | 'media';
+      batch?: number;
+    },
     work: () => Promise<T>,
   ): Promise<T>;
   withTaskScope?<T>(

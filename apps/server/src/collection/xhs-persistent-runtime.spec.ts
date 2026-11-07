@@ -82,7 +82,10 @@ it('keeps memory-only connection free of persistent writes and rejects implicit 
 });
 it('reveals only through explicit savedSession without source requests', async () => {
   const { runtime, vault, api } = fixture();
-  expect(await runtime.savedSession()).toEqual({ a1: cookies.a1, webSession: cookies.web_session });
+  expect(await runtime.savedSession()).toEqual({
+    a1: cookies.a1,
+    webSession: cookies.web_session,
+  });
   expect(vault.load).toHaveBeenCalledTimes(1);
   expect(api).not.toHaveBeenCalled();
   runtime.onModuleDestroy();
