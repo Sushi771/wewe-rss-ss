@@ -864,6 +864,33 @@ const exact813Copied = require('./build.cjs').copyRuntimeClosure(
   path.resolve(__dirname, '../..'),
   exact813Package,
 );
+test('packaged prewrite gates bind identical root and installer dependency bytes', () => {
+  for (const name of [
+    'switch-prewrite.cjs',
+    'switch-contract.cjs',
+    'lib.cjs',
+    'task-document-preflight.cjs',
+  ]) {
+    assert.equal(
+      exact813Copied[name].sha256,
+      exact813Copied[`updater/install-binding/role-aware/${name}`].sha256,
+    );
+  }
+  for (const relative of [
+    'switch-prewrite.cjs',
+    'updater/install-binding/role-aware/switch-prewrite.cjs',
+  ]) {
+    const source = fs.readFileSync(
+      path.join(exact813Package, relative),
+      'utf8',
+    );
+    assert(
+      source.includes(
+        "'5e5ffe5139528ae97dfdbee724918ac2d303cc230d05ca473edbfc281179592d'",
+      ),
+    );
+  }
+});
 test.after(() => {
   assert(
     path
