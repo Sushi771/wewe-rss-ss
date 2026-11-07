@@ -341,8 +341,34 @@ describe('whole creator durable checkpoint fence', () => {
       },
     );
     const writer: any = (work: any) => db.$transaction(work);
+    // Transport entry is synchronous inside the short dispatch transaction.
+    // Another connection may still see prepared until that transaction commits.
+    // Observe its actual completion instead of treating entry as commit proof.
+    let transportEntered = false;
+    let committed!: () => void;
+    const dispatchCommitted = new Promise<void>((resolve) => {
+      committed = resolve;
+    });
+    const transaction = db.$transaction.bind(db);
+    const transactionSpy = jest
+      .spyOn(db, '$transaction')
+      .mockImplementation((async (...args: any[]) => {
+        const result = await (transaction as any)(...args);
+        if (transportEntered) committed();
+        return result;
+      }) as any);
+    media.mockImplementationOnce(async () => {
+      transportEntered = true;
+      entered();
+      await dispatchHold;
+      return new Response(png, {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      });
+    });
+    let first: ReturnType<typeof resumeWholeMedia> | undefined;
     try {
-      const first = resumeWholeMedia(
+      first = resumeWholeMedia(
         db as any,
         writer,
         runtime,
@@ -354,6 +380,7 @@ describe('whole creator durable checkpoint fence', () => {
         manifest,
       );
       await dispatchEntered;
+      await dispatchCommitted;
       const inflight = await db.$queryRaw<
         Array<{ document: string }>
       >`SELECT document FROM xhs_subscription_tasks WHERE id='media-flow'`;
@@ -501,6 +528,10 @@ describe('whole creator durable checkpoint fence', () => {
         restarted.onModuleDestroy();
       }
     } finally {
+      release();
+      // Always join this test's held transport before resetting its shared DB.
+      await first?.catch(() => {});
+      transactionSpy.mockRestore();
       runtime.onModuleDestroy();
     }
   }, 40000);

@@ -1,3 +1,4 @@
+import { openSync, closeSync } from 'node:fs';
 import * as incremental from './incremental-write';
 jest.mock('./xhs-legacy-review', () => ({
   ...jest.requireActual('./xhs-legacy-review'),
@@ -219,20 +220,71 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
   }
   beforeAll(async () => {
     folder = await mkdtemp(path.join(tmpdir(), 'xhs-generation-flow-'));
+    const databasePath = path.join(folder, 'fixture.db');
+    // Node 24 test-only SQLite API is absent from the project's Node 20 typings.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { DatabaseSync } = require('node:sqlite');
+    // Own a new empty fixture exclusively. Original migration SQL is executed
+    // on one connection before the application client can observe its schema.
+    closeSync(openSync(databasePath, 'wx'));
+    const schemaConnection = new DatabaseSync(databasePath);
+    try {
+      expect(
+        schemaConnection
+          .prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='table'")
+          .get().n,
+      ).toBe(0);
+      const migrations = path.resolve(__dirname, '../../prisma/migrations');
+      for (const name of (await readdir(migrations)).sort())
+        if ((await stat(path.join(migrations, name))).isDirectory())
+          for (const sql of splitSqliteStatements(
+            await readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            schemaConnection.exec(sql);
+      expect(
+        schemaConnection.prepare('PRAGMA quick_check').get().quick_check,
+      ).toBe('ok');
+      expect(
+        schemaConnection.prepare('PRAGMA foreign_key_check').all(),
+      ).toEqual([]);
+      expect(
+        schemaConnection.prepare('SELECT count(*) AS n FROM articles').get().n,
+      ).toBe(0);
+      const columns = schemaConnection
+        .prepare('PRAGMA table_info(articles)')
+        .all();
+      for (const name of [
+        'id',
+        'mp_id',
+        'title',
+        'pic_url',
+        'publish_time',
+        'source_url',
+        'content_html',
+      ])
+        expect(columns.some((c: { name: string }) => c.name === name)).toBe(
+          true,
+        );
+      expect(
+        columns.find((c: { name: string }) => c.name === 'publish_time').type,
+      ).toBe('INTEGER');
+    } finally {
+      schemaConnection.close();
+    }
     db = new PrismaClient({
-      datasources: {
-        db: {
-          url: 'file:' + path.join(folder, 'fixture.db').replace(/\\/g, '/'),
-        },
-      },
+      datasources: { db: { url: 'file:' + databasePath.replace(/\\/g, '/') } },
     });
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await readdir(migrations)).sort())
-      if ((await stat(path.join(migrations, name))).isDirectory())
-        for (const sql of splitSqliteStatements(
-          await readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-        ))
-          await db.$executeRawUnsafe(sql);
+    const attached = await db.$queryRawUnsafe<
+      Array<{ name: string; file: string }>
+    >('PRAGMA database_list');
+    expect(
+      attached
+        .filter((r) => r.name === 'main')
+        .map((r) => path.resolve(r.file)),
+    ).toEqual([path.resolve(databasePath)]);
     // Match PrismaService's raw-query coordinator admission. A bare client misses
     // expired dispatch ALS inherited by response-event receipt callbacks.
     db.$use(async (params, next) =>
