@@ -1,3 +1,4 @@
+import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -370,13 +371,16 @@ describe('complete archive before interaction, independent query (synthetic only
         return result;
       },
     );
-    const runtime: any = {
-      withRequestBudget: async (b, id, work) => {
-        expect(id).toBe('old-job');
-        budget = () => b.admit(id);
-        return work();
+    const runtime: any = Object.assign(
+      new XhsSubscriptionRuntime({ enabled: () => false }),
+      {
+        withRequestBudget: async (b, id, work) => {
+          expect(id).toBe('old-job');
+          budget = () => b.admit(id);
+          return work();
+        },
       },
-    };
+    );
     const job = {
       id: 'old-job',
       creatorId: 'creator',
@@ -493,12 +497,15 @@ describe('complete archive before interaction, independent query (synthetic only
         supplement: { status: 'new' },
       }),
     );
-    const runtime: any = {
-      withRequestBudget: async (b, id, work) => {
-        budget = () => b.admit(id);
-        return work();
+    const runtime: any = Object.assign(
+      new XhsSubscriptionRuntime({ enabled: () => false }),
+      {
+        withRequestBudget: async (b, id, work) => {
+          budget = () => b.admit(id);
+          return work();
+        },
       },
-    };
+    );
     const job = {
       id: 'reuse-job',
       creatorId: 'creator',

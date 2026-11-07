@@ -1,3 +1,4 @@
+import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- CommonJS fixture exports register the existing beforeAll without changing Jest setup order.
   require('../../../../scripts/local-release/writer-self.fixture.test.cjs')
@@ -49,7 +50,7 @@ it('defers the actual whole-creator hook under the startup write gate', async ()
     const whole = new XhsWholeCreatorService(
       db,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await expect(whole.onModuleInit()).resolves.toBeUndefined();

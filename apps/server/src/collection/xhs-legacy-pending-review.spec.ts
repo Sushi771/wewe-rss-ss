@@ -350,11 +350,14 @@ describe('legacy unbound pending review on isolated SQLite', () => {
     let active = false,
       restricted = false;
     const subscriptions = { hasLocalSourceWork: () => false },
-      runtime = {
-        hasActiveSourceSessions: () => active,
-        hasBlockingSourceState: () => restricted,
-        refreshAfterHistoryHandoff: jest.fn(async () => {}),
-      };
+      runtime = Object.assign(
+        new XhsSubscriptionRuntime({ enabled: () => false }),
+        {
+          hasActiveSourceSessions: () => active,
+          hasBlockingSourceState: () => restricted,
+          refreshAfterHistoryHandoff: jest.fn(async () => {}),
+        },
+      );
     const service = new XhsWholeCreatorService(
       actual,
       subscriptions as any,

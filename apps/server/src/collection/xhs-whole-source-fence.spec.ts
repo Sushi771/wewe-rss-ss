@@ -573,7 +573,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await (whole as any).save(stale);
@@ -729,7 +729,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await (whole as any).save(stale);
@@ -1057,7 +1057,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     const limits = { profile: 2, list: 2, detail: 10, media: 10, metrics: 2 };
@@ -1121,7 +1121,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     const grant = {
@@ -1175,7 +1175,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await expect(
@@ -1262,7 +1262,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     const schedule = jest
@@ -1503,7 +1503,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await whole.onModuleInit();
@@ -1688,7 +1688,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await (whole as any).save(job);
@@ -1727,7 +1727,7 @@ describe('whole creator durable checkpoint fence', () => {
     const whole = new XhsWholeCreatorService(
       db as any,
       {} as any,
-      {} as any,
+      new XhsSubscriptionRuntime({ enabled: () => false }),
       {} as any,
     );
     await (whole as any).save(stale);
