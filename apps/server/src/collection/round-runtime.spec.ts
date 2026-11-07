@@ -38,6 +38,12 @@ it.each(['transport', 'parse', 'storage', 'success'] as const)(
       for (const n of (
         await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
       ).sort()) {
+        if (
+          !(
+            await fs.stat(path.resolve(__dirname, '../../prisma/migrations', n))
+          ).isDirectory()
+        )
+          continue;
         const f = path.resolve(
           __dirname,
           '../../prisma/migrations',

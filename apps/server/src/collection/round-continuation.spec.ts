@@ -29,6 +29,7 @@ it('derives only unattempted creators, preserves old unknown/budgets, rejects re
   try {
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
+      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
       try {
         for (const sql of splitSqliteStatements(
           await fs.readFile(

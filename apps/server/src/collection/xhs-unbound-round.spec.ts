@@ -26,6 +26,7 @@ it('retains historical unknown and budgets, saves one page per approved account,
   try {
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
     for (const name of (await fs.readdir(migrations)).sort()) {
+      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
       const file = path.join(migrations, name, 'migration.sql');
       try {
         for (const sql of splitSqliteStatements(

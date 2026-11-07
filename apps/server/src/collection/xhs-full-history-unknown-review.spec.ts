@@ -31,6 +31,14 @@ it('reviews unbound owner explicitly, excludes incomplete note, preserves unknow
     for (const name of (
       await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
     ).sort()) {
+      if (
+        !(
+          await fs.stat(
+            path.resolve(__dirname, '../../prisma/migrations', name),
+          )
+        ).isDirectory()
+      )
+        continue;
       try {
         for (const sql of splitSqliteStatements(
           await fs.readFile(
