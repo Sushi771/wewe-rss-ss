@@ -4,7 +4,9 @@ import { scheduledTaskId } from './xhs-scheduled-admission';
 import {
   fullHistoryContext,
   fullHistoryBudgetId,
+  FULL_HISTORY_KIND,
 } from './xhs-full-history-scope';
+import { fullHistoryLineage } from './xhs-full-history-unknown-review';
 export const SCHEDULED_POLICY_KIND = 'scheduled-recurring-policy-v1';
 export const SCHEDULED_REVIEW_KIND = 'scheduled-round-review-v1';
 export const SCHEDULED_ROUND_KIND = SCHEDULED_REVIEW_KIND;
@@ -99,12 +101,92 @@ async function currentBindings(tx: RoundTx, ids: string[]) {
     ids.map((id) => [id, found.find((r) => r.id === id).external_author_id]),
   );
 }
+/** Retained exclusions are evidence only, never reusable full-history capacity. */
+async function retainedNarrowExclusions(
+  tx: RoundTx,
+  creatorBindings: Record<string, string>,
+) {
+  const all = await reviews(tx);
+  const candidates = all.filter((r) => {
+    const s = JSON.parse(r.scope_json);
+    return (
+      s.reviewKind === FULL_HISTORY_KIND &&
+      s.narrowing === 'parent-receipt-marker-phase-identity' &&
+      Object.prototype.hasOwnProperty.call(
+        creatorBindings,
+        s.narrowedCreatorId,
+      ) &&
+      !all.some(
+        (next) =>
+          next.id !== r.id &&
+          (JSON.parse(next.scope_json).lineageReviewIds ?? []).includes(r.id),
+      )
+    );
+  });
+  const exclusions: Record<string, { phase: string; target: string }[]> = {};
+  const evidence = new Map<string, string>();
+  for (const row of candidates) {
+    const lineage = await fullHistoryLineage(tx, row.id);
+    for (const id of lineage.ids) {
+      const original = all.find((r) => r.id === id);
+      check(
+        original &&
+          /^[a-f0-9]{64}$/.test(original.backup_sha256) &&
+          /^\d+$/.test(original.approved_at),
+        'FULL_REVIEW_LINEAGE_INVALID',
+      );
+      const bindings = JSON.parse(original.creator_bindings_json);
+      for (const binding of lineage.scope.bindings) {
+        if (
+          !Object.prototype.hasOwnProperty.call(
+            creatorBindings,
+            binding.creatorId,
+          )
+        )
+          continue;
+        check(
+          bindings[binding.creatorId] === creatorBindings[binding.creatorId],
+          'SCHEDULED_CREATOR_BINDING_CHANGED',
+        );
+      }
+      evidence.set(id, hash(original));
+    }
+    for (const binding of lineage.scope.bindings) {
+      if (
+        !Object.prototype.hasOwnProperty.call(
+          creatorBindings,
+          binding.creatorId,
+        )
+      )
+        continue;
+      for (const x of lineage.scope.exclusions[binding.creatorId] ?? []) {
+        if (!['detail', 'media'].includes(x.phase)) continue;
+        check(
+          typeof x.target === 'string' && x.target.length > 0,
+          'FULL_REVIEW_LINEAGE_INVALID',
+        );
+        (exclusions[binding.creatorId] ??= []).push({
+          phase: x.phase,
+          target: x.target,
+        });
+      }
+    }
+  }
+  return {
+    exclusions,
+    evidence: [...evidence].sort(([a], [b]) => a.localeCompare(b)),
+  };
+}
 async function assertBaseline(tx: RoundTx, scope: any, operation?: string) {
   check(
     hash(await baseline(tx, operation)) === scope.baselineDigest,
     'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
   );
   const all = await reviews(tx);
+  for (const [id, digest] of scope.retainedHistoryEvidence ?? []) {
+    const original = all.find((r) => r.id === id);
+    check(original && hash(original) === digest, 'REVIEW_STATE_CHANGED');
+  }
   check(
     !all.some((r) => {
       const s = JSON.parse(r.scope_json);
@@ -179,8 +261,19 @@ export async function prepareScheduledPolicy(
       ],
     ]),
   );
+  const retainedHistory = await retainedNarrowExclusions(tx, creatorBindings);
+  for (const id of creatorIds) {
+    exclusions[id] = [
+      ...new Map(
+        [...exclusions[id], ...(retainedHistory.exclusions[id] ?? [])].map(
+          (x) => [pack(x), x],
+        ),
+      ).values(),
+    ];
+  }
   const scope = {
     exclusions,
+    retainedHistoryEvidence: retainedHistory.evidence,
     reviewKind: SCHEDULED_POLICY_KIND,
     creatorIds,
     creatorBindings,
@@ -443,25 +536,8 @@ function excluded(scope: any, creator: string, phase: string, target: string) {
                 .update(resource ?? '')
                 .digest('hex')
           : t.slice(7) === createHash('sha256').update(note).digest('hex'))));
-  if (
-    scope.baseline.ledger.some(
-      (r: any) => r.creator_id === creator && match(r.phase, r.logical_target),
-    )
-  )
-    return true;
-  return scope.baseline.unknowns.some(
-    (u: any) =>
-      u.creatorId === creator &&
-      [...(u.sourceUnknowns ?? []), u.sourceActive, u.sourceFence]
-        .filter(Boolean)
-        .some((v: any) =>
-          match(
-            v.phase === 'metrics' ? 'detail' : v.phase,
-            v.targetHash
-              ? 'sha256:' + v.targetHash
-              : (v.noteId ?? v.logical_target ?? '*'),
-          ),
-        ),
+  return (scope.exclusions[creator] ?? []).some((x: any) =>
+    match(x.phase, x.target),
   );
 }
 export async function assertScheduledRoundAdmission(
