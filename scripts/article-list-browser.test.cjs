@@ -108,9 +108,9 @@ test(
       assert(Number.isSafeInteger(count) && count >= 120 && count <= 12000);
       await prisma.$executeRawUnsafe(
         `WITH RECURSIVE n(x) AS (SELECT 0 UNION ALL SELECT x+1 FROM n WHERE x+1 < ?)
-   INSERT INTO articles(id,mp_id,title,pic_url,publish_time,content_html,read_count,like_count,created_at)
+   INSERT INTO articles(id,mp_id,title,pic_url,publish_time,content_html,read_count,like_count,created_at,source_url)
    SELECT 'article-'||printf('%06d',x),'f'||(x%?),'Synthetic '||x,'',1700000000+CAST(x/3 AS INTEGER),
-   CASE WHEN x%7=0 THEN NULL WHEN x%7=1 THEN '' WHEN x%7=2 THEN ' ' ELSE '<p>'||replace(hex(zeroblob(32768)),'00','x')||'</p>' END,x%99,x%17,CURRENT_TIMESTAMP FROM n`,
+   CASE WHEN x%7=0 THEN NULL WHEN x%7=1 THEN '' WHEN x%7=2 THEN ' ' ELSE '<p>'||replace(hex(zeroblob(32768)),'00','x')||'</p>' END,x%99,x%17,CURRENT_TIMESTAMP,'https://mp.weixin.qq.com/s/synthetic-'||x FROM n`,
         count,
         feedCount,
       );
@@ -212,11 +212,9 @@ import {trpc} from ${modulePath(path.join(web, 'src/utils/trpc.ts'))};
 import ArticleList from ${modulePath(listFile)};
 import ${modulePath(path.join(web, 'src/index.css'))};
 localStorage.setItem('authCode','synthetic');
-window.readerStages={};
-const fixtureEpoch=()=>performance.timeOrigin+performance.now();
-const fixtureCreateUrl=URL.createObjectURL.bind(URL);URL.createObjectURL=(blob)=>{const url=fixtureCreateUrl(blob);if(blob.type.startsWith('text/html'))window.readerStages.blobAt=fixtureEpoch();return url};
-const fixtureFetch=fetch.bind(window);window.fetch=async(...args)=>{const reading=String(args[0]).includes('article.byId');if(reading)window.readerStages.requestAt=fixtureEpoch();const response=await fixtureFetch(...args);if(reading){window.readerStages.headersAt=fixtureEpoch();const json=response.json.bind(response);response.json=async()=>{const data=await json();window.readerStages.jsonAt=fixtureEpoch();return data}}return response};
-document.addEventListener('load',(e)=>{if(e.target instanceof HTMLIFrameElement && e.target.src.startsWith('blob:')){window.readerLoaded=performance.now();window.readerStages.loadAt=fixtureEpoch()}},true);
+// Observe the real anchor click, but cancel external navigation in this offline
+// fixture. The production click handler still runs; no external body is loaded.
+window.originalLinkClicks=[];document.addEventListener('click',e=>{const a=e.target.closest?.('a.compact-title');if(a){window.originalLinkClicks.push({href:a.href,target:a.target,rel:a.rel});e.preventDefault()}},true);
 function App(){const [filter,setFilter]=useState({}),[search,setSearch]=useState(''),[sort,setSort]=useState('publishTime'),[direction,setDirection]=useState('desc'),[selected,setSelected]=useState(new Set());const utils=trpc.useUtils();const queryClient=useQueryClient();const navigate=useNavigate();
 window.fixture={freshBody:()=>queryClient.removeQueries({queryKey:[['article','byId']],type:'inactive'}),pending:()=>queryClient.isFetching({queryKey:[['article','list']]}),setFilter,setSearch,setDirection,navigate,selected:()=>[...selected],refresh:()=>{window.dispatchEvent(new Event('wewe-articles-refresh'));return utils.article.list.invalidate();},fresh:()=>utils.article.list.reset()};
 return <div className="app-shell"><div className="app-route"><div className="feed-workspace"><div className="mac-content feed-content !min-w-0 !overflow-y-auto"><header className="shrink-0 p-4">文章列表</header><div className="feed-article-scroll flex-1 overflow-hidden"><ArticleList search={search} articleFilter={filter} sort={sort} onSortChange={setSort} direction={direction} onDirectionChange={setDirection} selectedIds={selected} onSelectionChange={setSelected}/></div></div></div></div></div>}
@@ -531,7 +529,7 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
               'first',
               'next',
               'return',
-              'reader',
+              'original-link',
               'refresh',
             ]) {
               phase = stage + '-' + i;
@@ -616,30 +614,46 @@ createRoot(document.getElementById('root')).render(<BrowserRouter><TrpcProvider>
                   await evaluate(
                     'JSON.stringify([Object.entries(localStorage),Object.entries(sessionStorage)]).length*2',
                   );
-              } else if (stage === 'reader') {
-                for (const warmth of ['first-read', 'warm-read']) {
-                  if (warmth === 'first-read')
-                    await evaluate('window.fixture.freshBody()');
+              } else if (stage === 'original-link') {
+                for (const attempt of ['first-click', 'repeat-click']) {
+                  const beforeBodyRequests = requests.filter((r) =>
+                    r.procedures.includes('article.byId'),
+                  ).length;
                   const start = epoch();
-                  await evaluate(
-                    "window.readerLoaded=0;window.readerStages={clickAt:performance.timeOrigin+performance.now()};Array.from(document.querySelectorAll('[data-article-id]')).find(e=>Number(e.dataset.articleId.slice(8))%7>=3).querySelector('a.compact-title').click()",
+                  const clicked = await evaluate(
+                    "(()=>{const a=document.querySelector('a.compact-title');a.click();return window.originalLinkClicks.at(-1)})()",
                   );
-                  await until(
-                    () => evaluate('Boolean(window.readerLoaded)'),
-                    'saved HTML iframe loaded',
+                  assert.match(
+                    clicked.href,
+                    /^https:\/\/mp\.weixin\.qq\.com\/s\/synthetic-\d+$/,
+                  );
+                  assert.equal(clicked.target, '_blank');
+                  assert.deepEqual(clicked.rel.split(/\s+/).sort(), [
+                    'noopener',
+                    'noreferrer',
+                  ]);
+                  await evaluate(
+                    'new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))',
+                  );
+                  assert.equal(
+                    requests.filter((r) =>
+                      r.procedures.includes('article.byId'),
+                    ).length,
+                    beforeBodyRequests,
+                    'original link does not request a local body',
+                  );
+                  assert.equal(
+                    await evaluate(
+                      'Boolean(document.querySelector("iframe[title], [role=dialog]"))',
+                    ),
+                    false,
+                    'original link does not open the retired local reader',
                   );
                   measurements.push({
-                    stage: warmth,
+                    stage: 'original-link-' + attempt,
                     ms: epoch() - start,
-                    stages: await evaluate('window.readerStages'),
+                    externalNavigation: 'prevented-by-offline-fixture',
                   });
-                  await evaluate(
-                    `document.querySelector('button[aria-label="Close"]').click()`,
-                  );
-                  await until(
-                    () => evaluate('!document.querySelector("iframe[title]")'),
-                    'reader closes',
-                  );
                 }
               } else {
                 const start = epoch();

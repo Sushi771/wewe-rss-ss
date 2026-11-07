@@ -189,7 +189,7 @@ const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=use
         await until(
           () =>
             evaluate(
-              "Boolean(document.querySelector('#storage-backup[open]'))&&document.body.innerText.includes('请核对恢复点后处理')",
+              "Boolean(document.querySelector('#storage-backup[open] details p'))",
             ),
           'details route opens and reads',
         );
@@ -199,6 +199,21 @@ const initial=${JSON.stringify(batch)};function App(){const [batch,setBatch]=use
               "(()=>{const e=document.querySelector('#storage-backup');const r=e.getBoundingClientRect(),p=e.parentElement.getBoundingClientRect();return r.top>=Math.max(0,p.top)-1&&r.bottom<=Math.min(innerHeight,p.bottom)+1})()",
             ),
           'details link reveals the loaded card within its scroll container and viewport',
+        );
+        assert.equal(
+          await evaluate(
+            "document.body.innerText.includes('请核对恢复点后处理')",
+          ),
+          false,
+          'raw diagnostics remain folded until explicitly requested',
+        );
+        await evaluate(
+          "document.querySelector('#storage-backup details summary').click()",
+        );
+        await until(
+          () =>
+            evaluate("document.body.innerText.includes('请核对恢复点后处理')"),
+          'explicit diagnostics expansion reveals the loaded report',
         );
         apiError = true;
         await evaluate(
