@@ -1,6 +1,7 @@
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
 import { createHash } from 'node:crypto';
 import { readHistoryHandoffs } from './xhs-history-handoff';
+import { scheduledReviewedMarkers } from './xhs-scheduled-review-scope';
 
 type Phase = 'basic' | 'media';
 type Task = {
@@ -147,6 +148,9 @@ export async function admitScheduledXhs(
     return { kind: 'blocked', taskId, reason };
   }
   const history = await readHistoryHandoffs(tx as any);
+  const reviewedMarkers = await scheduledReviewedMarkers(tx as any, {
+    round, creatorId, phase, batch, taskId,
+  });
   const interrupted = await tx.$queryRaw<
     Array<{ id: string }>
   >`SELECT id FROM xhs_subscription_tasks WHERE CASE WHEN creator_id='__batch__' AND substr(id,1,6)='batch:' AND state IN ('batch_queued','batch_running','batch_paused','batch_cancelled','batch_completed') AND json_valid(document) THEN CASE WHEN json_extract(document,'$.batchId')=substr(id,7) AND 'batch_'||json_extract(document,'$.state')=state AND (json_type(document,'$.sourceActive') IS NULL OR json_type(document,'$.sourceActive')='null') THEN 0 ELSE 1 END WHEN NOT json_valid(document) THEN 1 WHEN json_type(document)<>'object' THEN 1 WHEN state NOT IN ('running','queued','blocked','failed','partial','cancelled','paused','completed') THEN 1 WHEN json_type(document,'$.sourceActive') IS NOT NULL AND json_type(document,'$.sourceActive')<>'null' THEN 1 WHEN COALESCE(json_extract(document,'$.state'),'')<>state THEN 1 ELSE 0 END=1 LIMIT 1`;
@@ -154,7 +158,7 @@ export async function admitScheduledXhs(
     await tx.$queryRaw<
       Array<{ id: string; used: number; request_limit: number }>
     >`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`
-  ).filter((f) => !history.markers.includes(f.id));
+  ).filter((f) => !history.markers.includes(f.id) && !reviewedMarkers?.includes(f.id));
   // Any unresolved source outcome closes the scheduled lane across creators
   // and rounds. Proven not-dispatched local review remains item-scoped.
   const unknownPrefix = 'xhs:dispatch-pending:unknown:';
@@ -230,7 +234,7 @@ export async function admitScheduledXhs(
     fences.some((f) => unresolved.has(f.id))
   )
     reason = 'XHS_SCHEDULE_SOURCE_BLOCKED';
-  else if (history.profilePendingCreators.includes(creatorId))
+  else if (!reviewedMarkers && history.profilePendingCreators.includes(creatorId))
     reason = 'XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED';
   else if (jobs.length || tasks.length)
     return { kind: 'deferred', taskId, reason: 'XHS_SCHEDULE_TASK_ACTIVE' };

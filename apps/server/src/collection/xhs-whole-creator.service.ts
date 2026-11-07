@@ -1,3 +1,5 @@
+import { prepareFullHistoryUnknownReview, confirmFullHistoryUnknownReview, type FullHistoryUnknownInput } from './xhs-full-history-unknown-review';
+import { prepareScheduledPolicy, confirmScheduledPolicy, type ScheduledPolicyInput } from './xhs-scheduled-review-scope';
 import {
   prepareFullHistoryScope,
   confirmFullHistoryScope,
@@ -496,6 +498,198 @@ export class XhsWholeCreatorService implements OnModuleInit {
                 assertQuiescent: async () => idle(),
                 assertSession: (binding) =>
                   this.runtime.assertFullScopeSession(binding),
+                verifyBackup: async () => backupSha256,
+              },
+              BigInt(Date.now()),
+            );
+          }),
+      );
+    } catch (error) {
+      return this.fullHistoryError(error);
+    }
+  }
+  async prepareFullHistoryUnknownReview(input: Omit<FullHistoryUnknownInput,'sessionBinding'>) {
+    await this.readyForMutation();
+    try { return await this.db.$transaction(tx => prepareFullHistoryUnknownReview(tx,{...input,sessionBinding:this.runtime.fullScopeSessionBinding()})); }
+    catch(error) {return this.fullHistoryError(error);}
+  }
+  async confirmFullHistoryUnknownReview(
+    input: Omit<FullHistoryUnknownInput, 'sessionBinding'> & {
+      digest: string;
+      acknowledgedUnknownOwner: true;
+      acknowledgedIncompleteNoteExclusion: true;
+      acknowledgedDuplicateDirectoryRead: true;
+    },
+  ) {
+    await this.readyForMutation();
+    if (
+      input.acknowledgedUnknownOwner !== true ||
+      input.acknowledgedIncompleteNoteExclusion !== true ||
+      input.acknowledgedDuplicateDirectoryRead !== true
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    const scopeInput: FullHistoryUnknownInput = {reviewId: input.reviewId, operationId: input.operationId, creatorId: input.creatorId, jobId: input.jobId, expectedTarget: input.expectedTarget, sessionBinding:this.runtime.fullScopeSessionBinding()};
+    const idle = () => {
+      this.runtime.assertFullScopeSession(scopeInput.sessionBinding);
+      if (
+        this.running.size ||
+        this.reviewing.size ||
+        this.starting.size ||
+        this.runtime.hasActiveSourceSessions()
+      )
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    };
+    try {
+      idle();
+      const plan = await this.db.$transaction(tx => prepareFullHistoryUnknownReview(tx,scopeInput));
+      if(plan.digest!==input.digest) throw new Error('REVIEW_STATE_CHANGED');
+      let backupSha256 = '',
+        database = '',
+        version = '';
+      return await sqliteWrites.protectedWrite(
+        async () => {
+          idle();
+          const rows = await this.db.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const main = rows.find((r) => r.name === 'main');
+          if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          database = await realpath(main.file);
+          version = await legacyReviewDatabaseFingerprint(database);
+          const verified = (await createVerifiedSqliteBackup()) as {
+            source?: string;
+            backup?: string;
+            sha256?: string;
+            integrityCheck?: string;
+            recoveryOrigin?: { format?: string; kind?: string };
+          };
+          if (
+            !verified.source ||
+            (await realpath(verified.source)) !== database ||
+            !verified.backup ||
+            !verified.sha256 ||
+            !/^[a-f0-9]{64}$/.test(verified.sha256) ||
+            verified.integrityCheck !== 'ok' ||
+            verified.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+            verified.recoveryOrigin.kind !== 'protected'
+          )
+            throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          backupSha256 = verified.sha256;
+        },
+        () =>
+          this.write(async (tx) => {
+            idle();
+            const actual = await tx.$queryRawUnsafe<Array<{name:string;file:string}>>('PRAGMA database_list');
+            const main = actual.find(r=>r.name==='main');
+            if (!main?.file || (await realpath(main.file))!==database || (await legacyReviewDatabaseFingerprint(database)) !== version)
+              throw new Error('XHS_DATABASE_CHANGED');
+            return confirmFullHistoryUnknownReview(
+              tx,
+              {...scopeInput,digest:input.digest,acknowledgedUnknownOwner:true,acknowledgedIncompleteNoteExclusion:true,acknowledgedDuplicateDirectoryRead:true},
+              {
+                assertQuiescent: async () => idle(),
+                assertSession: (binding) =>
+                  this.runtime.assertFullScopeSession(binding),
+                authorizePlan: async current => {if(current.digest!==plan.digest) throw new Error('REVIEW_STATE_CHANGED');},
+                verifyProtectedSnapshot: async stateDigest => {if(stateDigest!==plan.stateDigest) throw new Error('REVIEW_STATE_CHANGED');return backupSha256;},
+              },
+              BigInt(Date.now()),
+            );
+          }),
+      );
+    } catch (error) {
+      return this.fullHistoryError(error);
+    }
+  }
+  /** Explicit recurring permission preparation; never enables schedules or sends requests. */
+  async prepareScheduledPolicy(input: ScheduledPolicyInput) {
+    await this.readyForMutation();
+    try {
+      const plan = await this.db.$transaction(tx => prepareScheduledPolicy(tx, input));
+      return { digest: plan.digest, scope: plan.scope };
+    } catch (error) { return this.fullHistoryError(error); }
+  }
+  async confirmScheduledPolicy(
+    input: ScheduledPolicyInput & {
+      digest: string;
+      acknowledgedRecurringCollection: true;
+      acknowledgedUnknownScope: true;
+      acknowledgedDuplicateDirectoryRead: true;
+    },
+  ) {
+    await this.readyForMutation();
+    if (
+      input.acknowledgedRecurringCollection !== true ||
+      input.acknowledgedUnknownScope !== true ||
+      input.acknowledgedDuplicateDirectoryRead !== true
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    const scopeInput: ScheduledPolicyInput = {
+      creatorIds: input.creatorIds,
+      maxRequests: input.maxRequests,
+      phaseLimits: input.phaseLimits,
+    };
+    const idle = async () => {
+      if (
+        this.running.size ||
+        this.reviewing.size ||
+        this.starting.size ||
+        this.runtime.hasActiveSourceSessions()
+      )
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+      const active = await this.db.$queryRawUnsafe<Array<{id:string}>>("SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') UNION ALL SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1");
+      if (active.length) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    };
+    try {
+      await idle();
+      const plan = await this.db.$transaction(tx => prepareScheduledPolicy(tx, scopeInput));
+      if (plan.digest !== input.digest) throw new Error('REVIEW_STATE_CHANGED');
+      let backupSha256 = '',
+        database = '',
+        version = '';
+      return await sqliteWrites.protectedWrite(
+        async () => {
+          await idle();
+          const rows = await this.db.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const main = rows.find((r) => r.name === 'main');
+          if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          database = await realpath(main.file);
+          version = await legacyReviewDatabaseFingerprint(database);
+          const verified = (await createVerifiedSqliteBackup()) as {
+            source?: string;
+            backup?: string;
+            sha256?: string;
+            integrityCheck?: string;
+            recoveryOrigin?: { format?: string; kind?: string };
+          };
+          if (
+            !verified.source ||
+            (await realpath(verified.source)) !== database ||
+            !verified.backup ||
+            !verified.sha256 ||
+            !/^[a-f0-9]{64}$/.test(verified.sha256) ||
+            verified.integrityCheck !== 'ok' ||
+            verified.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+            verified.recoveryOrigin.kind !== 'protected'
+          )
+            throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          backupSha256 = verified.sha256;
+        },
+        () =>
+          this.write(async (tx) => {
+            await idle();
+            const actual = await tx.$queryRawUnsafe<Array<{name:string;file:string}>>('PRAGMA database_list');
+            const main = actual.find(r=>r.name==='main');
+            if (!main?.file || (await realpath(main.file))!==database || (await legacyReviewDatabaseFingerprint(database)) !== version)
+              throw new Error('XHS_DATABASE_CHANGED');
+            return confirmScheduledPolicy(
+              tx,
+              scopeInput,
+              input.digest,
+              {
+                assertQuiescent: idle,
                 verifyBackup: async () => backupSha256,
               },
               BigInt(Date.now()),

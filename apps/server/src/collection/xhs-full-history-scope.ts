@@ -9,6 +9,7 @@ import {
   type RoundRequest,
 } from './xhs-unbound-round';
 import { reserveRoundBudgetRisk, finishRoundRisk } from './round-budget-risk';
+import { assertFullHistoryReviewLineage } from './xhs-full-history-unknown-review';
 
 export const FULL_HISTORY_KIND = 'whole-history-scope-v1';
 export type FullHistoryInput = {
@@ -295,6 +296,7 @@ export async function admitFullHistoryRequest(
   review: any,
   r: RoundRequest,
 ) {
+  await assertFullHistoryReviewLineage(tx, reviewId, r);
   const scope = JSON.parse(review.scope_json);
   const binding = fullHistoryContext.getStore();
   check(

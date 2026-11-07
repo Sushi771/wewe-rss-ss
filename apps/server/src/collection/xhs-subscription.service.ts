@@ -84,6 +84,10 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  withScheduledReview?<T>(
+    input: { round: string; creatorId: string; authorId: string; phase: 'basic' | 'media'; batch?: number },
+    work: () => Promise<T>,
+  ): Promise<T>;
   withTaskScope?<T>(
     scope: { taskId: string; creatorId: string },
     work: () => Promise<T>,
@@ -963,7 +967,20 @@ export class XhsSubscriptionService implements OnModuleInit {
     phase: 'basic' | 'media';
     batch?: number;
   }) {
-    await this.creator(input.creatorId);
+    const creator = await this.creator(input.creatorId);
+    if (this.source?.withScheduledReview)
+      return this.source.withScheduledReview(
+        { ...input, authorId: creator.externalAuthorId! },
+        () => this.scheduleCreatorPhaseAdmitted(input),
+      );
+    return this.scheduleCreatorPhaseAdmitted(input);
+  }
+  private async scheduleCreatorPhaseAdmitted(input: {
+    round: string;
+    creatorId: string;
+    phase: 'basic' | 'media';
+    batch?: number;
+  }) {
     if (input.phase === 'basic')
       return this.enqueue(
         'list',

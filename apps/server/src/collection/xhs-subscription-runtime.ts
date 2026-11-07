@@ -4,6 +4,8 @@ import {
   fullHistoryNextDelay,
   type FullHistoryWriter,
 } from './xhs-full-history-scope';
+import { prepareScheduledTaskReview } from './xhs-scheduled-review-scope';
+import { scheduledTaskId } from './xhs-scheduled-admission';
 import {
   unboundRoundContext,
   type Phase as RoundPhase,
@@ -664,6 +666,38 @@ export class XhsSubscriptionRuntime
   assertFullScopeSession(binding: string) {
     if (binding !== this.fullScopeSessionBinding())
       return failure('XHS_SESSION_CHANGED');
+  }
+  /** A persistent recurring policy is separate from one-shot history approval.
+   * Capture the committed round/task scope before enqueue; the serial lane
+   * inherits it, while each physical request still obtains its own receipt.
+   */
+  async withScheduledReview<T>(
+    input: {
+      round: string;
+      creatorId: string;
+      authorId: string;
+      phase: 'basic' | 'media';
+      batch?: number;
+    },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    if (fullHistoryContext.getStore() || !this.fullHistoryWriter)
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    const sessionBinding = this.fullScopeSessionBinding();
+    const context = await this.fullHistoryWriter((tx) =>
+      prepareScheduledTaskReview(
+        tx,
+        {
+          ...input,
+          taskId: scheduledTaskId(input.round, input.creatorId, input.phase, input.batch ?? 0),
+          sessionBinding,
+        },
+        BigInt(Date.now()),
+      ),
+    );
+    if (!context) return work();
+    this.assertFullScopeSession(sessionBinding);
+    return fullHistoryContext.run(context, work);
   }
   private cookies?: XhsSessionCookies;
   private generation = 0;

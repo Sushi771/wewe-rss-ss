@@ -281,6 +281,20 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Explicitly confirmed three-account full-history scope takes one verified protected backup inside sqliteWrites.protectedWrite; source identity and fingerprint are rechecked before appending the review and new allowance. Historical unknown records and original budgets remain unchanged. Per-request collection stays incremental."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmFullHistoryUnknownReview",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit confirmation of an exact unknown media continuation takes one verified protected snapshot under protectedWrite; database identity, fingerprint, session, state digest and quiescence are rechecked. Unknown evidence and spent budgets are retained; this operation does not send requests."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmScheduledPolicy",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit recurring policy confirmation takes one verified protected snapshot under protectedWrite after risk and digest preflight; database identity, fingerprint and quiescence are rechecked. It only appends the bounded recurring grant, never enables or dispatches scheduled work."
     }
   ]
 }

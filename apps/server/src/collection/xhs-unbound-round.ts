@@ -3,6 +3,11 @@ import {
   FULL_HISTORY_KIND,
 } from './xhs-full-history-scope';
 import {
+  SCHEDULED_ROUND_KIND,
+  assertScheduledRoundAdmission,
+  assertScheduledDispatch,
+} from './xhs-scheduled-review-scope';
+import {
   prepareRemainingScope,
   assertRemainingAdmission,
 } from './round-continuation';
@@ -253,6 +258,8 @@ export async function admitUnboundRequest(
     scope = JSON.parse(review.scope_json);
   if (scope.reviewKind === FULL_HISTORY_KIND)
     return admitFullHistoryRequest(tx, reviewId, review, r);
+  if (scope.reviewKind === SCHEDULED_ROUND_KIND)
+    return assertScheduledRoundAdmission(tx, reviewId, review, r);
   if (scope.reviewKind === 'remaining-creators-review-v1')
     await assertRemainingAdmission(tx, reviewId, scope, r);
   check(
@@ -373,6 +380,9 @@ export async function assertUnboundDispatch(tx: RoundTx) {
       admitted[0].logical_target === r.target,
     'DURABLE_REQUEST_BINDING_REQUIRED',
   );
+  const reviews = await rows(tx, 'SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?', context!.reviewId);
+  if (reviews.length === 1 && JSON.parse(reviews[0].scope_json).reviewKind === SCHEDULED_ROUND_KIND)
+    await assertScheduledDispatch(tx, context!.reviewId, r);
 }
 
 export async function settleUnboundRequest(
@@ -398,7 +408,7 @@ export async function settleUnboundRequest(
     );
     const pageLimit =
       reviews.length === 1 &&
-      JSON.parse(reviews[0].scope_json).reviewKind === FULL_HISTORY_KIND
+      [FULL_HISTORY_KIND, SCHEDULED_ROUND_KIND].includes(JSON.parse(reviews[0].scope_json).reviewKind)
         ? 60
         : 30;
     check(

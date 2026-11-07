@@ -152,6 +152,9 @@ const xhsFullHistoryInput = z.object({
   }).strict(),
 }).strict();
 
+const xhsFullUnknownInput = z.object({reviewId:z.string().regex(/^unbound-[a-f0-9]{64}$/),operationId:z.string().uuid(),creatorId:z.string().uuid(),jobId:z.string().uuid(),expectedTarget:z.string().regex(/^[A-Za-z0-9_-]{1,128}:[a-f0-9]{64}$/)}).strict();
+const xhsScheduledPolicyInput = xhsFullHistoryInput.omit({bindings:true}).extend({creatorIds:z.array(z.string().uuid()).length(3)}).strict();
+
 @Injectable()
 export class TrpcRouter {
   private readonly wechat2RssAccounts = new Wechat2RssAccounts();
@@ -2126,6 +2129,29 @@ export class TrpcRouter {
         return this.xhsSourceOperation(() =>
           this.xhsWhole!.confirmAuthSessionThreePageRound(input),
         );
+      }),
+    prepareFullHistoryUnknownReview: this.trpcService.protectedProcedure
+      .input(xhsFullUnknownInput)
+      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.prepareFullHistoryUnknownReview(input));}),
+    confirmFullHistoryUnknownReview: this.trpcService.protectedProcedure
+      .input(xhsFullUnknownInput.extend({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownOwner:z.literal(true),acknowledgedIncompleteNoteExclusion:z.literal(true),acknowledgedDuplicateDirectoryRead:z.literal(true)}).strict())
+      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.confirmFullHistoryUnknownReview(input));}),
+    prepareScheduledPolicy: this.trpcService.protectedProcedure
+      .input(xhsScheduledPolicyInput)
+      .mutation(({input,ctx}) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() => this.xhsWhole!.prepareScheduledPolicy(input));
+      }),
+    confirmScheduledPolicy: this.trpcService.protectedProcedure
+      .input(xhsScheduledPolicyInput.extend({
+        digest:z.string().regex(/^[a-f0-9]{64}$/),
+        acknowledgedRecurringCollection:z.literal(true),
+        acknowledgedUnknownScope:z.literal(true),
+        acknowledgedDuplicateDirectoryRead:z.literal(true),
+      }).strict())
+      .mutation(({input,ctx}) => {
+        this.requireLocalXhsAccess(ctx);
+        return this.xhsSourceOperation(() => this.xhsWhole!.confirmScheduledPolicy(input));
       }),
     prepareWholeCreatorFullHistory: this.trpcService.protectedProcedure
       .input(xhsFullHistoryInput)
