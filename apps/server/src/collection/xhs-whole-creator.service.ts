@@ -843,7 +843,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
       maxRequests: input.maxRequests,
       phaseLimits: input.phaseLimits,
     };
-    const idle = async () => {
+    const idle = async (
+      reader: Pick<Prisma.TransactionClient, '$queryRawUnsafe'> = this.db,
+    ) => {
       if (
         this.running.size ||
         this.reviewing.size ||
@@ -851,24 +853,38 @@ export class XhsWholeCreatorService implements OnModuleInit {
         this.runtime.hasActiveSourceSessions()
       )
         throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
-      const active = await this.db.$queryRawUnsafe<Array<{ id: string }>>(
+      const active = await reader.$queryRawUnsafe<Array<{ id: string }>>(
         "SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') UNION ALL SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1",
       );
       if (active.length)
         throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
     };
+    let diagnosticStage = 'plan';
+    const diagnosticChecks: Record<string, boolean> = {};
+    const observedIdle = async (
+      location: 'outer' | 'backup' | 'transaction' | 'core',
+      reader: Pick<Prisma.TransactionClient, '$queryRawUnsafe'> = this.db,
+    ) => {
+      diagnosticStage = `idle-${location}-start`;
+      await idle(reader);
+      diagnosticStage = `idle-${location}-done`;
+    };
     try {
-      await idle();
+      await observedIdle('outer');
+      diagnosticStage = 'plan';
       const plan = await this.db.$transaction((tx) =>
         prepareScheduledPolicy(tx, scopeInput),
       );
-      if (plan.digest !== input.digest) throw new Error('REVIEW_STATE_CHANGED');
+      diagnosticChecks.digestMatches = plan.digest === input.digest;
+      if (!diagnosticChecks.digestMatches)
+        throw new Error('REVIEW_STATE_CHANGED');
       let backupSha256 = '',
         database = '',
         version = '';
       return await sqliteWrites.protectedWrite(
         async () => {
-          await idle();
+          await observedIdle('backup');
+          diagnosticStage = 'backup-binding-start';
           const rows = await this.db.$queryRawUnsafe<
             Array<{ name: string; file: string }>
           >('PRAGMA database_list');
@@ -876,6 +892,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
           if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
           database = await realpath(main.file);
           version = await legacyReviewDatabaseFingerprint(database);
+          diagnosticStage = 'backup';
           const verified = (await createVerifiedSqliteBackup()) as {
             source?: string;
             backup?: string;
@@ -883,6 +900,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             integrityCheck?: string;
             recoveryOrigin?: { format?: string; kind?: string };
           };
+          diagnosticStage = 'backup-binding-validation';
           if (
             !verified.source ||
             (await realpath(verified.source)) !== database ||
@@ -895,33 +913,88 @@ export class XhsWholeCreatorService implements OnModuleInit {
           )
             throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
           backupSha256 = verified.sha256;
+          diagnosticStage = 'backup-binding-done';
         },
-        () =>
-          this.write(async (tx) => {
-            await idle();
+        () => {
+          diagnosticStage = 'write-admission';
+          return this.write(async (tx) => {
+            diagnosticStage = 'tx-entry';
+            await observedIdle('transaction', tx);
+            diagnosticStage = 'fingerprint';
             const actual = await tx.$queryRawUnsafe<
               Array<{ name: string; file: string }>
             >('PRAGMA database_list');
             const main = actual.find((r) => r.name === 'main');
+            const currentVersion =
+              await legacyReviewDatabaseFingerprint(database);
+            const beforeFields = JSON.parse(version),
+              afterFields = JSON.parse(currentVersion);
+            for (const [index, field] of [
+              'dev',
+              'ino',
+              'size',
+              'mtimeNs',
+              'ctimeNs',
+            ].entries()) {
+              diagnosticChecks[field + 'Changed'] = beforeFields.some(
+                (row: string[] | null, file: number) =>
+                  row?.[index] !== afterFields[file]?.[index],
+              );
+            }
+            diagnosticChecks.databaseBindingMatches =
+              !!main?.file && (await realpath(main.file)) === database;
             if (
               !main?.file ||
               (await realpath(main.file)) !== database ||
-              (await legacyReviewDatabaseFingerprint(database)) !== version
+              currentVersion !== version
             )
               throw new Error('XHS_DATABASE_CHANGED');
-            return confirmScheduledPolicy(
+            diagnosticStage = 'core';
+            const confirmed = await confirmScheduledPolicy(
               tx,
               scopeInput,
               input.digest,
               {
-                assertQuiescent: idle,
+                assertQuiescent: () => observedIdle('core', tx),
                 verifyBackup: async () => backupSha256,
               },
               BigInt(Date.now()),
             );
-          }),
+            diagnosticStage = 'commit';
+            return confirmed;
+          });
+        },
       );
     } catch (error) {
+      const known = new Set([
+        'XHS_DATABASE_CHANGED',
+        'XHS_PROTECTED_BACKUP_REQUIRED',
+        'REVIEW_STATE_CHANGED',
+        'XHS_TASK_NOT_RESUMABLE',
+        'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+      ]);
+      const candidate = error instanceof Error ? error.message : '';
+      const prismaCode = (error as { code?: unknown } | null)?.code;
+      const code = known.has(candidate)
+        ? candidate
+        : ['P2028', 'P2010'].includes(String(prismaCode))
+          ? String(prismaCode)
+          : 'REVIEW_INTERNAL_UNCLASSIFIED';
+      console.warn(
+        JSON.stringify({
+          event: 'xhs-scheduled-confirm-failed',
+          stage: diagnosticStage,
+          code,
+          name: [
+            'Error',
+            'PrismaClientKnownRequestError',
+            'PrismaClientUnknownRequestError',
+          ].includes((error as Error)?.name)
+            ? (error as Error).name
+            : 'UNCLASSIFIED',
+          checks: diagnosticChecks,
+        }),
+      );
       return this.fullHistoryError(error);
     }
   }
