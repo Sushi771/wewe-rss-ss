@@ -123,6 +123,8 @@ export async function fetchAllowedImage(
       throw new ImageRequestBlockedError(response.status);
     }
     if (response.status === 408 || response.status >= 500) {
+      // A known transient HTTP outcome can release only this request's intent.
+      ordinaryOutcome = true;
       await response.body?.cancel().catch(() => undefined);
       throw new ImageRequestTransientError();
     }

@@ -12,6 +12,7 @@ import {
 import { SavedMediaSnapshot } from '../collection/saved-media-writeback';
 import { canonicalArticleUrl } from '../collection/collection-format';
 import {
+  fetchAllowedImage,
   ImageRequestBlockedError,
   ImageRequestTransientError,
 } from '../collection/image-fetch';
@@ -156,6 +157,39 @@ describe('durable bounded automatic WeChat media lane (offline)', () => {
       code: 'MEDIA_RETRY_EXHAUSTED',
     });
   });
+  it.each([408, 500, 502, 503, 504])(
+    'real ungated fetch classification retains finite backoff for HTTP %s',
+    async (status) => {
+      rows.delete(row(2).id);
+      const http = jest
+        .spyOn(global, 'fetch')
+        .mockImplementation(async () => new Response(null, { status }));
+      fetch.mockImplementation((source: string) => fetchAllowedImage(source));
+      try {
+        await queue().tick();
+        for (const gap of [60_000, 300_000, 1_800_000]) {
+          const before = http.mock.calls.length;
+          now += gap - 1;
+          await queue().tick();
+          expect(http).toHaveBeenCalledTimes(before);
+          now += 1;
+          await queue().tick();
+          expect(http).toHaveBeenCalledTimes(before + 1);
+        }
+        now += 86_400_000;
+        await queue().tick();
+        expect(http).toHaveBeenCalledTimes(4);
+        expect(stop).not.toHaveBeenCalled();
+        expect(commit).not.toHaveBeenCalled();
+        expect(publish.mock.lastCall[0][0]).toMatchObject({
+          attempts: 4,
+          code: 'MEDIA_RETRY_EXHAUSTED',
+        });
+      } finally {
+        http.mockRestore();
+      }
+    },
+  );
   it.each([401, 403, 429])(
     'persists safety denial %s before SQL and never clears it on restart',
     async (status) => {
