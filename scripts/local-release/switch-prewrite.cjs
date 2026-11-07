@@ -408,6 +408,7 @@ function bindRoles(roles, contract) {
           'd2610b7bb37a763158440dc0203cf38da96846859a25411150adcdf23b7d9530',
           '59cf509136299bcab2b783aeebfb3b8a8460611c5069ef18fd43db61f63635ef',
           'e787a43a3d4d87fe6c3d2336863a917a51691fdbf9ef98a5df489528d08d2f31',
+          '0c02143d3483bef141a35937aa9f166ce51e1d1a29a6be6a9deee3d4be79a671',
         ].includes(roles.current.manifestSha256) &&
         roles.rollback.manifestSha256 === roles.current.manifestSha256) ||
       bound.candidate.profile === 'canonical33' ||

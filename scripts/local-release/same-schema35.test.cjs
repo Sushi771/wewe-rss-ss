@@ -128,6 +128,28 @@ test(
       assert.equal(before.profile, 'canonical35');
       assert.equal(after.profile, 'canonical35');
       assert.equal(gate.assertSwitchTransition(before, after), true);
+      const badCurrent = structuredClone(roles);
+      badCurrent.current.manifestSha256 = 'a'.repeat(64);
+      badCurrent.rollback.manifestSha256 = 'a'.repeat(64);
+      assert.throws(() => contract.validateRoles(badCurrent));
+      assert.throws(() =>
+        gate.inspectSwitchDatabase({
+          ...request,
+          roles: badCurrent,
+          stage: 'before-migration',
+        }),
+      );
+      const badSchema = structuredClone(roles);
+      badSchema.candidate.manifest.files['server/prisma/schema.prisma'] =
+        'a'.repeat(64);
+      assert.throws(() => contract.validateRoles(badSchema));
+      assert.throws(() =>
+        gate.inspectSwitchDatabase({
+          ...request,
+          roles: badSchema,
+          stage: 'before-migration',
+        }),
+      );
       const badEngine = structuredClone(roles);
       badEngine.candidate.manifest.prisma.engineCommit = 'a'.repeat(40);
       assert.throws(() => contract.validateRoles(badEngine));
