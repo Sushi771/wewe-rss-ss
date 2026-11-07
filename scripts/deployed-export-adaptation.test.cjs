@@ -83,6 +83,27 @@ test('approved XHS inverses reject lost local authentication, acknowledgements a
   }
 });
 
+test('approved XHS inverses reject unreviewed parentheses and parse errors', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  const entry =
+    require('./fixtures/xhs-approved-router-seams.json').entries.find(
+      (e) => e.key === 'route:confirmFullHistoryNarrowReview',
+    );
+  const before = 'this.requireLocalXhsAccess(ctx);';
+  assert(entry.after.includes(before));
+  for (const [after, error] of [
+    ['this.requireLocalXhsAccess((ctx));', /exact approved XHS node/],
+    ['this.requireLocalXhsAccess((ctx);', /approved XHS source must parse/],
+  ]) {
+    const changed = source.replace(
+      entry.after,
+      entry.after.replace(before, after),
+    );
+    assert.notEqual(changed, source);
+    assert.throws(() => restorePreReviewedRecoveryRouter(ts, changed), error);
+  }
+});
+
 test('approved XHS inverses retain unrelated WeChat and export router protection', () => {
   const source = read('apps/server/src/trpc/trpc.router.ts');
   for (const anchor of ['exportIds:', 'wechat2rssLoginStart:']) {

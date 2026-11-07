@@ -1,11 +1,32 @@
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fixture = require('./fixtures/xhs-approved-router-seams.json');
-const { shape } = require('./xhs-platform-directory-seams.cjs');
 
 // Exact inverse of individually reviewed XHS additions. Historical router pins
 // still run after this layer; no unrelated member or route is discarded.
 module.exports = function restoreApprovedRouter(ts, source) {
+  const canonical = (text) => {
+    const tree = ts.createSourceFile(
+      'approved.ts',
+      text,
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    assert.equal(
+      tree.parseDiagnostics.length,
+      0,
+      'approved XHS source must parse',
+    );
+    // Syntax kinds and all syntax children retain ParenthesizedExpression and
+    // its delimiters; positions/trivia are deliberately excluded.
+    const structure = (node) => {
+      const children = node.getChildren(tree);
+      return children.length
+        ? [node.kind, children.map(structure)]
+        : [node.kind, node.getText(tree)];
+    };
+    return JSON.stringify(structure(tree));
+  };
   assert.equal(
     crypto.createHash('sha256').update(JSON.stringify(fixture)).digest('hex'),
     '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
@@ -16,6 +37,11 @@ module.exports = function restoreApprovedRouter(ts, source) {
     source,
     ts.ScriptTarget.Latest,
     true,
+  );
+  assert.equal(
+    ast.parseDiagnostics.length,
+    0,
+    'approved XHS source must parse',
   );
   const cls = ast.statements.find(ts.isClassDeclaration);
   const router = cls.members.find(
@@ -53,8 +79,8 @@ module.exports = function restoreApprovedRouter(ts, source) {
           ? 'class C {' + text + '}'
           : text;
     assert.equal(
-      shape(wrap(node.getText(ast))),
-      shape(wrap(entry.after)),
+      canonical(wrap(node.getText(ast))),
+      canonical(wrap(entry.after)),
       'exact approved XHS node: ' + entry.key,
     );
     if (entry.before === null) {
