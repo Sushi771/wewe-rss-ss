@@ -36,6 +36,9 @@ it('inherits only matching receipt identity and retains genuine ambiguity', () =
     );
     expect(found.some((x) => x.target === '*')).toBe(true);
   }
+  const invalidParent: any[] = [];
+  collectUnknowns({ ...fence, noteId: 'bad note' }, invalidParent);
+  expect(invalidParent.some((x) => x.target === '*')).toBe(true);
   const unbound: any[] = [];
   collectUnknowns(fence.receipt, unbound);
   expect(unbound).toEqual([{ phase: 'detail', target: '*' }]);

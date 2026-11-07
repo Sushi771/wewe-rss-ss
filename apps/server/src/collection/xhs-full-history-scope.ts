@@ -53,7 +53,8 @@ export function collectUnknowns(
     if (parentFence) {
       const matches =
         value.marker === parentFence.marker &&
-        value.phase === parentFence.phase;
+        value.phase === parentFence.phase &&
+        /^[A-Za-z0-9_-]{1,128}$/.test(parentFence.noteId);
       if (!matches || (target && target !== parentFence.noteId)) {
         target = '*';
         bindingConflict = true;
