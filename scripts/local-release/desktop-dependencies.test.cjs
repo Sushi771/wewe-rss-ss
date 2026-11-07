@@ -370,55 +370,113 @@ test('real Desktop adapter classifies command timeouts, read failure and malform
     path.join(__dirname, 'desktop-dependencies.cjs'),
     'utf8',
   );
-  for (const output of [
-    Error('private detail'),
-    Object.assign(Error('timeout'), { killed: true }),
-    '',
-    'unknown',
-    'True',
-    'False',
+  // The Windows adapter needs a Windows environment even on Linux CI. Exercise
+  // both hosts' path semantics without inheriting or changing the host process.
+  for (const [fixturePath, powershell] of [
+    [
+      path.posix,
+      'C:/fixture-windows/System32/WindowsPowerShell/v1.0/powershell.exe',
+    ],
+    [
+      path.win32,
+      'C:\\fixture-windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    ],
   ]) {
+    for (const output of [
+      Error('private detail'),
+      Object.assign(Error('timeout'), { killed: true }),
+      '',
+      'unknown',
+      'True',
+      'False',
+    ]) {
+      const module = { exports: {} };
+      let commandCalls = 0;
+      vm.runInNewContext(source, {
+        module,
+        __dirname,
+        process: { env: { SystemRoot: 'C:/fixture-windows' } },
+        Buffer,
+        setTimeout,
+        fetch,
+        require: (name) =>
+          name === 'node:path'
+            ? fixturePath
+            : name === './lib.cjs'
+              ? {
+                  hostEffects: {
+                    fs,
+                    processes: {
+                      execFile: (executable, args, options, callback) => {
+                        commandCalls++;
+                        assert.equal(executable, powershell);
+                        assert.equal(options.timeout, 1234);
+                        assert.ok(
+                          args.includes(
+                            "[bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)",
+                          ),
+                        );
+                        callback(
+                          output instanceof Error ? output : null,
+                          output instanceof Error ? '' : output,
+                        );
+                      },
+                    },
+                  },
+                }
+              : require(name),
+      });
+      const check = module.exports.realAdapter({}).desktopRunning(1234);
+      if (output === 'True' || output === 'False')
+        assert.equal(await check, output === 'True');
+      else
+        await assert.rejects(
+          check,
+          (e) =>
+            e.code === 'DOCKER_STATUS_UNAVAILABLE' &&
+            !e.message.includes('private detail'),
+        );
+      assert.equal(commandCalls, 1);
+    }
+  }
+});
+
+test('real Desktop adapter rejects a missing Windows root before executing any command', async () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, 'desktop-dependencies.cjs'),
+    'utf8',
+  );
+  for (const fixturePath of [path.posix, path.win32]) {
     const module = { exports: {} };
+    let commandCalls = 0;
     vm.runInNewContext(source, {
       module,
       __dirname,
-      process,
+      process: { env: {} },
       Buffer,
       setTimeout,
       fetch,
       require: (name) =>
-        name === './lib.cjs'
-          ? {
-              hostEffects: {
-                fs,
-                processes: {
-                  execFile: (_, args, options, callback) => {
-                    assert.equal(options.timeout, 1234);
-                    assert.ok(
-                      args.includes(
-                        "[bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)",
-                      ),
-                    );
-                    callback(
-                      output instanceof Error ? output : null,
-                      output instanceof Error ? '' : output,
-                    );
+        name === 'node:path'
+          ? fixturePath
+          : name === './lib.cjs'
+            ? {
+                hostEffects: {
+                  fs,
+                  processes: {
+                    execFile: () => {
+                      commandCalls++;
+                      assert.fail('missing Windows root must not execute');
+                    },
                   },
                 },
-              },
-            }
-          : require(name),
+              }
+            : require(name),
     });
-    const check = module.exports.realAdapter({}).desktopRunning(1234);
-    if (output === 'True' || output === 'False')
-      assert.equal(await check, output === 'True');
-    else
-      await assert.rejects(
-        check,
-        (e) =>
-          e.code === 'DOCKER_STATUS_UNAVAILABLE' &&
-          !e.message.includes('private detail'),
-      );
+    await assert.rejects(module.exports.realAdapter({}).desktopRunning(1234), {
+      code: 'ERR_INVALID_ARG_TYPE',
+    });
+    assert.equal(commandCalls, 0);
   }
 });
 
