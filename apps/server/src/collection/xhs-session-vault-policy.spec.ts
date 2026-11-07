@@ -29,12 +29,7 @@ describe('explicit restore policy and atomic update (synthetic only)', () => {
   it('uses explicit replacement, clears its private copy on failure and passes only boolean opt-in', async () => {
     let passed: any;
     const call = jest.fn(
-      async (
-        action: string,
-        _file: string,
-        cookies?: unknown,
-        _restore?: boolean,
-      ) => {
+      async (action: string, _file: string, cookies?: unknown) => {
         if (action === 'replace') {
           passed = cookies;
           throw Error('synthetic failure');

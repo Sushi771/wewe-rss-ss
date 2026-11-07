@@ -14,7 +14,6 @@ import {
   confirmFullHistoryScope,
   fullHistoryContext,
   dispatchFullHistoryRequest,
-  fullHistoryExcludedNoteIds,
 } from './xhs-full-history-scope';
 import {
   admitUnboundRequest,
