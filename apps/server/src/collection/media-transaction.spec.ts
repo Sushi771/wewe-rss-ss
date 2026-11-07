@@ -210,8 +210,12 @@ describe('owned media commit recovery', () => {
           { timeout: 15000 },
         ),
       );
+      // The same real rollback-journal contention reports P1008 on the pinned
+      // engine, while an expired interactive transaction reports P2028. Keep
+      // the preservation, connection-release and no-replay checks below for
+      // both; do not treat an arbitrary rejection as successful recovery.
       await expect(mediaTransaction(db, operation)).rejects.toMatchObject({
-        code: 'P2028',
+        code: expect.stringMatching(/^P(?:1008|2028)$/),
       });
       expect(operation).toHaveBeenCalledTimes(1);
       const done = new Promise<void>((resolve) =>
