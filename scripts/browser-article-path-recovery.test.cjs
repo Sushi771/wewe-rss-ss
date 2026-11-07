@@ -115,7 +115,23 @@ function page({
     throw Error('unexpected shared dependency');
   });
   const jsx = (type, props) => ({ type, props });
+  const operationMessage = compile(
+    'apps/web/src/utils/operation-message.ts',
+    () => {
+      throw Error('unexpected operation-message dependency');
+    },
+  );
+  const operationNotice = compile(
+    'apps/web/src/components/OperationNotice.tsx',
+    (name) => {
+      if (name === '../utils/operation-message') return operationMessage;
+      if (name === 'react/jsx-runtime')
+        return { jsx, jsxs: jsx, Fragment: 'Fragment' };
+      throw Error('unexpected operation-notice dependency');
+    },
+  );
   const modules = {
+    '@web/components/OperationNotice': operationNotice,
     sonner: { toast: { error: (message) => notifications.push(message) } },
     react: hooks,
     'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
@@ -736,7 +752,7 @@ test('a fixed ready task locks its directory and explains that a new destination
   const h = page({ destinationBound: true });
   assert.equal(h.button('选择下载路径').props.isDisabled, true);
   const text = JSON.stringify(h.render());
-  assert.ok(text.includes('取得新的接收许可'));
+  assert.ok(text.includes('更换目录请先取消任务'));
   assert.equal(text.includes('可重新选择路径后保存'), false);
   h.button('选择下载路径').props.onPress();
   assert.equal(h.calls.length, 0);
@@ -908,7 +924,7 @@ test('ordinary single download shows Wechat2RSS-only cache errors without select
   await flush();
   assert.ok(h.state[3].includes('Wechat2RSS缓存'));
   assert.deepEqual(h.notifications, [
-    '公众号操作未完成，请重试或查看任务状态。',
+    '公众号操作未完成，请先核对任务状态和已保存内容。',
   ]);
   h.runEffects();
   await flush();
