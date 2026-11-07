@@ -8,6 +8,48 @@ function restoreCompatible(file, source) {
   const reviewed = installed[file];
   if (!reviewed) return source;
   if (sha(source) === reviewed.beforeSha256) return source;
+  if (
+    file === 'scripts/local-release/runtime.cjs' &&
+    sha(source) !== reviewed.afterSha256
+  ) {
+    // f61a39d removed only the retired Mp2RSS scheduler input/shortcut.
+    // Reconstruct them solely for comparison with the historical writer pin.
+    for (const [after, before] of [
+      [
+        "  if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {",
+        "  if (settings.mp2RssFeedKey?.trim()) return true;\n  if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {",
+      ],
+      [
+        '      enabled: process.env.ENABLE_SCHEDULED_UPDATES,\n      publicAlbumFeeds,',
+        '      enabled: process.env.ENABLE_SCHEDULED_UPDATES,\n      mp2RssFeedKey: process.env.MP2RSS_FEED_KEY,\n      publicAlbumFeeds,',
+      ],
+    ]) {
+      assert.equal(
+        source.split(after).length,
+        2,
+        'exact candidate legacy writer seam: retired Mp2RSS input',
+      );
+      source = source.replace(after, before);
+    }
+  }
+  // 434b964: Prisma's lazy query must be awaited inside the async-local
+  // startup control. Undo only those two exact callbacks, then enforce the
+  // unchanged whole-source compatibility hash below.
+  if (
+    file === 'apps/server/src/prisma/prisma.service.ts' &&
+    sha(source) !== reviewed.afterSha256
+  ) {
+    for (const mode of ['ON', 'OFF']) {
+      const after = `this.updateModeControl.run(true, async () => {\n${mode === 'ON' ? '        ' : '            '}await this.$executeRawUnsafe('PRAGMA query_only=${mode}');\n${mode === 'ON' ? '      ' : '          '}})`;
+      const before = `this.updateModeControl.run(true, () =>\n${mode === 'ON' ? '        ' : '            '}this.$executeRawUnsafe('PRAGMA query_only=${mode}'),\n${mode === 'ON' ? '      ' : '          '})`;
+      assert.equal(
+        source.split(after).length,
+        2,
+        'exact candidate legacy writer seam: async startup control',
+      );
+      source = source.replace(after, before);
+    }
+  }
   assert.equal(
     sha(source),
     reviewed.afterSha256,

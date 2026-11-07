@@ -23,6 +23,7 @@ const reviewed = {
 };
 // Remove only the exact reviewed additions before enforcing historical pins.
 module.exports = function restorePreReviewedRecoveryRouter(ts, source) {
+  source = require('./xhs-approved-router-seams.cjs')(ts, source);
   for (const route of cacheRoutes) {
     const exact =
       route.before === null ? '    ' + route.after + ',\n' : route.after;

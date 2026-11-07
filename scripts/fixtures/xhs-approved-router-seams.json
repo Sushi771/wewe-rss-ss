@@ -1,0 +1,132 @@
+{
+  "base": "e9b86a7",
+  "reviewedThrough": "e039057",
+  "entries": [
+    {
+      "key": "top:xhsFullHistoryInput",
+      "before": null,
+      "after": "const xhsFullHistoryInput = z\n  .object({\n    bindings: z\n      .array(\n        z\n          .object({ creatorId: z.string().uuid(), jobId: z.string().uuid() })\n          .strict(),\n      )\n      .length(3),\n    maxRequests: z.number().int().min(1).max(100000),\n    phaseLimits: z\n      .object({\n        profile: z.number().int().nonnegative().max(100000),\n        list: z.number().int().nonnegative().max(100000),\n        detail: z.number().int().nonnegative().max(100000),\n        media: z.number().int().nonnegative().max(100000),\n      })\n      .strict(),\n  })\n  .strict();",
+      "sha256": "217d94e23dbcbd4a890001e4c2a9c426bd5721d629359c98a093f2ea867cd2eb"
+    },
+    {
+      "key": "top:xhsFullUnknownInput",
+      "before": null,
+      "after": "const xhsFullUnknownInput = z\n  .object({\n    reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),\n    operationId: z.string().uuid(),\n    creatorId: z.string().uuid(),\n    jobId: z.string().uuid(),\n    expectedTarget: z.string().regex(/^[A-Za-z0-9_-]{1,128}:[a-f0-9]{64}$/),\n  })\n  .strict();",
+      "sha256": "3bb0f4f419f11172e859483ce6423453eb9900dfd2d2238b4b4cbd5e4a67f08b"
+    },
+    {
+      "key": "top:xhsFullNarrowInput",
+      "before": null,
+      "after": "const xhsFullNarrowInput = z\n  .object({\n    reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),\n    creatorId: z.string().uuid(),\n    jobId: z.string().uuid(),\n  })\n  .strict();",
+      "sha256": "45ed6d3239d123f8170a92e351285e0e594f4b8f34b2d26ae5203b5b95a5e769"
+    },
+    {
+      "key": "top:xhsScheduledPolicyInput",
+      "before": null,
+      "after": "const xhsScheduledPolicyInput = xhsFullHistoryInput\n  .omit({ bindings: true })\n  .extend({ creatorIds: z.array(z.string().uuid()).length(3) })\n  .strict();",
+      "sha256": "25fdf504756d2fcc865145ed21128709d6260838dbf3b21bfa5fc224ee5a75aa"
+    },
+    {
+      "key": "member:applyMiddleware",
+      "before": "async applyMiddleware(app: INestApplication) {\n    app.use(\n      `/trpc`,\n      trpcExpress.createExpressMiddleware({\n        router: this.appRouter,\n        createContext: ({ req, res }) => {\n          if (\n            req.url\n              .split('?')[0]\n              .split(',')\n              .some(\n                (name) =>\n                  name.endsWith('xiaohongshu.prepareOriginalLink') ||\n                  name.endsWith('xiaohongshu.recoverSingleNote'),\n              )\n          ) {\n            res.setHeader('Cache-Control', 'no-store');\n            res.setHeader('Referrer-Policy', 'no-referrer');\n          }\n          const authCode =\n            this.configService.get<ConfigurationType['auth']>('auth')!.code;\n\n          if (privateOnlineMode() && !hasPrivateSession(req)) {\n            return { errorMsg: '请先登录' };\n          }\n          if (\n            !privateOnlineMode() &&\n            authCode &&\n            req.headers.authorization !== authCode\n          ) {\n            return {\n              errorMsg: 'authCode不正确！',\n            };\n          }\n          return {\n            errorMsg: null,\n            // A disconnected download stops after the current atomic article.\n            isExportCancelled: () => res.destroyed,\n            // Browser same-origin GETs omit Origin. This flag grants status\n            // reads only; mutations still require explicit same-origin proof.\n            isLocalXhsRead: isLocalXhsStatusRequest({\n              method: req.method,\n              protocol: req.protocol,\n              host: req.get('host') || '',\n              remoteAddress: req.socket.remoteAddress,\n              origin: req.headers.origin,\n            }),\n            isLocalSave:\n              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(\n                req.socket.remoteAddress || '',\n              ) &&\n              /^https?:\\/\\/(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?$/.test(\n                `${req.protocol}://${req.get('host')}`,\n              ) &&\n              req.headers.origin === `${req.protocol}://${req.get('host')}`,\n            isLocal:\n              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(\n                req.socket.remoteAddress || '',\n              ) &&\n              (!req.headers.origin ||\n                /^https?:\\/\\/(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?$/.test(\n                  req.headers.origin,\n                )),\n          };\n        },\n        middleware: (req, res, next) => {\n          next();\n        },\n      }),\n    );\n  }",
+      "after": "async applyMiddleware(app: INestApplication) {\n    app.use(\n      `/trpc`,\n      trpcExpress.createExpressMiddleware({\n        router: this.appRouter,\n        createContext: ({ req, res }) => {\n          if (\n            req.url\n              .split('?')[0]\n              .split(',')\n              .some(\n                (name) =>\n                  name.endsWith('xiaohongshu.prepareOriginalLink') ||\n                  name.endsWith('xiaohongshu.recoverSingleNote') ||\n                  name.endsWith('xiaohongshu.savedSession'),\n              )\n          ) {\n            res.setHeader('Cache-Control', 'no-store');\n            res.setHeader('Referrer-Policy', 'no-referrer');\n          }\n          const authCode =\n            this.configService.get<ConfigurationType['auth']>('auth')!.code;\n\n          if (privateOnlineMode() && !hasPrivateSession(req)) {\n            return { errorMsg: '请先登录' };\n          }\n          if (\n            !privateOnlineMode() &&\n            authCode &&\n            req.headers.authorization !== authCode\n          ) {\n            return {\n              errorMsg: 'authCode不正确！',\n            };\n          }\n          return {\n            errorMsg: null,\n            // A disconnected download stops after the current atomic article.\n            isExportCancelled: () => res.destroyed,\n            // Browser same-origin GETs omit Origin. This flag grants status\n            // reads only; mutations still require explicit same-origin proof.\n            isLocalXhsRead: isLocalXhsStatusRequest({\n              method: req.method,\n              protocol: req.protocol,\n              host: req.get('host') || '',\n              remoteAddress: req.socket.remoteAddress,\n              origin: req.headers.origin,\n            }),\n            isLocalSave:\n              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(\n                req.socket.remoteAddress || '',\n              ) &&\n              /^https?:\\/\\/(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?$/.test(\n                `${req.protocol}://${req.get('host')}`,\n              ) &&\n              req.headers.origin === `${req.protocol}://${req.get('host')}`,\n            isLocal:\n              ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(\n                req.socket.remoteAddress || '',\n              ) &&\n              (!req.headers.origin ||\n                /^https?:\\/\\/(localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d+)?$/.test(\n                  req.headers.origin,\n                )),\n          };\n        },\n        middleware: (req, res, next) => {\n          next();\n        },\n      }),\n    );\n  }",
+      "sha256": "a8ce71ba17740515ed1f4221897cdbdf096a19cb472426b845abd781aa8b89cc"
+    },
+    {
+      "key": "route:savedSession",
+      "before": null,
+      "after": "savedSession: this.trpcService.protectedProcedure.query(async ({ ctx }) => {\n      this.requireLocalXhsConnection(ctx);\n      (ctx as any).res?.setHeader('Cache-Control', 'no-store');\n      (ctx as any).res?.setHeader('Pragma', 'no-cache');\n      try {\n        return await this.xhsRuntime!.savedSession();\n      } catch {\n        throw new TRPCError({\n          code: 'PRECONDITION_FAILED',\n          message: 'XHS_VAULT_OPERATION_FAILED',\n        });\n      }\n    })",
+      "sha256": "bd616f80239b089759e232d30168020d096d6cb85c73744f618c0a3c3a602a7d"
+    },
+    {
+      "key": "route:connectSession",
+      "before": "connectSession: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            a1: z.string().min(1).max(8192),\n            webSession: z.string().min(1).max(8192),\n            persist: z.boolean().optional(),\n          })\n          .strict(),\n      )\n      .mutation(async ({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        try {\n          return await this.xhsRuntime!.connectSession(input);\n        } catch (error) {\n          throw new TRPCError({\n            code: 'PRECONDITION_FAILED',\n            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),\n          });\n        }\n      })",
+      "after": "connectSession: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            a1: z.string().min(1).max(8192),\n            webSession: z.string().min(1).max(8192),\n            persist: z.boolean().optional(),\n            replaceSaved: z.boolean().optional(),\n            autoRestore: z.boolean().optional(),\n          })\n          .strict(),\n      )\n      .mutation(async ({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        try {\n          return await this.xhsRuntime!.connectSession(input);\n        } catch (error) {\n          throw new TRPCError({\n            code: 'PRECONDITION_FAILED',\n            message: xhsPublicCode(error, 'XHS_CONNECTION_FAILED'),\n          });\n        }\n      })",
+      "sha256": "aecd4e52a29955c4742b4cbd8144d393cf7e578e1191e708c22c78802fd04cd8"
+    },
+    {
+      "key": "route:prepareAuthSessionThreePageRound",
+      "before": null,
+      "after": "prepareAuthSessionThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorIds: z\n              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))\n              .length(3),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareAuthSessionThreePageRound(input),\n        );\n      })",
+      "sha256": "24d5a021c6a64935ae12e969b5e2a92af0a0900997ec1a03eca3f0d6600ce99a"
+    },
+    {
+      "key": "route:confirmAuthSessionThreePageRound",
+      "before": null,
+      "after": "confirmAuthSessionThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            creatorIds: z\n              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))\n              .length(3),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedUnknownScope: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmAuthSessionThreePageRound(input),\n        );\n      })",
+      "sha256": "8392f1e262d3af2d57c0120c11ca171fc1d154a5a768957df57ef8b4be9512ac"
+    },
+    {
+      "key": "route:prepareFullHistoryUnknownReview",
+      "before": null,
+      "after": "prepareFullHistoryUnknownReview: this.trpcService.protectedProcedure\n      .input(xhsFullUnknownInput)\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareFullHistoryUnknownReview(input),\n        );\n      })",
+      "sha256": "ac2f7916b6e28124ee0506ca20916794701cf8f4d11574ff9e8812fd274675d0"
+    },
+    {
+      "key": "route:confirmFullHistoryUnknownReview",
+      "before": null,
+      "after": "confirmFullHistoryUnknownReview: this.trpcService.protectedProcedure\n      .input(\n        xhsFullUnknownInput\n          .extend({\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedUnknownOwner: z.literal(true),\n            acknowledgedIncompleteNoteExclusion: z.literal(true),\n            acknowledgedDuplicateDirectoryRead: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmFullHistoryUnknownReview(input),\n        );\n      })",
+      "sha256": "dd001401e4d5237a65a0cc31c21f607a7a88dfe77ca4f1c4a760e778935cf182"
+    },
+    {
+      "key": "route:prepareFullHistoryNarrowReview",
+      "before": null,
+      "after": "prepareFullHistoryNarrowReview: this.trpcService.protectedProcedure\n      .input(xhsFullNarrowInput)\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareFullHistoryNarrowReview(input),\n        );\n      })",
+      "sha256": "da48b04e98ef4980006f0fc4c1960f6e2e6246e28633d0ef74d5651192d8bd29"
+    },
+    {
+      "key": "route:confirmFullHistoryNarrowReview",
+      "before": null,
+      "after": "confirmFullHistoryNarrowReview: this.trpcService.protectedProcedure\n      .input(\n        xhsFullNarrowInput\n          .extend({\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedUnknownExclusions: z.literal(true),\n            acknowledgedDuplicateDirectoryRead: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmFullHistoryNarrowReview(input),\n        );\n      })",
+      "sha256": "4f04a405af7c5af94dfce6bae2d267ab77107bda76b6ae9f394167057ed8ecbc"
+    },
+    {
+      "key": "route:prepareScheduledPolicy",
+      "before": null,
+      "after": "prepareScheduledPolicy: this.trpcService.protectedProcedure\n      .input(xhsScheduledPolicyInput)\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareScheduledPolicy(input),\n        );\n      })",
+      "sha256": "5cde93c675db84ba3a295119e09c257d4fe0fe051c9fc9243673b33e5b603fa4"
+    },
+    {
+      "key": "route:confirmScheduledPolicy",
+      "before": null,
+      "after": "confirmScheduledPolicy: this.trpcService.protectedProcedure\n      .input(\n        xhsScheduledPolicyInput\n          .extend({\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedRecurringCollection: z.literal(true),\n            acknowledgedUnknownScope: z.literal(true),\n            acknowledgedDuplicateDirectoryRead: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmScheduledPolicy(input),\n        );\n      })",
+      "sha256": "8a09fe7e0cacc757bbdf83cced3e27b37c595fd9448e6cb8a2c4e4bf2c83ca6e"
+    },
+    {
+      "key": "route:prepareWholeCreatorFullHistory",
+      "before": null,
+      "after": "prepareWholeCreatorFullHistory: this.trpcService.protectedProcedure\n      .input(xhsFullHistoryInput)\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareWholeCreatorFullHistory(input),\n        );\n      })",
+      "sha256": "1a05100dabef92c1a374f57add2db206c376e4d9828c5bb091d2d9df0144ee3d"
+    },
+    {
+      "key": "route:confirmWholeCreatorFullHistory",
+      "before": null,
+      "after": "confirmWholeCreatorFullHistory: this.trpcService.protectedProcedure\n      .input(\n        xhsFullHistoryInput\n          .extend({\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedUnknownScope: z.literal(true),\n            acknowledgedDuplicateDirectoryRead: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmWholeCreatorFullHistory(input),\n        );\n      })",
+      "sha256": "130517c6ae4422bd0b58f8a278115932369799e85b5a28883fc6ad5e7fc5d1f6"
+    },
+    {
+      "key": "route:executeWholeCreatorFullHistory",
+      "before": null,
+      "after": "executeWholeCreatorFullHistory: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/),\n            jobId: z.string().uuid(),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.executeWholeCreatorFullHistory(input),\n        );\n      })",
+      "sha256": "55690f11fd203e3d0eeb2c3303faa127ae67cdc24f3cf374cbc3dff811c32ace"
+    },
+    {
+      "key": "route:prepareUnboundThreePageRound",
+      "before": null,
+      "after": "prepareUnboundThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            rootReviewId: z\n              .string()\n              .regex(/^unbound-[a-f0-9]{64}$/)\n              .optional(),\n            creatorIds: z\n              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))\n              .length(3),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareUnboundThreePageRound(input),\n        );\n      })",
+      "sha256": "3d693c82d9f8d9ef23b90ff0363382b09757c359f39a7f59ddea6e7f4c579f6e"
+    },
+    {
+      "key": "route:confirmUnboundThreePageRound",
+      "before": null,
+      "after": "confirmUnboundThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            rootReviewId: z\n              .string()\n              .regex(/^unbound-[a-f0-9]{64}$/)\n              .optional(),\n            creatorIds: z\n              .array(z.string().regex(/^[A-Za-z0-9_-]{1,128}$/))\n              .length(3),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedUnknownScope: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmUnboundThreePageRound(input),\n        );\n      })",
+      "sha256": "3361255d418fc1f0d646a6758d0e3e537ee78ec5a035403f77462649d9b81190"
+    },
+    {
+      "key": "route:executeUnboundThreePageRound",
+      "before": null,
+      "after": "executeUnboundThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({ reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/) })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.executeUnboundThreePageRound(input),\n        );\n      })",
+      "sha256": "2a16c506651a12f9dcfcb5281fa6e4fb3ff56034a33d11c981f79126e1f0f089"
+    }
+  ]
+}

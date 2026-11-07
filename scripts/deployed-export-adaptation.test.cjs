@@ -17,6 +17,93 @@ const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+test('approved startup and retired Mp2RSS inverses reject unrelated writer changes', () => {
+  for (const [file, before, after] of [
+    [
+      'apps/server/src/prisma/prisma.service.ts',
+      'this.writerLease?.check();',
+      'void 0;',
+    ],
+    [
+      'scripts/local-release/runtime.cjs',
+      "settings.wechat2RssEnabled === '1'",
+      "settings.wechat2RssEnabled !== '1'",
+    ],
+  ]) {
+    const source = read(file);
+    assert(source.includes(before));
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restoreCompatible(
+          file,
+          source.replace(before, after),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+});
+
+test('approved XHS inverses reject lost local authentication, acknowledgements and client session injection', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  const fixture = require('./fixtures/xhs-approved-router-seams.json');
+  for (const [key, before, after] of [
+    [
+      'route:confirmFullHistoryNarrowReview',
+      'this.requireLocalXhsAccess(ctx);',
+      'void ctx;',
+    ],
+    [
+      'route:confirmFullHistoryNarrowReview',
+      'acknowledgedUnknownExclusions: z.literal(true)',
+      'acknowledgedUnknownExclusions: z.boolean()',
+    ],
+    [
+      'top:xhsFullNarrowInput',
+      'creatorId: z.string().uuid(),',
+      'creatorId: z.string().uuid(), sessionBinding: z.string(),',
+    ],
+    [
+      'route:savedSession',
+      'this.trpcService.protectedProcedure',
+      'this.trpcService.publicProcedure',
+    ],
+  ]) {
+    const entry = fixture.entries.find((e) => e.key === key);
+    assert(entry.after.includes(before));
+    const changed = source.replace(
+      entry.after,
+      entry.after.replace(before, after),
+    );
+    assert.notEqual(changed, source);
+    assert.throws(
+      () => restorePreReviewedRecoveryRouter(ts, changed),
+      /exact approved XHS node/,
+    );
+  }
+});
+
+test('approved XHS inverses retain unrelated WeChat and export router protection', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  for (const anchor of ['exportIds:', 'wechat2rssLoginStart:']) {
+    const start = source.indexOf(anchor);
+    assert(start >= 0, 'existing protected router');
+    const at = source.indexOf('this.trpcService.protectedProcedure', start);
+    assert(at > start);
+    const changed =
+      source.slice(0, at) +
+      source
+        .slice(at)
+        .replace(
+          'this.trpcService.protectedProcedure',
+          'this.trpcService.publicProcedure',
+        );
+    assert.throws(
+      () => restorePreReviewedRecoveryRouter(ts, changed),
+      /complete pre-recovery router AST preserved/,
+    );
+  }
+});
 test('legacy writer additions cannot hide changed original admission or restart gates', () => {
   const seams = require('./fixtures/legacy-writer-seams.json');
   for (const [file, entries] of Object.entries(seams))
