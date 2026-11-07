@@ -153,6 +153,7 @@ const xhsFullHistoryInput = z.object({
 }).strict();
 
 const xhsFullUnknownInput = z.object({reviewId:z.string().regex(/^unbound-[a-f0-9]{64}$/),operationId:z.string().uuid(),creatorId:z.string().uuid(),jobId:z.string().uuid(),expectedTarget:z.string().regex(/^[A-Za-z0-9_-]{1,128}:[a-f0-9]{64}$/)}).strict();
+const xhsFullNarrowInput = z.object({reviewId:z.string().regex(/^unbound-[a-f0-9]{64}$/),creatorId:z.string().uuid(),jobId:z.string().uuid()}).strict();
 const xhsScheduledPolicyInput = xhsFullHistoryInput.omit({bindings:true}).extend({creatorIds:z.array(z.string().uuid()).length(3)}).strict();
 
 @Injectable()
@@ -2136,6 +2137,12 @@ export class TrpcRouter {
     confirmFullHistoryUnknownReview: this.trpcService.protectedProcedure
       .input(xhsFullUnknownInput.extend({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownOwner:z.literal(true),acknowledgedIncompleteNoteExclusion:z.literal(true),acknowledgedDuplicateDirectoryRead:z.literal(true)}).strict())
       .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.confirmFullHistoryUnknownReview(input));}),
+    prepareFullHistoryNarrowReview: this.trpcService.protectedProcedure
+      .input(xhsFullNarrowInput)
+      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.prepareFullHistoryNarrowReview(input));}),
+    confirmFullHistoryNarrowReview: this.trpcService.protectedProcedure
+      .input(xhsFullNarrowInput.extend({digest:z.string().regex(/^[a-f0-9]{64}$/),acknowledgedUnknownExclusions:z.literal(true),acknowledgedDuplicateDirectoryRead:z.literal(true)}).strict())
+      .mutation(({input,ctx}) => {this.requireLocalXhsAccess(ctx);return this.xhsSourceOperation(() => this.xhsWhole!.confirmFullHistoryNarrowReview(input));}),
     prepareScheduledPolicy: this.trpcService.protectedProcedure
       .input(xhsScheduledPolicyInput)
       .mutation(({input,ctx}) => {

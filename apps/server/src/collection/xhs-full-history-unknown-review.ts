@@ -32,7 +32,7 @@ function mediaNote(target: string) {
   check(m, 'EXACT_UNKNOWN_MEDIA_TARGET_REQUIRED');
   return m[1];
 }
-async function lineage(tx: RoundTx, reviewId: string) {
+export async function fullHistoryLineage(tx: RoundTx, reviewId: string) {
   const all = await rows(
     tx,
     'SELECT id,scope_json,creator_bindings_json,backup_sha256 FROM xhs_unbound_owner_reviews ORDER BY id',
@@ -75,7 +75,7 @@ export async function assertFullHistoryReviewLineage(
   reviewId: string,
   request?: RoundRequest,
 ) {
-  const l = await lineage(tx, reviewId);
+  const l = await fullHistoryLineage(tx, reviewId);
   check(
     !l.all.some(
       (r) =>
@@ -106,7 +106,7 @@ export async function prepareFullHistoryUnknownReview(
     /^[a-f0-9]{64}$/.test(input.sessionBinding),
     'SESSION_INSTANCE_REQUIRED',
   );
-  const l = await lineage(tx, input.reviewId);
+  const l = await fullHistoryLineage(tx, input.reviewId);
   await assertFullHistoryReviewLineage(tx, input.reviewId);
   check(
     l.scope.bindings.some(

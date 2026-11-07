@@ -1,3 +1,4 @@
+import { prepareFullHistoryNarrowReview, confirmFullHistoryNarrowReview, type FullHistoryNarrowInput } from './xhs-full-history-narrow-review';
 import { prepareFullHistoryUnknownReview, confirmFullHistoryUnknownReview, type FullHistoryUnknownInput } from './xhs-full-history-unknown-review';
 import { prepareScheduledPolicy, confirmScheduledPolicy, type ScheduledPolicyInput } from './xhs-scheduled-review-scope';
 import {
@@ -591,6 +592,102 @@ export class XhsWholeCreatorService implements OnModuleInit {
               {...scopeInput,digest:input.digest,acknowledgedUnknownOwner:true,acknowledgedIncompleteNoteExclusion:true,acknowledgedDuplicateDirectoryRead:true},
               {
                 assertQuiescent: async () => idle(),
+                assertSession: (binding) =>
+                  this.runtime.assertFullScopeSession(binding),
+                authorizePlan: async current => {if(current.digest!==plan.digest) throw new Error('REVIEW_STATE_CHANGED');},
+                verifyProtectedSnapshot: async stateDigest => {if(stateDigest!==plan.stateDigest) throw new Error('REVIEW_STATE_CHANGED');return backupSha256;},
+              },
+              BigInt(Date.now()),
+            );
+          }),
+      );
+    } catch (error) {
+      return this.fullHistoryError(error);
+    }
+  }
+  async prepareFullHistoryNarrowReview(input: Omit<FullHistoryNarrowInput,'sessionBinding'>) {
+    await this.readyForMutation();
+    try {
+      const plan = await this.db.$transaction(tx => prepareFullHistoryNarrowReview(tx,{...input,sessionBinding:this.runtime.fullScopeSessionBinding()}));
+      return JSON.parse(JSON.stringify({ digest: plan.digest, scope: plan.scope }, (_, value) => typeof value === 'bigint' ? String(value) : value));
+    }
+    catch(error) {return this.fullHistoryError(error);}
+  }
+  async confirmFullHistoryNarrowReview(
+    input: Omit<FullHistoryNarrowInput, 'sessionBinding'> & {
+      digest: string;
+      acknowledgedUnknownExclusions: true;
+      acknowledgedDuplicateDirectoryRead: true;
+    },
+  ) {
+    await this.readyForMutation();
+    if (
+      input.acknowledgedUnknownExclusions !== true ||
+      input.acknowledgedDuplicateDirectoryRead !== true
+    )
+      throw new XhsSubscriptionError('XHS_REQUEST_POLICY_INVALID');
+    const scopeInput: FullHistoryNarrowInput = {reviewId: input.reviewId, creatorId: input.creatorId, jobId: input.jobId, sessionBinding:this.runtime.fullScopeSessionBinding()};
+    const idle = async (reader: Pick<PrismaService, '$queryRawUnsafe'> = this.db) => {
+      this.runtime.assertFullScopeSession(scopeInput.sessionBinding);
+      if (
+        this.running.size ||
+        this.reviewing.size ||
+        this.starting.size ||
+        this.runtime.hasActiveSourceSessions()
+      )
+        throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+      const active = await reader.$queryRawUnsafe<Array<{id:string}>>("SELECT id FROM xhs_subscription_tasks WHERE state IN ('queued','running') UNION ALL SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running') LIMIT 1");
+      if (active.length) throw new XhsSubscriptionError('XHS_TASK_NOT_RESUMABLE');
+    };
+    try {
+      await idle();
+      const plan = await this.db.$transaction(tx => prepareFullHistoryNarrowReview(tx,scopeInput));
+      if(plan.digest!==input.digest) throw new Error('REVIEW_STATE_CHANGED');
+      let backupSha256 = '',
+        database = '',
+        version = '';
+      return await sqliteWrites.protectedWrite(
+        async () => {
+          await idle();
+          const rows = await this.db.$queryRawUnsafe<
+            Array<{ name: string; file: string }>
+          >('PRAGMA database_list');
+          const main = rows.find((r) => r.name === 'main');
+          if (!main?.file) throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          database = await realpath(main.file);
+          version = await legacyReviewDatabaseFingerprint(database);
+          const verified = (await createVerifiedSqliteBackup()) as {
+            source?: string;
+            backup?: string;
+            sha256?: string;
+            integrityCheck?: string;
+            recoveryOrigin?: { format?: string; kind?: string };
+          };
+          if (
+            !verified.source ||
+            (await realpath(verified.source)) !== database ||
+            !verified.backup ||
+            !verified.sha256 ||
+            !/^[a-f0-9]{64}$/.test(verified.sha256) ||
+            verified.integrityCheck !== 'ok' ||
+            verified.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+            verified.recoveryOrigin.kind !== 'protected'
+          )
+            throw new Error('XHS_PROTECTED_BACKUP_REQUIRED');
+          backupSha256 = verified.sha256;
+        },
+        () =>
+          this.write(async (tx) => {
+            await idle(tx);
+            const actual = await tx.$queryRawUnsafe<Array<{name:string;file:string}>>('PRAGMA database_list');
+            const main = actual.find(r=>r.name==='main');
+            if (!main?.file || (await realpath(main.file))!==database || (await legacyReviewDatabaseFingerprint(database)) !== version)
+              throw new Error('XHS_DATABASE_CHANGED');
+            return confirmFullHistoryNarrowReview(
+              tx,
+              {...scopeInput,digest:input.digest,acknowledgedUnknownExclusions:true,acknowledgedDuplicateDirectoryRead:true},
+              {
+                assertQuiescent: () => idle(tx),
                 assertSession: (binding) =>
                   this.runtime.assertFullScopeSession(binding),
                 authorizePlan: async current => {if(current.digest!==plan.digest) throw new Error('REVIEW_STATE_CHANGED');},

@@ -36,18 +36,37 @@ const rows = (tx: RoundTx, sql: string, ...args: unknown[]) =>
   tx.$queryRawUnsafe<any[]>(sql, ...args);
 const phases = ['profile', 'list', 'detail', 'media'] as const;
 /** Exclusions are evidence, never success receipts. Unknown profile/list requires separate review. */
-function collectUnknowns(
+export function collectUnknowns(
   value: any,
   result: { phase: string; target: string }[],
+  parentFence?: { marker: string; phase: string; noteId: string },
 ) {
   if (!value || typeof value !== 'object') return;
   const unknown =
     ['started', 'unknown'].includes(value.state) ||
     ['started', 'unknown'].includes(value.outcome) ||
     value.classification === 'request-outcome-unknown';
-  if (unknown && (value.marker || value.phase)) {
+  if (unknown && (value.marker || value.phase || parentFence)) {
     const phase = value.phase === 'metrics' ? 'detail' : value.phase;
     let target = value.noteId ?? value.noteKey ?? value.logical_target;
+    let bindingConflict = false;
+    if (parentFence) {
+      const matches =
+        value.marker === parentFence.marker &&
+        value.phase === parentFence.phase;
+      if (!matches || (target && target !== parentFence.noteId)) {
+        target = '*';
+        bindingConflict = true;
+      } else if (!target) target = parentFence.noteId;
+      if (
+        typeof value.targetHash === 'string' &&
+        value.targetHash !==
+          createHash('sha256').update(parentFence.noteId).digest('hex')
+      ) {
+        target = '*';
+        bindingConflict = true;
+      }
+    }
     if (typeof target === 'string' && target.startsWith('[')) {
       try {
         const tuple = JSON.parse(target);
@@ -60,6 +79,7 @@ function collectUnknowns(
       }
     }
     if (
+      !bindingConflict &&
       typeof value.targetHash === 'string' &&
       /^[a-f0-9]{64}$/.test(value.targetHash)
     )
@@ -71,8 +91,18 @@ function collectUnknowns(
       result.push({ phase: 'media', target: '*' });
     }
   }
-  for (const child of Object.values(value))
-    if (child && typeof child === 'object') collectUnknowns(child, result);
+  for (const [key, child] of Object.entries(value))
+    if (child && typeof child === 'object')
+      collectUnknowns(
+        child,
+        result,
+        key === 'receipt' &&
+          typeof value.marker === 'string' &&
+          typeof value.phase === 'string' &&
+          typeof value.noteId === 'string'
+          ? { marker: value.marker, phase: value.phase, noteId: value.noteId }
+          : undefined,
+      );
 }
 function excludedTarget(
   exclusion: { phase: string; target: string },

@@ -295,6 +295,13 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Explicit recurring policy confirmation takes one verified protected snapshot under protectedWrite after risk and digest preflight; database identity, fingerprint and quiescence are rechecked. It only appends the bounded recurring grant, never enables or dispatches scheduled work."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmFullHistoryNarrowReview",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicitly confirmed exact creator/job narrowing takes one protected snapshot after idle/session/digest preflight. Database identity/fingerprint and transaction-local quiescence are rechecked before immutable review commit; existing unknown evidence, exclusions and budgets remain governed by the review core. Preparation sends no requests and creates no snapshot."
     }
   ]
 }
