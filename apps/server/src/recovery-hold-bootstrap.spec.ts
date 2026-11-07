@@ -1,3 +1,12 @@
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname, basename } from 'node:path';
+import { projectWriterGate } from './collection/project-writer-boundary';
+beforeAll(
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- Observe only the owned synthetic test process.
+  require('../../../scripts/local-release/writer-self.fixture.test.cjs')
+    .prepareWriterSelf,
+);
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { TrpcRouter } from './trpc/trpc.router';
@@ -20,6 +29,12 @@ jest.mock('./browser-task.opt-in', () => ({
 }));
 
 it('actual main bootstrap installs recovery gate ahead of application routes', async () => {
+  const previousUrl = process.env.DATABASE_URL;
+  const directory = mkdtempSync(join(tmpdir(), 'wewe-hold-bootstrap-'));
+  const database = join(directory, 'fixture.sqlite');
+  writeFileSync(database, '', { flag: 'wx' });
+  process.env.DATABASE_URL = `file:${database.replace(/\\/g, '/')}`;
+  const lease = projectWriterGate().writerForUrl(process.env.DATABASE_URL);
   const uses: unknown[] = [];
   let routesMountedAt = -1;
   const app = {
@@ -62,5 +77,11 @@ it('actual main bootstrap installs recovery gate ahead of application routes', a
     create.mockRestore();
     on.mockRestore();
     once.mockRestore();
+    lease.close();
+    if (previousUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousUrl;
+    expect(dirname(directory)).toBe(tmpdir());
+    expect(basename(directory)).toMatch(/^wewe-hold-bootstrap-/);
+    rmSync(directory, { recursive: true, force: true });
   }
 });
