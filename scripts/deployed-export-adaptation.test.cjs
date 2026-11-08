@@ -44,6 +44,46 @@ test('approved startup and retired Mp2RSS inverses reject unrelated writer chang
   }
 });
 
+test('metadata-only exclusion inverse cannot hide changed new or historical writer gates', () => {
+  const file = 'apps/server/src/collection/sqlite-write-coordinator.ts';
+  const source = read(file);
+  const addedAt = source.indexOf('  async knownAuthMetadataWrite<T>');
+  assert(addedAt > 0);
+  const added = source.slice(addedAt);
+  for (const [before, after] of [
+    ["this.acquire('backup')", "this.acquire('write')"],
+    ['this.context.getStore()?.active ||', 'false ||'],
+    ['this.protectedContext.getStore()?.active', 'false'],
+    [
+      'return await this.protectedContext.run(permit, operation);',
+      'return operation();',
+    ],
+    ['permit.active = false;', 'permit.active = true;'],
+    ['release();', 'void 0;'],
+  ]) {
+    assert.equal(added.split(before).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter(
+          file,
+          source.slice(0, addedAt) + added.replace(before, after),
+        ),
+      /exact known-auth metadata exclusion method/,
+    );
+  }
+  assert.throws(
+    () =>
+      restoreLegacyWriter(
+        file,
+        source
+          .slice(0, addedAt)
+          .replace("this.acquire('backup')", "this.acquire('write')") + added,
+      ),
+    /exact reviewed collection integration source/,
+    'the original protected writer remains fully pinned',
+  );
+});
+
 test('approved XHS inverses reject lost local authentication, acknowledgements and client session injection', () => {
   const source = read('apps/server/src/trpc/trpc.router.ts');
   const fixture = require('./fixtures/xhs-approved-router-seams.json');
@@ -79,6 +119,117 @@ test('approved XHS inverses reject lost local authentication, acknowledgements a
     assert.throws(
       () => restorePreReviewedRecoveryRouter(ts, changed),
       /exact approved XHS node/,
+    );
+  }
+});
+
+test('known authentication and one-profile seams append exactly four routes without repinning history', () => {
+  const fixture = require('./fixtures/xhs-approved-router-seams.json');
+  const additions = fixture.entries.slice(-4);
+  assert.deepEqual(
+    additions.map((entry) => entry.key),
+    [
+      'route:prepareKnownResponseAuthReview',
+      'route:confirmKnownResponseAuthReview',
+      'route:prepareKnownAuthProfileProbe',
+      'route:confirmKnownAuthProfileProbe',
+    ],
+  );
+  assert.equal(
+    hash(JSON.stringify({ ...fixture, entries: fixture.entries.slice(0, -4) })),
+    '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
+    'all earlier reviewed inverse entries and metadata remain unchanged',
+  );
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  for (const entry of additions) {
+    assert.equal(entry.before, null, 'additive route only');
+    assert.equal(source.split(entry.after).length, 2);
+    const name = entry.key.slice('route:'.length);
+    const mutations = [
+      [
+        'this.trpcService.protectedProcedure',
+        'this.trpcService.publicProcedure',
+      ],
+      ['this.requireLocalXhsAccess(ctx);', 'void ctx;'],
+      ['.strict()', '.passthrough()'],
+      [
+        'taskId: z.string().uuid(),',
+        'taskId: z.string().uuid(), sessionBinding: z.string(),',
+      ],
+      [
+        'this.xhsWhole!.' + name + '(input)',
+        'this.xhsWhole!.unreviewedOperation(input)',
+      ],
+    ];
+    if (name === 'confirmKnownResponseAuthReview') {
+      mutations.push(
+        [
+          'acknowledgedKnownResponseAuth: z.literal(true)',
+          'acknowledgedKnownResponseAuth: z.boolean()',
+        ],
+        [
+          "'user-confirmed-restored-saved-session',",
+          "'unreviewed-session-origin',",
+        ],
+      );
+    }
+    if (name === 'confirmKnownAuthProfileProbe')
+      mutations.push([
+        'acknowledgedOneProfile: z.literal(true)',
+        'acknowledgedOneProfile: z.boolean()',
+      ]);
+    if (name.includes('ProfileProbe'))
+      mutations.push([
+        'authDigest: z.string().regex(/^[a-f0-9]{64}$/)',
+        'authDigest: z.string()',
+      ]);
+    for (const [before, after] of mutations) {
+      assert.equal(entry.after.split(before).length, 2);
+      assert.throws(
+        () =>
+          restorePreReviewedRecoveryRouter(
+            ts,
+            source.replace(entry.after, entry.after.replace(before, after)),
+          ),
+        /exact approved XHS node/,
+        name + ' must reject ' + before,
+      );
+    }
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace(
+            entry.after,
+            'unreviewedReplacement: this.trpcService.protectedProcedure',
+          ),
+        ),
+      /exact approved XHS node present/,
+      name + ' must remain present',
+    );
+  }
+});
+
+test('known authentication inverses reject additional and duplicate routes', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  const entry =
+    require('./fixtures/xhs-approved-router-seams.json').entries.find(
+      (value) => value.key === 'route:prepareKnownAuthProfileProbe',
+    );
+  for (const extra of [
+    entry.after,
+    entry.after.replace(
+      'prepareKnownAuthProfileProbe:',
+      'unreviewedKnownAuthProfileProbe:',
+    ),
+  ]) {
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace(entry.after, extra + ',\n    ' + entry.after),
+        ),
+      /complete pre-recovery router AST preserved/,
     );
   }
 });

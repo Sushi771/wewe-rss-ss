@@ -29,7 +29,7 @@ module.exports = function restoreApprovedRouter(ts, source) {
   };
   assert.equal(
     crypto.createHash('sha256').update(JSON.stringify(fixture)).digest('hex'),
-    '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
+    '03514df383727dac334fdeac845d933719f44fea184040fb0957586839daa6cd',
     'fixed individually reviewed XHS inverse fixture',
   );
   const ast = ts.createSourceFile(

@@ -127,6 +127,30 @@
       "before": null,
       "after": "executeUnboundThreePageRound: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({ reviewId: z.string().regex(/^unbound-[a-f0-9]{64}$/) })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.executeUnboundThreePageRound(input),\n        );\n      })",
       "sha256": "2a16c506651a12f9dcfcb5281fa6e4fb3ff56034a33d11c981f79126e1f0f089"
+    },
+    {
+      "key": "route:prepareKnownResponseAuthReview",
+      "before": null,
+      "after": "prepareKnownResponseAuthReview: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            taskId: z.string().uuid(),\n            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareKnownResponseAuthReview(input),\n        );\n      })",
+      "sha256": "dcaed41560572689837856c9c9e1afcd1f3644ce31ed275703731dc20d5bc71d"
+    },
+    {
+      "key": "route:confirmKnownResponseAuthReview",
+      "before": null,
+      "after": "confirmKnownResponseAuthReview: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            taskId: z.string().uuid(),\n            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedKnownResponseAuth: z.literal(true),\n            confirmedSessionOrigin: z.enum([\n              'fresh-replacement',\n              'user-confirmed-restored-saved-session',\n            ]),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmKnownResponseAuthReview(input),\n        );\n      })",
+      "sha256": "1214fa32315744e5452a26e74a7e08ebbd564fb91383117dd7a1e3db58ab445b"
+    },
+    {
+      "key": "route:prepareKnownAuthProfileProbe",
+      "before": null,
+      "after": "prepareKnownAuthProfileProbe: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            taskId: z.string().uuid(),\n            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),\n            authReviewId: z.string().min(1).max(160),\n            authDigest: z.string().regex(/^[a-f0-9]{64}$/),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.prepareKnownAuthProfileProbe(input),\n        );\n      })",
+      "sha256": "0a7501b24b2aee061d511400acb9f245e42cf82e76f0f93fd5923ff5336a43fe"
+    },
+    {
+      "key": "route:confirmKnownAuthProfileProbe",
+      "before": null,
+      "after": "confirmKnownAuthProfileProbe: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            taskId: z.string().uuid(),\n            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),\n            authReviewId: z.string().min(1).max(160),\n            authDigest: z.string().regex(/^[a-f0-9]{64}$/),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedOneProfile: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsWhole!.confirmKnownAuthProfileProbe(input),\n        );\n      })",
+      "sha256": "ae6722505a1c3e200e62d8372c970daeb9ea46c6391be42231a763c272699482"
     }
   ]
 }

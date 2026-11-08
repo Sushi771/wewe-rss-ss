@@ -96,6 +96,36 @@ function restoreCollectionIntegration(file, source) {
   return source;
 }
 module.exports = function restoreLegacyWriter(file, source) {
+  if (file === 'apps/server/src/collection/sqlite-write-coordinator.ts') {
+    // Invert only the reviewed metadata-only exclusion method. The complete
+    // pre-existing coordinator source must still match its historical pin.
+    const added = `
+
+  /** Exact control-metadata review: exclusion without a full-snapshot contract.
+   * The caller must use incrementalWrite + a durable SQLite transaction and
+   * preserve original values in its audit. This does not authorize source work. */
+  async knownAuthMetadataWrite<T>(operation: () => Promise<T>): Promise<T> {
+    if (
+      this.context.getStore()?.active ||
+      this.protectedContext.getStore()?.active
+    )
+      throw new Error('Nested metadata SQLite operation refused');
+    const release = await this.acquire('backup');
+    const permit = { active: true };
+    try {
+      return await this.protectedContext.run(permit, operation);
+    } finally {
+      permit.active = false;
+      release();
+    }
+  }`;
+    assert.equal(
+      source.split(added).length,
+      2,
+      'exact known-auth metadata exclusion method',
+    );
+    source = source.replace(added, '');
+  }
   source = restoreCollectionIntegration(file, source);
   source = restoreCompatible(file, source);
   for (const seam of seams[file] || []) {
