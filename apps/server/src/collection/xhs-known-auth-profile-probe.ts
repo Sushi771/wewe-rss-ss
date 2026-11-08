@@ -3,6 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   assertKnownAuthCommittedSession,
   readKnownAuthControlState,
+  prepareKnownAuthResponseReview,
+  type KnownAuthPlan,
 } from './xhs-known-auth-response-review';
 import {
   admitUnboundRequest,
@@ -11,7 +13,11 @@ import {
   type RoundTx,
   type RoundRequest,
 } from './xhs-unbound-round';
-import { reserveRoundBudgetRisk, finishRoundRisk } from './round-budget-risk';
+import {
+  reserveRoundBudgetRisk,
+  reserveRoundBudgets,
+  finishRoundRisk,
+} from './round-budget-risk';
 import { createRoundSourceReceipt } from './round-source-receipt';
 import { dispatchUnboundContext } from './xhs-reviewed-dispatch';
 import type { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
@@ -42,15 +48,32 @@ const activeProbe = new AsyncLocalStorage<{
   dispatchRejected?: boolean;
   expectedReview?: Record<string, unknown>;
   admittedReceipt?: string;
+  recoverySession?: string;
+  recoveryAuthor?: string;
   ready: () => Promise<void>;
 }>();
 
-/** Only the exact unchanged post-auth state can authorize this one profile. */
+/** Only this in-process runner can provide an AUTH exception. No HTTP binding. */
+export function knownAuthProfileRecoveryPermit(
+  sessionBinding: string | undefined,
+  authorId?: string,
+) {
+  const c = activeProbe.getStore();
+  return (
+    !!c?.recoverySession &&
+    c.recoverySession === sessionBinding &&
+    (authorId === undefined || authorId === c.recoveryAuthor)
+  );
+}
+
+/** One profile, either after the legacy manual review or before clearing AUTH.
+ * The latter is selected only by the normal connection service, never input JSON. */
 export async function prepareKnownAuthProfile(
   tx: RoundTx,
   input: KnownProfileInput,
   runtime: XhsSubscriptionRuntime,
   ownedProfileActive = false,
+  recoverBeforeClear = false,
 ) {
   runtime.assertUnboundPolicyInstalled();
   input = {
@@ -61,36 +84,87 @@ export async function prepareKnownAuthProfile(
   };
   const session = runtime.knownAuthSessionForReview(ownedProfileActive);
   await runtime.assertSafeKnownAuthSession(session.binding, ownedProfileActive);
-  const transportBinding = runtime.fullScopeSessionBinding();
+  const transportBinding = recoverBeforeClear
+    ? runtime.knownAuthTransportBinding()
+    : runtime.fullScopeSessionBinding();
   const state = await readKnownAuthControlState(tx);
   const task = state.data.xhs_subscription_tasks.find(
     (r) => r.id === input.taskId && r.creator_id === input.creatorId,
   );
-  const audits = task && JSON.parse(task.document).knownResponseAuthReviews;
-  check(audits?.length === 1, 'KNOWN_AUTH_COMMITTED_REVIEW_REQUIRED');
-  const audit = audits[0];
-  check(
-    audit.id === input.authReviewId &&
-      audit.digest === input.authDigest &&
-      audit.originalOutcome === 'response-received',
-    'KNOWN_AUTH_COMMITTED_REVIEW_REQUIRED',
-  );
-  const commit = {
-    reviewId: audit.id,
-    taskId: task.id,
-    auditDigest: hash(audit),
-    digest: audit.digest,
-    session: audit.session,
-    riskClearedAt: audit.confirmedAt,
-    originalOutcome: 'response-received' as const,
-    authenticationVerified: false as const,
-    sourceRequestsSent: 0 as const,
-    newGrant: false as const,
-  };
-  await assertKnownAuthCommittedSession(tx, commit, {
-    knownAuthSessionForReview: () =>
-      runtime.knownAuthSessionForReview(ownedProfileActive),
-  });
+  let recoveryPlan: KnownAuthPlan | undefined;
+  let audit: any;
+  if (recoverBeforeClear) {
+    recoveryPlan = await prepareKnownAuthResponseReview(
+      tx,
+      { taskId: input.taskId, creatorId: input.creatorId },
+      {
+        knownAuthSessionForReview: () =>
+          runtime.knownAuthSessionForReview(ownedProfileActive),
+      },
+    );
+    // Stable per original event, not per connection/digest: reconnect cannot retry.
+    const eventId =
+      'known-auth-event-' +
+      hash({
+        taskId: input.taskId,
+        operationId: recoveryPlan.operationId,
+        originalRisk: recoveryPlan.originalRisk,
+      });
+    audit = {
+      id: eventId,
+      digest: recoveryPlan.digest,
+      policyId: recoveryPlan.policyId,
+      originalOutcome: 'response-received',
+      session: recoveryPlan.replacement,
+      confirmedAt: null,
+      stateDigest: recoveryPlan.stateDigest,
+    };
+    input = {
+      ...input,
+      authReviewId: eventId,
+      authDigest: recoveryPlan.digest,
+    };
+  } else {
+    const audits = task && JSON.parse(task.document).knownResponseAuthReviews;
+    check(audits?.length === 1, 'KNOWN_AUTH_COMMITTED_REVIEW_REQUIRED');
+    audit = audits[0];
+    check(
+      audit.id === input.authReviewId &&
+        audit.digest === input.authDigest &&
+        audit.originalOutcome === 'response-received',
+      'KNOWN_AUTH_COMMITTED_REVIEW_REQUIRED',
+    );
+    await assertKnownAuthCommittedSession(
+      tx,
+      {
+        reviewId: audit.id,
+        taskId: task.id,
+        auditDigest: hash(audit),
+        digest: audit.digest,
+        session: audit.session,
+        riskClearedAt: audit.confirmedAt,
+        originalOutcome: 'response-received',
+        authenticationVerified: false,
+        sourceRequestsSent: 0,
+        newGrant: false,
+      },
+      {
+        knownAuthSessionForReview: () =>
+          runtime.knownAuthSessionForReview(ownedProfileActive),
+      },
+    );
+    const original = JSON.parse(pack(state));
+    original.data.xhs_subscription_tasks.find(
+      (r: any) => r.id === task.id,
+    ).document = audit.originalTaskRaw;
+    original.data.xhs_source_risk = [audit.originalRisk];
+    for (const table of Object.values(original.data) as any[][])
+      table.sort((a, b) => pack(a).localeCompare(pack(b)));
+    check(
+      hash(original) === audit.stateDigest,
+      'KNOWN_PROFILE_CONTROL_STATE_CHANGED',
+    );
+  }
   const policy = state.data.xhs_unbound_owner_reviews.find(
     (r) => r.id === audit.policyId,
   );
@@ -119,22 +193,12 @@ export async function prepareKnownAuthProfile(
       creator.external_author_id === authorId,
     'CREATOR_BINDING_CHANGED',
   );
-  // Normalize only the already-committed auth append/clear. All other controls
-  // must still equal its approved snapshot; no new unknown or restriction bypass.
-  const original = JSON.parse(pack(state));
-  original.data.xhs_subscription_tasks.find(
-    (r: any) => r.id === task.id,
-  ).document = audit.originalTaskRaw;
-  original.data.xhs_source_risk = [audit.originalRisk];
-  for (const table of Object.values(original.data) as any[][])
-    table.sort((a, b) => pack(a).localeCompare(pack(b)));
-  check(
-    hash(original) === audit.stateDigest,
-    'KNOWN_PROFILE_CONTROL_STATE_CHANGED',
-  );
   const scope = {
     reviewKind: KNOWN_AUTH_PROFILE_KIND,
     version: 1,
+    ...(recoverBeforeClear
+      ? { verificationOrder: 'before-auth-clear' as const }
+      : {}),
     rootHistoricalEvidence: {
       policyId: policy.id,
       policyDigest: policy.plan_digest,
@@ -145,11 +209,12 @@ export async function prepareKnownAuthProfile(
     },
     knownAuthentication: {
       ...input,
-      auditDigest: hash(audit),
+      auditDigest: hash(recoveryPlan ?? audit),
       originalOutcome: 'response-received',
       riskClearedAt: audit.confirmedAt,
+      ...(recoverBeforeClear ? { committed: false } : {}),
     },
-    session: commit.session,
+    session: audit.session,
     transportBinding,
     creatorIds: [input.creatorId],
     creatorBindings: { [input.creatorId]: authorId },
@@ -169,8 +234,14 @@ export async function prepareKnownAuthProfile(
     controlStateDigest: hash(state),
     riskClear: state.data.xhs_source_risk[0],
   };
-  runtime.assertFullScopeSession(transportBinding);
-  return { reviewId, digest: hash(scope), scope, policy, state };
+  check(
+    transportBinding ===
+      (recoverBeforeClear
+        ? runtime.knownAuthTransportBinding()
+        : runtime.fullScopeSessionBinding()),
+    'XHS_SESSION_CHANGED',
+  );
+  return { reviewId, digest: hash(scope), scope, policy, state, recoveryPlan };
 }
 
 async function checkedRow(
@@ -247,6 +318,8 @@ async function unchanged(
   reviewId: string,
   request: RoundRequest,
   dispatched: boolean,
+  terminalReceipt?: string,
+  checkpointed = false,
 ) {
   const { row, s, c } = await checkedRow(tx, reviewId, request);
   const state = await readKnownAuthControlState(tx),
@@ -261,7 +334,7 @@ async function unchanged(
     check(
       own.length === 1 &&
         own[0].operation_id === request.operationId &&
-        own[0].outcome === 'started' &&
+        own[0].outcome === (checkpointed ? 'response-received' : 'started') &&
         own[0].task_id === request.taskId &&
         own[0].creator_id === request.creatorId &&
         own[0].phase === 'profile' &&
@@ -275,7 +348,7 @@ async function unchanged(
     check(
       receipts.length === 1 &&
         c.admittedReceipt &&
-        receipts[0].document === c.admittedReceipt,
+        receipts[0].document === (terminalReceipt ?? c.admittedReceipt),
       'KNOWN_PROFILE_RECEIPT_CHANGED',
     );
     check(
@@ -285,9 +358,13 @@ async function unchanged(
           pack([
             {
               ...s.riskClear,
-              state: 'pending',
-              owner: c.owner,
-              updated_at: String(c.reservedAt),
+              ...(s.verificationOrder === 'before-auth-clear'
+                ? {}
+                : {
+                    state: 'pending',
+                    owner: c.owner,
+                    updated_at: String(c.reservedAt),
+                  }),
             },
           ]),
       'KNOWN_PROFILE_OWNER_CHANGED',
@@ -361,10 +438,13 @@ export async function runKnownAuthProfile(
   input: KnownProfileInput,
   digest: string,
   acknowledgedOneProfile: true,
+  recoverBeforeClear = false,
 ) {
   check(acknowledgedOneProfile === true, 'PROFILE_AUTHORIZATION_REQUIRED');
   // Read through a transaction but never acquire/create a full-database backup.
-  const plan = await write((tx) => prepareKnownAuthProfile(tx, input, runtime));
+  const plan = await write((tx) =>
+    prepareKnownAuthProfile(tx, input, runtime, false, recoverBeforeClear),
+  );
   check(plan.digest === digest, 'REVIEW_STATE_CHANGED');
   const request: RoundRequest = {
     operationId: randomUUID(),
@@ -387,16 +467,30 @@ export async function runKnownAuthProfile(
     dispatchRejected: false,
     expectedReview: undefined as Record<string, unknown> | undefined,
     admittedReceipt: undefined as string | undefined,
+    recoverySession: recoverBeforeClear
+      ? plan.scope.session.binding
+      : undefined,
+    recoveryAuthor: recoverBeforeClear ? binding.authorId : undefined,
     ready: async () => {
       runtime.assertUnboundPolicyInstalled();
       await runtime.assertSafeKnownAuthSession(
         plan.scope.session.binding,
         true,
       );
-      runtime.assertFullScopeSession(plan.scope.transportBinding);
+      check(
+        plan.scope.transportBinding ===
+          (recoverBeforeClear
+            ? runtime.knownAuthTransportBinding()
+            : runtime.fullScopeSessionBinding()),
+        'XHS_SESSION_CHANGED',
+      );
     },
   };
   const receipt = createRoundSourceReceipt(write, plan.reviewId, request);
+  const failureVersion = runtime.reviewedFailureVersion();
+  let verifiedCommit:
+    | Awaited<ReturnType<typeof commitVerifiedAuthentication>>
+    | undefined;
   try {
     const author = await activeProbe.run(context, () =>
       dispatchUnboundContext(
@@ -408,6 +502,7 @@ export async function runKnownAuthProfile(
               input,
               runtime,
               true,
+              recoverBeforeClear,
             );
             check(current.digest === digest, 'REVIEW_STATE_CHANGED');
             const p = current.policy,
@@ -434,12 +529,15 @@ export async function runKnownAuthProfile(
             );
             await admitUnboundRequest(tx, plan.reviewId, request);
             context.reservedAt = Date.now();
-            const owner = await reserveRoundBudgetRisk(
-              tx,
-              plan.reviewId,
-              request,
-              context.reservedAt,
-            );
+            const owner = recoverBeforeClear
+              ? (await reserveRoundBudgets(tx, request, context.reservedAt),
+                request.operationId)
+              : await reserveRoundBudgetRisk(
+                  tx,
+                  plan.reviewId,
+                  request,
+                  context.reservedAt,
+                );
             await receipt.persist(tx);
             return owner;
           });
@@ -471,6 +569,10 @@ export async function runKnownAuthProfile(
     await receipt.drain();
     await write(async (tx) => {
       await context.ready();
+      if (recoverBeforeClear)
+        await activeProbe.run(context, () =>
+          unchanged(tx, plan.reviewId, request, true, pack(receipt.snapshot())),
+        );
       const creator = (
         await rows(
           tx,
@@ -520,10 +622,29 @@ export async function runKnownAuthProfile(
         request.operationId,
         'response-received',
       );
-      await finishRoundRisk(tx, context.owner!, 'response-received');
+      if (recoverBeforeClear) {
+        await activeProbe.run(context, () =>
+          unchanged(
+            tx,
+            plan.reviewId,
+            request,
+            true,
+            pack(receipt.snapshot()),
+            true,
+          ),
+        );
+        verifiedCommit = await commitVerifiedAuthentication(
+          tx,
+          plan,
+          request,
+          receipt.snapshot(),
+        );
+        await context.ready();
+      } else await finishRoundRisk(tx, context.owner!, 'response-received');
     });
     return {
       reviewId: plan.reviewId,
+      ...(verifiedCommit ? { verifiedCommit } : {}),
       state: 'profile-saved' as const,
       profileRequests: 1,
       notesCollected: 0,
@@ -531,7 +652,79 @@ export async function runKnownAuthProfile(
       automaticRetry: false,
     };
   } catch (error) {
-    const failureCode = runtime.reviewedFailureCode();
+    if (recoverBeforeClear) {
+      // Read-only recognition of an exact committed checkpoint after lost ACK.
+      // Do not rewrite its terminal receipt, retry, or claim runtime restoration.
+      try {
+        const committed = await write(async (tx) => {
+          if (!verifiedCommit) return false;
+          const found = await rows(
+            tx,
+            'SELECT document,CAST(updated_at AS TEXT) AS updated_at FROM xhs_subscription_tasks WHERE id=? AND creator_id=?',
+            input.taskId,
+            input.creatorId,
+          );
+          const a =
+            found.length === 1 &&
+            JSON.parse(found[0].document).knownResponseAuthReviews?.[0];
+          const receipts = await rows(
+            tx,
+            'SELECT document FROM xhs_unbound_source_receipts WHERE operation_id=?',
+            request.operationId,
+          );
+          const ledger = await rows(
+            tx,
+            'SELECT * FROM xhs_unbound_owner_requests WHERE operation_id=?',
+            request.operationId,
+          );
+          return (
+            found.length === 1 &&
+            hash(found[0].document) === verifiedCommit.taskDocumentDigest &&
+            String(found[0].updated_at) ===
+              String(plan.recoveryPlan!.evidence.task.updated_at) &&
+            hash(a) === verifiedCommit.auditDigest &&
+            receipts.length === 1 &&
+            hash(JSON.parse(receipts[0].document)) ===
+              verifiedCommit.receiptDigest &&
+            pack(ledger) ===
+              pack([
+                {
+                  operation_id: request.operationId,
+                  review_id: plan.reviewId,
+                  task_id: request.taskId,
+                  creator_id: request.creatorId,
+                  phase: 'profile',
+                  logical_target: 'profile',
+                  outcome: 'response-received',
+                  listed_note_ids_json: null,
+                },
+              ])
+          );
+        });
+        if (committed)
+          return {
+            reviewId: plan.reviewId,
+            state: 'profile-committed-runtime-unconfirmed' as const,
+            checkpointConfirmed: true,
+            doNotRetryConfirmation: true,
+            automaticRetry: false,
+          };
+      } catch {
+        /* Uncertain read remains conservative; no retry is scheduled. */
+      }
+      if (verifiedCommit)
+        return {
+          reviewId: plan.reviewId,
+          state: 'profile-not-confirmed' as const,
+          checkpointConfirmed: false,
+          doNotRetryConfirmation: true,
+          automaticRetry: false,
+        };
+    }
+    const failureCode =
+      !recoverBeforeClear || runtime.reviewedFailureVersion() !== failureVersion
+        ? runtime.reviewedFailureCode()
+        : undefined;
     if (
       receipt.snapshot().status !== undefined &&
       !failureCode &&
@@ -566,14 +759,23 @@ export async function runKnownAuthProfile(
           );
           // Local parse/storage failures retain pending. Only an explicit new
           // platform restriction replaces it; never clear an uncertain owner.
-          await finishRoundRisk(
-            tx,
-            context.owner!,
-            'unknown',
-            failureCode,
-            observed.status,
-            'profile',
-          );
+          if (recoverBeforeClear) {
+            if (failureCode)
+              await replaceKnownAuthRisk(
+                tx,
+                plan.scope.riskClear,
+                failureCode,
+                observed.status,
+              );
+          } else
+            await finishRoundRisk(
+              tx,
+              context.owner!,
+              'unknown',
+              failureCode,
+              observed.status,
+              'profile',
+            );
         });
       } catch {
         /* Keep durable pending/started when terminal storage is uncertain. */
@@ -588,4 +790,145 @@ export async function runKnownAuthProfile(
       automaticRetry: false,
     };
   }
+}
+
+/** Caller has just checked the exact own-request delta in this same transaction. */
+async function commitVerifiedAuthentication(
+  tx: RoundTx,
+  plan: Awaited<ReturnType<typeof prepareKnownAuthProfile>>,
+  request: RoundRequest,
+  receipt: unknown,
+) {
+  const p = plan.recoveryPlan;
+  check(
+    p && plan.scope.verificationOrder === 'before-auth-clear',
+    'KNOWN_AUTH_PLAN_REQUIRED',
+  );
+  const now = BigInt(Date.now());
+  check(
+    now > BigInt(p.originalRisk.updated_at) &&
+      now >= BigInt(p.replacement.connectedAt),
+    'APPROVAL_TIME_INVALID',
+  );
+  const t = p.evidence.task,
+    r = p.originalRisk;
+  const audit = {
+    id: plan.scope.knownAuthentication.authReviewId,
+    kind: 'known-auth-response-review-v1',
+    version: 1,
+    digest: p.digest,
+    stateDigest: p.stateDigest,
+    transactionProtection: 'incremental-sqlite-original-values-v1',
+    confirmation: {
+      acknowledgedKnownResponseAuth: true,
+      sessionOrigin: p.replacement.origin,
+      trigger: 'explicit-local-session-connection',
+      acknowledgedOneProfile: true,
+    },
+    taskId: t.id,
+    creatorId: t.creator_id,
+    operationId: p.operationId,
+    requestReviewId: p.requestReviewId,
+    policyId: p.policyId,
+    originalOutcome: 'response-received',
+    originalRisk: r,
+    originalTaskRaw: t.document,
+    evidence: p.evidence,
+    session: p.replacement,
+    confirmedAt: String(now),
+    authenticationVerified: true,
+    sourceRequestsSent: 1,
+    newGrant: true,
+    verification: {
+      order: 'profile-checkpoint-before-auth-clear',
+      reviewId: plan.reviewId,
+      operationId: request.operationId,
+      receiptDigest: hash(receipt),
+      profileSaved: true,
+      notesCollected: 0,
+      imagesCollected: 0,
+      automaticRetry: false,
+    },
+  };
+  const document = pack({
+    ...JSON.parse(t.document),
+    knownResponseAuthReviews: [audit],
+  });
+  check(
+    Buffer.byteLength(document, 'utf8') <= 2_000_000,
+    'KNOWN_AUTH_AUDIT_SIZE_LIMIT',
+  );
+  check(
+    (await tx.$executeRawUnsafe(
+      'UPDATE xhs_subscription_tasks SET document=? WHERE id=? AND creator_id=? AND state=? AND document=? AND updated_at=?',
+      document,
+      t.id,
+      t.creator_id,
+      t.state,
+      t.document,
+      t.updated_at,
+    )) === 1,
+    'KNOWN_AUTH_TASK_COMPARE_AND_SWAP_FAILED',
+  );
+  check(
+    (await tx.$executeRawUnsafe(
+      `UPDATE xhs_source_risk SET state='clear',owner=NULL,code=NULL,http_status=NULL,endpoint=NULL,updated_at=?
+     WHERE id=? AND state=? AND owner IS ? AND code IS ? AND http_status IS ? AND endpoint IS ? AND updated_at=?
+     AND EXISTS(SELECT 1 FROM xhs_subscription_tasks WHERE id=? AND document=? AND updated_at=?)
+     AND EXISTS(SELECT 1 FROM xhs_unbound_owner_requests WHERE operation_id=? AND review_id=? AND task_id=? AND creator_id=? AND phase='profile' AND logical_target='profile' AND outcome='response-received' AND listed_note_ids_json IS NULL)`,
+      now,
+      r.id,
+      r.state,
+      r.owner,
+      r.code,
+      r.http_status,
+      r.endpoint,
+      r.updated_at,
+      t.id,
+      document,
+      t.updated_at,
+      request.operationId,
+      plan.reviewId,
+      request.taskId,
+      request.creatorId,
+    )) === 1,
+    'KNOWN_AUTH_COMPARE_AND_SWAP_FAILED',
+  );
+  return {
+    reviewId: audit.id,
+    riskClearedAt: String(now),
+    auditDigest: hash(audit),
+    taskDocumentDigest: hash(document),
+    receiptDigest: hash(receipt),
+  };
+}
+async function replaceKnownAuthRisk(
+  tx: RoundTx,
+  r: any,
+  code: string,
+  status?: number,
+) {
+  check(
+    /^XHS_SOURCE_(AUTHENTICATION|VERIFICATION|UNKNOWN_REJECTION|PERMISSION|SIGNATURE|RATE_LIMIT)_BLOCKED$/.test(
+      code,
+    ),
+    'KNOWN_AUTH_RISK_REQUIRED',
+  );
+  check(
+    (await tx.$executeRawUnsafe(
+      `UPDATE xhs_source_risk SET state='blocked',owner=NULL,code=?,http_status=?,endpoint='profile',updated_at=?
+     WHERE id=? AND state=? AND owner IS ? AND code IS ? AND http_status IS ? AND endpoint IS ? AND updated_at=?`,
+      code,
+      [401, 403, 406, 429, 461, 471].includes(status ?? 0) ? status : null,
+      BigInt(Date.now()),
+      r.id,
+      r.state,
+      r.owner,
+      r.code,
+      r.http_status,
+      r.endpoint,
+      r.updated_at,
+    )) === 1,
+    'KNOWN_AUTH_COMPARE_AND_SWAP_FAILED',
+  );
 }

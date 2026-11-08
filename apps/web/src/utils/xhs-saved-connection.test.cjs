@@ -141,3 +141,73 @@ test('all C0 and DEL characters reject before synthetic transport and clear inpu
     assert.equal(input.webSession, '');
   }
 });
+
+test('save surfaces only bounded verification state, clears credentials and never retries', async () => {
+  for (const state of [
+    'profile-verified',
+    'paused',
+    'not-applicable',
+    'untrusted-extra',
+  ]) {
+    let calls = 0;
+    const seen = [];
+    const input = {
+      a1: 'synthetic-a',
+      webSession: 'synthetic-b',
+      replaceSaved: true,
+      autoRestore: true,
+    };
+    const result = await savedSessionRequest(
+      {
+        ...host(async () => {
+          calls++;
+          return {
+            ok: true,
+            json: async () => ({
+              result: {
+                data: {
+                  connected: true,
+                  authenticationRecovery: { state, privateExtra: 'discard' },
+                },
+              },
+            }),
+          };
+        }),
+        onAuthenticationRecovery: (value) => seen.push(value),
+      },
+      input,
+    );
+    assert.equal(result, null);
+    assert.equal(calls, 1);
+    assert.equal(input.a1, '');
+    assert.equal(input.webSession, '');
+    assert.deepEqual(seen, state === 'untrusted-extra' ? [] : [state]);
+  }
+});
+
+test('lost save or verification response clears input and does not resubmit credentials', async () => {
+  const input = {
+    a1: 'synthetic-a',
+    webSession: 'synthetic-b',
+    replaceSaved: true,
+    autoRestore: true,
+  };
+  let calls = 0;
+  const seen = [];
+  await assert.rejects(
+    savedSessionRequest(
+      {
+        ...host(async () => {
+          calls++;
+          throw new Error('synthetic-response-lost');
+        }),
+        onAuthenticationRecovery: (value) => seen.push(value),
+      },
+      input,
+    ),
+  );
+  assert.equal(calls, 1);
+  assert.equal(input.a1, '');
+  assert.equal(input.webSession, '');
+  assert.deepEqual(seen, []);
+});

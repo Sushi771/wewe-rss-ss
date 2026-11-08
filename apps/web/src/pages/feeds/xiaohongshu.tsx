@@ -1461,8 +1461,11 @@ export default function Xiaohongshu() {
     });
   const updateConnection = (action: 'restore' | 'disconnect') =>
     run(async () => {
-      if (action === 'restore') await restoreConnection.mutateAsync();
-      else await disconnectConnection.mutateAsync();
+      const restored =
+        action === 'restore'
+          ? await restoreConnection.mutateAsync()
+          : undefined;
+      if (action === 'disconnect') await disconnectConnection.mutateAsync();
       setResolution(null);
       await Promise.all([
         connection.refetch(),
@@ -1470,7 +1473,13 @@ export default function Xiaohongshu() {
       ]);
       setMessage(
         action === 'restore'
-          ? '已恢复本机会话，请重新识别需要订阅的链接。'
+          ? 'authenticationRecovery' in (restored ?? {}) &&
+            (restored as { authenticationRecovery?: { state: string } })
+              .authenticationRecovery?.state === 'profile-verified'
+            ? '一次资料验证和保存成功，对应认证暂停已解除；未补跑旧任务。'
+            : restored?.riskCode
+              ? '已恢复本机会话；资料验证未确认恢复，来源暂停仍保留，不会自动重试。'
+              : '已恢复本机会话，请重新识别需要订阅的链接。'
           : '已断开本机会话，本地内容保留。',
       );
     });
@@ -2282,7 +2291,10 @@ export default function Xiaohongshu() {
               {connection.data && (
                 <p className="text-default-500 text-xs" role="status">
                   {connection.data.riskCode
-                    ? '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
+                    ? connection.data.riskCode ===
+                      'XHS_SOURCE_AUTHENTICATION_BLOCKED'
+                      ? '本机存在认证暂停；保存并连接或明确恢复后验证一次资料，成功保存后才解除，失败不重试。'
+                      : '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
                     : '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。'}
                 </p>
               )}

@@ -5,6 +5,7 @@ const fixture = require('./fixtures/xhs-approved-router-seams.json');
 // Exact inverse of individually reviewed XHS additions. Historical router pins
 // still run after this layer; no unrelated member or route is discarded.
 module.exports = function restoreApprovedRouter(ts, source) {
+  source = require('./xhs-auth-connection-seams.cjs')(ts, source);
   const canonical = (text) => {
     const tree = ts.createSourceFile(
       'approved.ts',
@@ -29,7 +30,7 @@ module.exports = function restoreApprovedRouter(ts, source) {
   };
   assert.equal(
     crypto.createHash('sha256').update(JSON.stringify(fixture)).digest('hex'),
-    '03514df383727dac334fdeac845d933719f44fea184040fb0957586839daa6cd',
+    '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
     'fixed individually reviewed XHS inverse fixture',
   );
   const ast = ts.createSourceFile(

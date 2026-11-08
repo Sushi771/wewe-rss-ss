@@ -123,111 +123,27 @@ test('approved XHS inverses reject lost local authentication, acknowledgements a
   }
 });
 
-test('known authentication and one-profile seams append exactly four routes without repinning history', () => {
+test('retired pre-verification clear routes are absent and all historical router protection remains', () => {
   const fixture = require('./fixtures/xhs-approved-router-seams.json');
-  const additions = fixture.entries.slice(-4);
-  assert.deepEqual(
-    additions.map((entry) => entry.key),
-    [
-      'route:prepareKnownResponseAuthReview',
-      'route:confirmKnownResponseAuthReview',
-      'route:prepareKnownAuthProfileProbe',
-      'route:confirmKnownAuthProfileProbe',
-    ],
-  );
   assert.equal(
-    hash(JSON.stringify({ ...fixture, entries: fixture.entries.slice(0, -4) })),
+    hash(JSON.stringify(fixture)),
     '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
-    'all earlier reviewed inverse entries and metadata remain unchanged',
   );
   const source = read('apps/server/src/trpc/trpc.router.ts');
-  for (const entry of additions) {
-    assert.equal(entry.before, null, 'additive route only');
-    assert.equal(source.split(entry.after).length, 2);
-    const name = entry.key.slice('route:'.length);
-    const mutations = [
-      [
-        'this.trpcService.protectedProcedure',
-        'this.trpcService.publicProcedure',
-      ],
-      ['this.requireLocalXhsAccess(ctx);', 'void ctx;'],
-      ['.strict()', '.passthrough()'],
-      [
-        'taskId: z.string().uuid(),',
-        'taskId: z.string().uuid(), sessionBinding: z.string(),',
-      ],
-      [
-        'this.xhsWhole!.' + name + '(input)',
-        'this.xhsWhole!.unreviewedOperation(input)',
-      ],
-    ];
-    if (name === 'confirmKnownResponseAuthReview') {
-      mutations.push(
-        [
-          'acknowledgedKnownResponseAuth: z.literal(true)',
-          'acknowledgedKnownResponseAuth: z.boolean()',
-        ],
-        [
-          "'user-confirmed-restored-saved-session',",
-          "'unreviewed-session-origin',",
-        ],
-      );
-    }
-    if (name === 'confirmKnownAuthProfileProbe')
-      mutations.push([
-        'acknowledgedOneProfile: z.literal(true)',
-        'acknowledgedOneProfile: z.boolean()',
-      ]);
-    if (name.includes('ProfileProbe'))
-      mutations.push([
-        'authDigest: z.string().regex(/^[a-f0-9]{64}$/)',
-        'authDigest: z.string()',
-      ]);
-    for (const [before, after] of mutations) {
-      assert.equal(entry.after.split(before).length, 2);
-      assert.throws(
-        () =>
-          restorePreReviewedRecoveryRouter(
-            ts,
-            source.replace(entry.after, entry.after.replace(before, after)),
-          ),
-        /exact approved XHS node/,
-        name + ' must reject ' + before,
-      );
-    }
-    assert.throws(
-      () =>
-        restorePreReviewedRecoveryRouter(
-          ts,
-          source.replace(
-            entry.after,
-            'unreviewedReplacement: this.trpcService.protectedProcedure',
-          ),
-        ),
-      /exact approved XHS node present/,
-      name + ' must remain present',
-    );
-  }
-});
-
-test('known authentication inverses reject additional and duplicate routes', () => {
-  const source = read('apps/server/src/trpc/trpc.router.ts');
-  const entry =
-    require('./fixtures/xhs-approved-router-seams.json').entries.find(
-      (value) => value.key === 'route:prepareKnownAuthProfileProbe',
-    );
-  for (const extra of [
-    entry.after,
-    entry.after.replace(
-      'prepareKnownAuthProfileProbe:',
-      'unreviewedKnownAuthProfileProbe:',
-    ),
+  for (const name of [
+    'prepareKnownResponseAuthReview',
+    'confirmKnownResponseAuthReview',
+    'prepareKnownAuthProfileProbe',
+    'confirmKnownAuthProfileProbe',
   ]) {
+    assert(!source.includes(name + ':'));
+    const extra =
+      name + ': this.trpcService.protectedProcedure.mutation(() => undefined),';
     assert.throws(
       () =>
         restorePreReviewedRecoveryRouter(
           ts,
-          source.replace(entry.after, extra + ',\n    ' + entry.after),
+          source.replace('connectionStatus:', extra + '\nconnectionStatus:'),
         ),
       /complete pre-recovery router AST preserved/,
     );
@@ -742,4 +658,37 @@ test('the reviewed export dialog and production reading layout retain their appr
       : [node.kind, node.getText(ast)];
   }
   assert.equal(hash(JSON.stringify(shape(returned))), copyPins.indexLayout);
+});
+
+test('automatic AUTH connection inverse preserves exact prior routes and rejects wider authorization', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  const entries = require('./fixtures/xhs-auth-connection-seams.json');
+  assert.deepEqual(
+    entries.map((e) => e.name),
+    ['connectSession', 'restoreSession'],
+  );
+  restorePreReviewedRecoveryRouter(ts, source);
+  for (const entry of entries) {
+    for (const [before, after] of [
+      [
+        'this.trpcService.protectedProcedure',
+        'this.trpcService.publicProcedure',
+      ],
+      ['this.requireLocalXhsConnection(ctx);', 'void ctx;'],
+      ['verifyKnownAuthenticationAfterConnection()', 'unreviewedOperation()'],
+      ...(entry.name === 'connectSession'
+        ? [['input.persist && this.xhsWhole', 'this.xhsWhole']]
+        : []),
+    ]) {
+      assert(entry.after.includes(before));
+      assert.throws(
+        () =>
+          restorePreReviewedRecoveryRouter(
+            ts,
+            source.replace(entry.after, entry.after.replace(before, after)),
+          ),
+        /exact approved XHS connection/,
+      );
+    }
+  }
 });

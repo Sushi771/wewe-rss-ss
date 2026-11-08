@@ -1803,6 +1803,91 @@ export class XhsWholeCreatorService implements OnModuleInit {
     )
       throw Error('SOURCE_WORK_NOT_IDLE');
   }
+  /** Called only by explicit local encrypted-connect / restore HTTP actions.
+   * Startup restore never calls this. No polling, retry, timer or wider grant. */
+  async verifyKnownAuthenticationAfterConnection() {
+    let verification: 'not-applicable' | 'profile-verified' | 'paused' =
+      'not-applicable';
+    try {
+      await this.readyForMutation();
+      const binding = this.runtime.knownAuthSessionForReview().binding;
+      this.assertKnownAuthIdle(binding);
+      if (this.starting.size || this.running.size || this.reviewing.size)
+        throw Error('SOURCE_WORK_NOT_IDLE');
+      this.starting.add('known-auth-connection-verification');
+      try {
+        verification = await sqliteWrites.knownAuthMetadataWrite(async () => {
+          this.assertKnownAuthIdle(binding, true);
+          const risk = await this.db.$queryRawUnsafe<any[]>(
+            "SELECT state,code,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'",
+          );
+          if (
+            risk.length !== 1 ||
+            risk[0].state !== 'blocked' ||
+            risk[0].code !== 'XHS_SOURCE_AUTHENTICATION_BLOCKED'
+          )
+            return 'not-applicable' as const;
+          const candidates = await this.db.$queryRawUnsafe<any[]>(
+            `SELECT DISTINCT t.id,t.creator_id,t.document FROM xhs_subscription_tasks t
+             JOIN xhs_unbound_owner_requests q ON q.task_id=t.id AND q.creator_id=t.creator_id
+             WHERE t.state='blocked' AND t.updated_at>=? AND q.phase='profile'
+             AND q.logical_target='profile:1' AND q.outcome='response-received'`,
+            BigInt(risk[0].updated_at),
+          );
+          const matching = candidates.filter(
+            (t) =>
+              JSON.parse(t.document).code ===
+              'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+          );
+          if (matching.length !== 1) return 'paused' as const;
+          const input = {
+            taskId: matching[0].id,
+            creatorId: matching[0].creator_id,
+            authReviewId: '',
+            authDigest: '',
+          };
+          const plan = await this.db.$transaction((tx) =>
+            prepareKnownAuthProfile(tx, input, this.runtime, false, true),
+          );
+          this.runtime.holdKnownAuthPause(binding);
+          const result = await runKnownAuthProfile(
+            (work) => this.write((tx) => work(tx)),
+            this.runtime,
+            input,
+            plan.digest,
+            true,
+            true,
+          );
+          if (result.state !== 'profile-saved' || !result.verifiedCommit)
+            return 'paused' as const;
+          // All durable profile/audit/clear facts committed; last step clears memory.
+          // The same exclusive coordinator remains held until this returns.
+          await this.runtime.refreshKnownAuthSession(
+            binding,
+            result.verifiedCommit.riskClearedAt,
+            true,
+          );
+          return 'profile-verified' as const;
+        });
+      } finally {
+        this.starting.delete('known-auth-connection-verification');
+      }
+    } catch {
+      // A connection/save may have succeeded. Never ask the client to retry a
+      // possibly consumed request or misreport it as a credential-save failure.
+      verification = 'paused';
+    }
+    return {
+      ...(await this.runtime.connectionStatus()),
+      authenticationRecovery: {
+        state: verification,
+        automaticRetry: false,
+        notesCollected: 0,
+        imagesCollected: 0,
+      },
+    };
+  }
+
   /** Known response only. Never grants a round, changes budgets or dispatches. */
   async prepareKnownAuthProfileProbe(input: KnownProfileInput) {
     await this.readyForMutation();

@@ -1,3 +1,4 @@
+import { knownAuthProfileRecoveryPermit } from './xhs-known-auth-profile-probe';
 import {
   fullHistoryContext,
   dispatchFullHistoryRequest,
@@ -663,7 +664,29 @@ export class XhsSubscriptionRuntime
   bindFullHistoryWriter(writer: FullHistoryWriter) {
     this.fullHistoryWriter ??= writer;
   }
+  /** Read-only identity for a known AUTH check, not permission to dispatch. */
+  knownAuthTransportBinding() {
+    this.knownAuthSessionForReview(true);
+    return createHash('sha256')
+      .update(this.fullHistoryInstance + ':' + this.generation)
+      .digest('hex');
+  }
+  private knownAuthProfilePermitted() {
+    if (this.changing || this.destroyed || this.sessionAbort.signal.aborted)
+      return false;
+    const context = this.reviewedContext.getStore();
+    return (
+      knownAuthProfileRecoveryPermit(
+        this.replacementSession?.binding ?? this.restoredKnownSession?.binding,
+        context?.binding.authorId,
+      ) &&
+      (!context || context.binding.phase === 'profile')
+    );
+  }
   fullScopeSessionBinding() {
+    // The one-profile exception never becomes a recurring/full-scope grant.
+    if (this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED')
+      return failure(this.stopCode);
     this.requireSession();
     if (this.changing) return failure('XHS_SESSION_CHANGED');
     return createHash('sha256')
@@ -810,8 +833,19 @@ export class XhsSubscriptionRuntime
     if (after.binding !== binding || after.origin !== current.origin)
       return failure('XHS_SESSION_CHANGED');
   }
+  /** Conservative memory mirror of the exact durable AUTH selected by the service. */
+  holdKnownAuthPause(binding: string) {
+    if (this.knownAuthSessionForReview().binding !== binding)
+      return failure('XHS_SESSION_CHANGED');
+    this.stopCode = 'XHS_SOURCE_AUTHENTICATION_BLOCKED';
+    this.verified = false;
+  }
   /** Caller holds knownAuthMetadataWrite through this final, fail-closed step. */
-  async refreshKnownAuthSession(binding: string, expectedClearVersion: string) {
+  async refreshKnownAuthSession(
+    binding: string,
+    expectedClearVersion: string,
+    profileCheckpointVerified = false,
+  ) {
     if (this.knownAuthSessionForReview().binding !== binding || !this.riskStore)
       return failure('XHS_SESSION_CHANGED');
     if ((await this.riskStore.readClearVersion()) !== expectedClearVersion)
@@ -819,6 +853,7 @@ export class XhsSubscriptionRuntime
     if (this.knownAuthSessionForReview().binding !== binding)
       return failure('XHS_SESSION_CHANGED');
     this.persistedRisk = undefined;
+    if (profileCheckpointVerified) this.verified = true;
     if (
       this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' ||
       this.stopCode === 'XHS_SOURCE_RISK_REVIEW_REQUIRED'
@@ -1646,6 +1681,10 @@ export class XhsSubscriptionRuntime
     if (
       this.stopCode &&
       !(
+        this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' &&
+        this.knownAuthProfilePermitted()
+      ) &&
+      !(
         (this.limitedRecoveryScope.getStore() ||
           this.wholeSourceGroup.getStore() ||
           this.reviewedSingle.getStore() ||
@@ -2037,6 +2076,7 @@ export class XhsSubscriptionRuntime
           'rate_limit',
         ].includes(error.reason)
       ) {
+        this.platformFailureVersion++;
         this.stopCode = `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
         if (error.reason === 'authentication') {
           this.persistence.needsReconnect = true;
@@ -2307,12 +2347,20 @@ export class XhsSubscriptionRuntime
       if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
       if (
         this.stopCode &&
-        this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+        this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' &&
+        !(
+          this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' &&
+          this.knownAuthProfilePermitted()
+        )
       )
         return failure(this.stopCode);
       if (generation !== this.generation || this.sessionAbort.signal.aborted)
         return failure('XHS_SESSION_CHANGED');
     };
+  }
+  private platformFailureVersion = 0;
+  reviewedFailureVersion() {
+    return this.platformFailureVersion;
   }
   reviewedFailureCode() {
     return this.stopCode &&

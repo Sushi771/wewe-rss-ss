@@ -161,7 +161,7 @@ test('AUDIT B: range failure does not submit a save and gives a stable terminal 
   assert.equal(h.state.requests, 0);
   assert.equal(h.state.scopeCalls, 1);
   assert.equal(h.state.selectionClears, 0);
-  assert.equal(h.state.result, '未能取得完整导出范围');
+  assert.equal(h.state.result, '未能取得完整导出范围，请重试');
   assert.equal(h.state.notices[0].kind, 'error');
   assert.match(h.state.notices[0].description, /已有文件会保留/);
 });

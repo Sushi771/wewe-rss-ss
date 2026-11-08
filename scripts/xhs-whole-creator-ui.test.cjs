@@ -45,6 +45,8 @@ function render(data, component = 'default') {
       reviewWholeCreatorGeneration: { useMutation: mutation },
       resumeWholeCreatorMedia: { useMutation: mutation },
       resumeWholeCreatorMissingBasic: { useMutation: mutation },
+      prepareLegacyPendingOwnerReview: { useMutation: mutation },
+      confirmLegacyPendingOwnerReview: { useMutation: mutation },
     },
   };
   const mod = { exports: {} };

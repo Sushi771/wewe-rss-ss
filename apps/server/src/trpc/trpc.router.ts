@@ -1747,7 +1747,10 @@ export class TrpcRouter {
       .mutation(async ({ input, ctx }) => {
         this.requireLocalXhsConnection(ctx);
         try {
-          return await this.xhsRuntime!.connectSession(input);
+          const connected = await this.xhsRuntime!.connectSession(input);
+          return input.persist && this.xhsWhole
+            ? await this.xhsWhole.verifyKnownAuthenticationAfterConnection()
+            : connected;
         } catch (error) {
           throw new TRPCError({
             code: 'PRECONDITION_FAILED',
@@ -1759,7 +1762,10 @@ export class TrpcRouter {
       async ({ ctx }) => {
         this.requireLocalXhsConnection(ctx);
         try {
-          return await this.xhsRuntime!.restoreSession();
+          const connected = await this.xhsRuntime!.restoreSession();
+          return this.xhsWhole
+            ? await this.xhsWhole.verifyKnownAuthenticationAfterConnection()
+            : connected;
         } catch (error) {
           throw new TRPCError({
             code: 'PRECONDITION_FAILED',
@@ -2122,78 +2128,6 @@ export class TrpcRouter {
         this.requireLocalXhsAccess(ctx);
         return this.xhsSourceOperation(() =>
           this.xhsWhole!.confirmHistoryHandoff(input),
-        );
-      }),
-    prepareKnownAuthProfileProbe: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({
-            taskId: z.string().uuid(),
-            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-            authReviewId: z.string().min(1).max(160),
-            authDigest: z.string().regex(/^[a-f0-9]{64}$/),
-          })
-          .strict(),
-      )
-      .mutation(({ input, ctx }) => {
-        this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() =>
-          this.xhsWhole!.prepareKnownAuthProfileProbe(input),
-        );
-      }),
-    confirmKnownAuthProfileProbe: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({
-            taskId: z.string().uuid(),
-            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-            authReviewId: z.string().min(1).max(160),
-            authDigest: z.string().regex(/^[a-f0-9]{64}$/),
-            digest: z.string().regex(/^[a-f0-9]{64}$/),
-            acknowledgedOneProfile: z.literal(true),
-          })
-          .strict(),
-      )
-      .mutation(({ input, ctx }) => {
-        this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() =>
-          this.xhsWhole!.confirmKnownAuthProfileProbe(input),
-        );
-      }),
-    prepareKnownResponseAuthReview: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({
-            taskId: z.string().uuid(),
-            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-          })
-          .strict(),
-      )
-      .mutation(({ input, ctx }) => {
-        this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() =>
-          this.xhsWhole!.prepareKnownResponseAuthReview(input),
-        );
-      }),
-    confirmKnownResponseAuthReview: this.trpcService.protectedProcedure
-      .input(
-        z
-          .object({
-            taskId: z.string().uuid(),
-            creatorId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-            digest: z.string().regex(/^[a-f0-9]{64}$/),
-            acknowledgedKnownResponseAuth: z.literal(true),
-            confirmedSessionOrigin: z.enum([
-              'fresh-replacement',
-              'user-confirmed-restored-saved-session',
-            ]),
-          })
-          .strict(),
-      )
-      .mutation(({ input, ctx }) => {
-        this.requireLocalXhsAccess(ctx);
-        return this.xhsSourceOperation(() =>
-          this.xhsWhole!.confirmKnownResponseAuthReview(input),
         );
       }),
     prepareAuthSessionThreePageRound: this.trpcService.protectedProcedure

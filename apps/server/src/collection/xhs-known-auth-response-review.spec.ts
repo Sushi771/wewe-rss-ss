@@ -1,3 +1,6 @@
+import { ConfigService } from '@nestjs/config';
+import { TrpcRouter } from '../trpc/trpc.router';
+import { TrpcService } from '../trpc/trpc.service';
 import {
   prepareKnownAuthProfile,
   runKnownAuthProfile,
@@ -2024,4 +2027,666 @@ it('one-profile probe rejects a missing durable policy binding before any write 
   ).rejects.toThrow('SOURCE_POLICY_NOT_INSTALLED');
   expect(await snapshot()).toBe(before);
   expect(api).not.toHaveBeenCalled();
+});
+
+describe('connection verification before AUTH clear', () => {
+  async function fixture() {
+    runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+    (runtime as any).stopCode = AUTH;
+    const service: any = new XhsWholeCreatorService(
+      db as any,
+      { hasLocalSourceWork: () => false } as any,
+      runtime,
+      {} as any,
+    );
+    service.readyForMutation = async () => {};
+    db.$use((params, next) =>
+      sqliteWrites.write(() => next(params), params.runInTransaction === true),
+    );
+    return service;
+  }
+  it('keeps exact AUTH through real profile transport, atomically saves then clears, never retries', async () => {
+    const service = await fixture();
+    const beforeRisk = await db.$queryRawUnsafe<any[]>(
+      'SELECT * FROM xhs_source_risk',
+    );
+    const beforeTask = (await taskRows()).find((r) => r.id === target.taskId);
+    api.mockImplementation(async (request: any) => {
+      expect(await db.$queryRawUnsafe('SELECT * FROM xhs_source_risk')).toEqual(
+        beforeRisk,
+      );
+      expect(
+        JSON.parse(
+          (await taskRows()).find((r) => r.id === target.taskId).document,
+        ).knownResponseAuthReviews,
+      ).toBeUndefined();
+      await expect(
+        runtime.withScheduledReview(
+          {
+            round: '2026-11-08/17:30',
+            creatorId: 'b',
+            authorId: 'author-b',
+            phase: 'basic',
+          },
+          async () => undefined,
+        ),
+      ).rejects.toThrow();
+      return {
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: { synthetic: true } },
+      };
+    });
+    const result = await service.verifyKnownAuthenticationAfterConnection();
+    expect(result.authenticationRecovery.state).toBe('profile-verified');
+    expect(result.riskCode).toBeUndefined();
+    expect(api).toHaveBeenCalledTimes(1);
+    const afterTask = (await taskRows()).find((r) => r.id === target.taskId);
+    const doc = JSON.parse(afterTask.document),
+      audit = doc.knownResponseAuthReviews[0];
+    delete doc.knownResponseAuthReviews;
+    expect(doc).toEqual(JSON.parse(beforeTask.document));
+    expect(afterTask.updated_at).toEqual(beforeTask.updated_at);
+    expect(audit).toMatchObject({
+      authenticationVerified: true,
+      sourceRequestsSent: 1,
+      originalTaskRaw: beforeTask.document,
+      originalOutcome: 'response-received',
+      verification: {
+        order: 'profile-checkpoint-before-auth-clear',
+        profileSaved: true,
+      },
+    });
+    expect(
+      (await db.$queryRawUnsafe<any[]>('SELECT state FROM xhs_source_risk'))[0]
+        .state,
+    ).toBe('clear');
+    await service.verifyKnownAuthenticationAfterConnection();
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+  });
+  it.each([
+    'http401',
+    'http429',
+    'http461',
+    'http471',
+    'captcha',
+    'transport',
+    'parse',
+    'storage',
+    'task-cas',
+    'risk-cas',
+    'session',
+    'ack-lost',
+    'refresh-failed',
+  ])(
+    'keeps pause and never repeats a consumed verification: %s',
+    async (mode) => {
+      const service = await fixture();
+      const beforeTask = (await taskRows()).find((r) => r.id === target.taskId);
+      const beforeRisk = await db.$queryRawUnsafe<any[]>(
+        'SELECT * FROM xhs_source_risk',
+      );
+      api.mockImplementation(async (request: any) => {
+        if (mode === 'transport') throw Error('synthetic-timeout');
+        if (mode === 'parse')
+          profileResult = () => {
+            throw Error('synthetic-parse');
+          };
+        if (mode === 'session')
+          await runtime.connectSession({
+            a1: 'synthetic-other',
+            webSession: 'synthetic-other',
+          });
+        return {
+          status: mode.startsWith('http') ? Number(mode.slice(4)) : 200,
+          url: request.url,
+          body:
+            mode === 'captcha'
+              ? { success: false, code: -1, msg: 'captcha required' }
+              : { success: true, code: 0, data: { synthetic: true } },
+        };
+      });
+      const realWrite = service.write.bind(service);
+      let injected = false;
+      service.write = async (work: any) => {
+        let checkpoint = false;
+        const result = await realWrite((tx: any) =>
+          work(
+            new Proxy(tx, {
+              get(t, k) {
+                if (k === '$executeRawUnsafe')
+                  return async (sql: string, ...args: any[]) => {
+                    if (
+                      sql.startsWith('UPDATE xhs_creators') &&
+                      mode === 'storage'
+                    )
+                      throw Error('synthetic-store');
+                    if (
+                      sql.startsWith(
+                        'UPDATE xhs_subscription_tasks SET document',
+                      )
+                    ) {
+                      checkpoint = true;
+                      if (mode === 'task-cas') return 0;
+                    }
+                    if (
+                      sql.startsWith(
+                        "UPDATE xhs_source_risk SET state='clear'",
+                      ) &&
+                      mode === 'risk-cas'
+                    )
+                      return 0;
+                    return t.$executeRawUnsafe(sql, ...args);
+                  };
+                return t[k];
+              },
+            }),
+          ),
+        );
+        if (checkpoint && mode === 'ack-lost' && !injected) {
+          injected = true;
+          throw Error('synthetic-ack-lost');
+        }
+        return result;
+      };
+      if (mode === 'refresh-failed')
+        jest
+          .spyOn(runtime, 'refreshKnownAuthSession')
+          .mockRejectedValueOnce(Error('synthetic-refresh'));
+      const result = await service.verifyKnownAuthenticationAfterConnection();
+      expect(result.authenticationRecovery.state).toBe('paused');
+      expect(api).toHaveBeenCalledTimes(1);
+      const committed = ['ack-lost', 'refresh-failed'].includes(mode);
+      const afterTask = (await taskRows()).find((r) => r.id === target.taskId);
+      if (!committed) expect(afterTask).toEqual(beforeTask);
+      const risk = await db.$queryRawUnsafe<any[]>(
+        'SELECT * FROM xhs_source_risk',
+      );
+      if (committed) expect(risk[0].state).toBe('clear');
+      else if (mode === 'http429')
+        expect(risk[0].code).toBe('XHS_SOURCE_RATE_LIMIT_BLOCKED');
+      else if (mode === 'http461')
+        expect(risk[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+      else if (mode === 'http471')
+        expect(risk[0].code).toBe('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+      else if (mode === 'captcha')
+        expect(risk[0].code).toBe('XHS_SOURCE_VERIFICATION_BLOCKED');
+      else if (mode === 'http401') expect(risk[0].code).toBe(AUTH);
+      else expect(risk).toEqual(beforeRisk);
+      const request = await db.$queryRawUnsafe<any[]>(
+        "SELECT outcome FROM xhs_unbound_owner_requests WHERE logical_target='profile'",
+      );
+      expect(request).toHaveLength(1);
+      expect(request[0].outcome).toBe(
+        mode === 'transport' ? 'unknown' : 'response-received',
+      );
+      if (committed) {
+        const receipts = await db.$queryRawUnsafe<any[]>(
+          'SELECT document FROM xhs_unbound_source_receipts',
+        );
+        expect(JSON.parse(receipts[0].document).outcome).toBe('checkpointed');
+      }
+      await runtime.connectSession({
+        a1: 'synthetic-another',
+        webSession: 'synthetic-another',
+      });
+      await service.verifyKnownAuthenticationAfterConnection();
+      expect(api).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'new-unknown',
+    'verification',
+    'revoked',
+    'disabled',
+    'budget',
+    'cooldown',
+    'missing-store',
+  ])(
+    'has no request or new review for inadmissible connection: %s',
+    async (mode) => {
+      const service = await fixture();
+      if (mode === 'new-unknown')
+        await mutateDoc((d) => {
+          d.sourceUnknowns = [{ phase: 'detail', outcome: 'unknown' }];
+        }, 'old-fixture');
+      if (mode === 'verification')
+        await db.$executeRawUnsafe(
+          'UPDATE xhs_source_risk SET code=?',
+          'XHS_SOURCE_VERIFICATION_BLOCKED',
+        );
+      if (mode === 'revoked') {
+        const p = await prep();
+        await db.$executeRawUnsafe(
+          'INSERT INTO xhs_unbound_owner_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'connection-revocation',
+          'f'.repeat(64),
+          '{}',
+          'unknown',
+          '[]',
+          '[]',
+          '{}',
+          '[]',
+          pack({
+            reviewKind: 'scheduled-recurring-revocation-v1',
+            policyId: p.policyId,
+          }),
+          'a'.repeat(64),
+          500n,
+        );
+      }
+      if (mode === 'disabled')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_creators SET enabled=0 WHERE id='a'",
+        );
+      if (mode === 'budget')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_request_budgets SET used=request_limit WHERE id='xhs:source-total'",
+        );
+      if (mode === 'cooldown')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_request_budgets SET next_at=? WHERE id='xhs:source-total'",
+          BigInt(Date.now() + 100000),
+        );
+      if (mode === 'missing-store') (runtime as any).riskStore = undefined;
+      const before = await snapshot();
+      await service.verifyKnownAuthenticationAfterConnection();
+      expect(api).not.toHaveBeenCalled();
+      expect(await snapshot()).toBe(before);
+    },
+  );
+
+  it('explicit saved restore route verifies once, startup restore never dispatches or rewrites credentials', async () => {
+    runtime.onModuleDestroy();
+    const storage = {
+      status: jest.fn(async () => ({ stored: true })),
+      policy: jest.fn(async () => ({
+        autoRestore: true,
+        needsReconnect: false,
+      })),
+      load: jest.fn(async () => ({
+        a1: 'synthetic-saved',
+        web_session: 'synthetic-saved',
+      })),
+      store: jest.fn(async () => {
+        throw Error('SAVE_FORBIDDEN');
+      }),
+      disconnect: jest.fn(async () => {}),
+    };
+    runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api,
+      vault: storage,
+      profileParser: (_raw, id) => profileResult(id),
+    });
+    await runtime.onModuleInit();
+    expect(api).not.toHaveBeenCalled();
+    const service = await fixture();
+    api.mockImplementation(async (request: any) => ({
+      status: 200,
+      url: request.url,
+      body: { success: true, code: 0, data: { synthetic: true } },
+    }));
+    const config = new ConfigService({
+      auth: { code: 'synthetic-auth' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const router = new TrpcRouter(
+      new TrpcService(db as any, config, {} as any, {} as any),
+      db as any,
+      config,
+      {} as any,
+      {} as any,
+      undefined,
+      undefined,
+      runtime,
+      undefined,
+      service,
+    ).appRouter;
+    await expect(
+      router
+        .createCaller({ errorMsg: null, isLocalSave: false })
+        .xiaohongshu.restoreSession(),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    const result = await router
+      .createCaller({ errorMsg: null, isLocalSave: true })
+      .xiaohongshu.restoreSession();
+    expect((result as any).authenticationRecovery.state).toBe(
+      'profile-verified',
+    );
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(storage.store).not.toHaveBeenCalled();
+    await router
+      .createCaller({ errorMsg: null, isLocalSave: true })
+      .xiaohongshu.restoreSession();
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+
+  it('queues an independent writer until verification and final refresh, rejects double clicks', async () => {
+    const service = await fixture();
+    let enter!: () => void, release!: () => void;
+    const entered = new Promise<void>((r) => {
+        enter = r;
+      }),
+      released = new Promise<void>((r) => {
+        release = r;
+      });
+    const events: string[] = [];
+    const competing = (async () => {
+      await entered;
+      await sqliteWrites.write(async () => {
+        events.push('writer');
+      });
+    })();
+    api.mockImplementation(async (request: any) => {
+      events.push('profile');
+      enter();
+      await released;
+      return {
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: { synthetic: true } },
+      };
+    });
+    const originalRefresh = runtime.refreshKnownAuthSession.bind(runtime);
+    jest
+      .spyOn(runtime, 'refreshKnownAuthSession')
+      .mockImplementation(async (...args) => {
+        await originalRefresh(...args);
+        events.push('refresh');
+      });
+    const first = service.verifyKnownAuthenticationAfterConnection();
+    await entered;
+    // Do not wait for the second status read while it is correctly queued behind
+    // the exclusive operation. It must never acquire another request grant.
+    const second = service.verifyKnownAuthenticationAfterConnection();
+    await Promise.resolve();
+    expect(events).toEqual(['profile']);
+    release();
+    await Promise.all([first, second, competing]);
+    expect(events).toEqual(['profile', 'refresh', 'writer']);
+    expect(api).toHaveBeenCalledTimes(1);
+  });
+  it('admits the next natural scheduled round only after verification; old round remains closed', async () => {
+    const service = await fixture();
+    api.mockImplementation(async (request: any) => ({
+      status: 200,
+      url: request.url,
+      body: {
+        success: true,
+        code: 0,
+        data: new URL(request.url).pathname.includes('otherinfo')
+          ? { synthetic: true }
+          : { notes: [], cursor: '', has_more: false },
+      },
+    }));
+    expect(
+      (await service.verifyKnownAuthenticationAfterConnection())
+        .authenticationRecovery.state,
+    ).toBe('profile-verified');
+    runtime.bindFullHistoryWriter((w) => db.$transaction((tx) => w(tx)));
+    runtime.bindFullHistoryReader((w) => db.$transaction((tx) => w(tx)));
+    runtime.bindFullHistoryLegacyGuard(() => assertLegacyXhsSourceReady(db));
+    const before = (await taskRows()).find((r) => r.id === target.taskId);
+    const scheduled: any = new XhsSubscriptionService(db as any, runtime);
+    scheduled.write = async (_bytes: number, w: any) => db.$transaction(w);
+    try {
+      for (const creatorId of ['a', 'b', 'c'])
+        await expect(
+          scheduled.scheduleCreatorPhase({ round, creatorId, phase: 'basic' }),
+        ).rejects.toThrow();
+      const next = '2026-11-08/17:30';
+      await scheduled.scheduleCreatorPhase({
+        round: next,
+        creatorId: 'a',
+        phase: 'basic',
+      });
+      await scheduled.lane;
+      expect(
+        await scheduled.task({ taskId: scheduledTaskId(next, 'a', 'basic') }),
+      ).toMatchObject({ state: 'completed' });
+      expect(api).toHaveBeenCalledTimes(3);
+      expect((await taskRows()).find((r) => r.id === target.taskId)).toEqual(
+        before,
+      );
+    } finally {
+      await scheduled.onModuleDestroy();
+    }
+  });
+  it.each(['exact', 'changed-audit', 'changed-receipt', 'unreadable'])(
+    'lost ACK recognizes only the exact committed checkpoint: %s',
+    async (mode) => {
+      runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+      (runtime as any).stopCode = AUTH;
+      api.mockImplementation(async (request: any) => ({
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: { synthetic: true } },
+      }));
+      const input = { ...target, authReviewId: '', authDigest: '' };
+      const plan = await prepareKnownAuthProfile(
+        db,
+        input,
+        runtime,
+        false,
+        true,
+      );
+      let lost = false;
+      const writer: any = async (work: any) => {
+        if (lost && mode === 'unreadable')
+          throw Error('synthetic-read-failure');
+        let checkpoint = false;
+        const result = await db.$transaction((tx: any) =>
+          work(
+            new Proxy(tx, {
+              get(t, k) {
+                if (k === '$executeRawUnsafe')
+                  return async (sql: string, ...args: any[]) => {
+                    if (
+                      sql.startsWith(
+                        'UPDATE xhs_subscription_tasks SET document',
+                      )
+                    )
+                      checkpoint = true;
+                    return t.$executeRawUnsafe(sql, ...args);
+                  };
+                return t[k];
+              },
+            }),
+          ),
+        );
+        if (checkpoint && !lost) {
+          lost = true;
+          if (mode === 'changed-audit')
+            await mutateDoc((d) => {
+              d.knownResponseAuthReviews[0].confirmation.trigger = 'tampered';
+            });
+          if (mode === 'changed-receipt')
+            await db.$executeRawUnsafe(
+              "UPDATE xhs_unbound_source_receipts SET document='{}'",
+            );
+          throw Error('synthetic-ack-lost');
+        }
+        return result;
+      };
+      const result = await runKnownAuthProfile(
+        writer,
+        runtime,
+        input,
+        plan.digest,
+        true,
+        true,
+      );
+      expect(result).toMatchObject({
+        checkpointConfirmed: mode === 'exact',
+        doNotRetryConfirmation: true,
+      });
+      expect(api).toHaveBeenCalledTimes(1);
+      expect((runtime as any).stopCode).toBe(AUTH);
+    },
+  );
+  it('a genuinely new runtime cannot repeat the consumed unknown event', async () => {
+    const service = await fixture();
+    api.mockRejectedValue(Error('synthetic-timeout'));
+    await service.verifyKnownAuthenticationAfterConnection();
+    expect(api).toHaveBeenCalledTimes(1);
+    runtime.onModuleDestroy();
+    runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api,
+      profileParser: (_raw, id) => profileResult(id),
+    });
+    await runtime.connectSession({
+      a1: 'synthetic-restarted',
+      webSession: 'synthetic-restarted',
+    });
+    const restarted = await fixture();
+    expect(
+      (await restarted.verifyKnownAuthenticationAfterConnection())
+        .authenticationRecovery.state,
+    ).toBe('paused');
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(
+      (await db.$queryRawUnsafe<any[]>('SELECT code FROM xhs_source_risk'))[0]
+        .code,
+    ).toBe(AUTH);
+  });
+  it.each(['receipt', 'risk', 'creator', 'unknown', 'session'])(
+    'pre-dispatch change stays paused without transport: %s',
+    async (mode) => {
+      runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
+      (runtime as any).stopCode = AUTH;
+      const input = { ...target, authReviewId: '', authDigest: '' };
+      const plan = await prepareKnownAuthProfile(
+        db,
+        input,
+        runtime,
+        false,
+        true,
+      );
+      let writes = 0;
+      const writer: any = async (work: any) => {
+        const result = await db.$transaction(work);
+        writes++;
+        if (writes === 3) {
+          if (mode === 'receipt')
+            await db.$executeRawUnsafe(
+              "UPDATE xhs_unbound_source_receipts SET document='{}'",
+            );
+          if (mode === 'risk')
+            await db.$executeRawUnsafe(
+              "UPDATE xhs_source_risk SET code='XHS_SOURCE_VERIFICATION_BLOCKED'",
+            );
+          if (mode === 'creator')
+            await db.$executeRawUnsafe(
+              "UPDATE xhs_creators SET enabled=0 WHERE id='a'",
+            );
+          if (mode === 'unknown')
+            await db.$executeRawUnsafe(
+              "INSERT INTO xhs_unbound_owner_requests VALUES(?,?,?,'b','detail','different','unknown',NULL)",
+              randomUUID(),
+              context.reviewId,
+              'other-task',
+            );
+          if (mode === 'session')
+            await runtime.connectSession({
+              a1: 'synthetic-other',
+              webSession: 'synthetic-other',
+            });
+        }
+        return result;
+      };
+      expect(
+        (
+          await runKnownAuthProfile(
+            writer,
+            runtime,
+            input,
+            plan.digest,
+            true,
+            true,
+          )
+        ).state,
+      ).toBe('profile-not-confirmed');
+      expect(api).not.toHaveBeenCalled();
+      expect(
+        (
+          await db.$queryRawUnsafe<any[]>('SELECT state FROM xhs_source_risk')
+        )[0].state,
+      ).toBe('blocked');
+    },
+  );
+  it('encrypted save route verifies once after persistence, keeping original AUTH until profile response', async () => {
+    runtime.onModuleDestroy();
+    let policy = { autoRestore: false, needsReconnect: true };
+    const storage = {
+      status: jest.fn(async () => ({ stored: true })),
+      policy: jest.fn(async () => ({ ...policy })),
+      load: jest.fn(async () => ({
+        a1: 'synthetic-saved',
+        web_session: 'synthetic-saved',
+      })),
+      store: jest.fn(async () => {}),
+      replace: jest.fn(async () => {}),
+      configureRestore: jest.fn(async (autoRestore: boolean) => {
+        policy = { autoRestore, needsReconnect: false };
+      }),
+      disconnect: jest.fn(async () => {}),
+    };
+    runtime = new XhsSubscriptionRuntime({
+      enabled: () => true,
+      api,
+      vault: storage,
+      profileParser: (_raw, id) => profileResult(id),
+    });
+    const service = await fixture();
+    api.mockImplementation(async (request: any) => {
+      expect(storage.replace).toHaveBeenCalledTimes(1);
+      expect(
+        (
+          await db.$queryRawUnsafe<any[]>(
+            'SELECT state,code FROM xhs_source_risk',
+          )
+        )[0],
+      ).toEqual({ state: 'blocked', code: AUTH });
+      return {
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: { synthetic: true } },
+      };
+    });
+    const config = new ConfigService({
+      auth: { code: 'synthetic-auth' },
+      platform: { url: '' },
+      feed: { updateDelayTime: 0 },
+    });
+    const apiCaller = new TrpcRouter(
+      new TrpcService(db as any, config, {} as any, {} as any),
+      db as any,
+      config,
+      {} as any,
+      {} as any,
+      undefined,
+      undefined,
+      runtime,
+      undefined,
+      service,
+    ).appRouter.createCaller({ errorMsg: null, isLocalSave: true }).xiaohongshu;
+    const result = await apiCaller.connectSession({
+      a1: 'synthetic-persisted',
+      webSession: 'synthetic-persisted',
+      persist: true,
+      replaceSaved: true,
+      autoRestore: true,
+    });
+    expect((result as any).authenticationRecovery.state).toBe(
+      'profile-verified',
+    );
+    expect(result.verified).toBe(true);
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(storage.load).not.toHaveBeenCalled();
+  });
 });
