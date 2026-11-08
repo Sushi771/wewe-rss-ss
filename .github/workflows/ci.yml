@@ -6,6 +6,7 @@ on:
       [
         main,
         codex/manual-refresh-download-integration,
+        codex/scheduled-source-active-20261108,
         codex/release-build-rollback-20261021,
         codex/local-body-search-deployed-compat-20261021,
         codex/sqlite-backup-bounded-20261014,

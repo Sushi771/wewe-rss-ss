@@ -41,6 +41,7 @@ const png = Buffer.from(
 );
 const vault = () => ({
   status: jest.fn(async () => ({ stored: true })),
+  policy: jest.fn(async () => ({ autoRestore: false, needsReconnect: false })),
   store: jest.fn(async () => {}),
   load: jest.fn(async () => ({ ...cookies })),
   disconnect: jest.fn(async () => {}),

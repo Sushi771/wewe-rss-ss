@@ -9,9 +9,15 @@ on:
         feat/xhs-engagement,
         codex/xhs-receipt-link,
         codex/xhs-unified-integration,
+        codex/scheduled-source-active-20261108,
       ]
   pull_request:
-    branches: [fix/desktop-docker-cold-start, codex/xhs-depth-integration]
+    branches:
+      [
+        fix/desktop-docker-cold-start,
+        codex/xhs-depth-integration,
+        codex/manual-refresh-download-integration,
+      ]
 
 permissions:
   contents: read
@@ -62,6 +68,8 @@ jobs:
         with:
           node-version: 24.11.1
           cache: pnpm
+      - name: Exact current-package pin and preserving installer guards
+        run: node --test scripts/local-release/install-lifecycle.test.cjs
       - name: Privacy inventory and protected package regressions
         run: |
           node --test scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs
@@ -75,6 +83,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions
         run: pnpm --filter server exec jest --runInBand --testPathPattern='(collection/(xhs-|xiaohongshu|subscription-video|media-transaction|saved-media-writeback)|trpc/(xiaohongshu-ui|management-groups)|platform-export-target|article-folder-picker|xhs-cached-local-export|article-local-save|xhs-single-download|xhs-video-download|article-verified-download|feeds/(automatic-media-queue|automatic-media-storage)|media-large-export)'
+      - name: Known-auth metadata, one-profile receipt and route regressions
+        run: pnpm --filter server exec jest --runInBand src/collection/sqlite-write-coordinator.spec.ts src/collection/round-source-receipt.spec.ts src/collection/round-runtime.spec.ts src/trpc/xhs-full-history-router.spec.ts
       - name: Scheduled round admission and batching
         run: node --experimental-transform-types --test apps/server/src/collection/xhs-scheduled-admission.test.mjs apps/server/src/collection/xhs-scheduled-runner.test.mjs
       - name: Legacy maintenance native synthetic regressions

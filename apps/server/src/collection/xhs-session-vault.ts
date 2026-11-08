@@ -94,10 +94,14 @@ try {
       if(!($request.autoRestore -is [bool])){throw 'policy'}
       $policy.autoRestore=$request.autoRestore
     }else{
-      if(!(Test-Path -LiteralPath $policyPath)){[Console]::Out.Write('{}');exit 0}
+      if(!(Test-Path -LiteralPath $target -PathType Leaf)){[Console]::Out.Write('{}');exit 0}
       $policy.needsReconnect=$true
     }
     Write-Policy
+    if($request.action -eq 'markExpired'){
+      $verifiedPolicy=[IO.File]::ReadAllText($policyPath)|ConvertFrom-Json
+      if($verifiedPolicy.version -ne 1 -or $verifiedPolicy.needsReconnect -ne $true){throw 'policy'}
+    }
     [Console]::Out.Write('{}');exit 0
   }
   if($request.action -eq 'status'){

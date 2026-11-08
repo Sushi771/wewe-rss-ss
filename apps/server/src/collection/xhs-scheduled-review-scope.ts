@@ -202,6 +202,49 @@ async function assertBaseline(tx: RoundTx, scope: any, operation?: string) {
     'SCHEDULED_CREATOR_BINDING_CHANGED',
   );
 }
+/** Read-only proof for the isolated known-response authentication review.
+ * No grant, budget, baseline exclusion or scheduled admission is created here. */
+export async function readScheduledKnownAuthProof(
+  tx: RoundTx,
+  taskId: string,
+  reviewId: string,
+  policyId: string,
+) {
+  const policy = await activePolicy(tx);
+  check(policy?.id === policyId, 'SCHEDULED_POLICY_CHANGED');
+  const approved = JSON.parse(policy.scope_json);
+  await assertBaseline(tx, approved);
+  check(
+    hash(approved.baseline) === approved.baselineDigest,
+    'REVIEW_STATE_CHANGED',
+  );
+  const review = (await reviews(tx)).find((r) => r.id === reviewId);
+  check(review, 'SCHEDULED_REVIEW_REQUIRED');
+  const scope = JSON.parse(review.scope_json);
+  check(
+    scope.reviewKind === SCHEDULED_REVIEW_KIND &&
+      scope.policyId === policy.id &&
+      scope.taskBinding?.taskId === taskId &&
+      scope.taskBinding.phase === 'basic' &&
+      scope.taskBinding.batch === 0 &&
+      taskId ===
+        scheduledTaskId(scope.round, scope.taskBinding.creatorId, 'basic') &&
+      review.id ===
+        'scheduled-task-' + hash([policy.id, scope.round, taskId]) &&
+      review.plan_digest === hash(scope) &&
+      pack(scope) ===
+        pack({
+          ...approved,
+          reviewKind: SCHEDULED_REVIEW_KIND,
+          round: scope.round,
+          taskBinding: scope.taskBinding,
+          sessionBinding: scope.sessionBinding,
+          budgetId: fullHistoryBudgetId(reviewId, taskId),
+        }),
+    'SCHEDULED_REVIEW_BINDING_CHANGED',
+  );
+  return { policy, review, scope, baseline: approved.baseline };
+}
 export async function prepareScheduledPolicy(
   tx: RoundTx,
   input: ScheduledPolicyInput,

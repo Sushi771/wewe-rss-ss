@@ -14,6 +14,12 @@ function fixture(local = true) {
     feed: { updateDelayTime: 0 },
   });
   const whole = {
+    prepareKnownAuthProfileProbe: jest.fn(async () => ({
+      digest: 'a'.repeat(64),
+    })),
+    confirmKnownAuthProfileProbe: jest.fn(async () => ({
+      state: 'profile-saved',
+    })),
     prepareWholeCreatorFullHistory: jest.fn(async () => ({
       digest: 'a'.repeat(64),
     })),
@@ -72,4 +78,53 @@ it('passes only the strict bound local scope and rejects client session injectio
     } as any),
   ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   expect(whole.prepareWholeCreatorFullHistory).toHaveBeenCalledTimes(1);
+});
+
+it('known-profile routes require local explicit one-profile confirmation and reject scope/session injection', async () => {
+  const input = {
+    taskId: ids[0],
+    creatorId: ids[1],
+    authReviewId: 'known-auth-synthetic',
+    authDigest: 'a'.repeat(64),
+  };
+  const { api, whole } = fixture();
+  await api.prepareKnownAuthProfileProbe(input);
+  await api.confirmKnownAuthProfileProbe({
+    ...input,
+    digest: 'b'.repeat(64),
+    acknowledgedOneProfile: true,
+  });
+  expect(whole.prepareKnownAuthProfileProbe).toHaveBeenCalledWith(input);
+  for (const field of [
+    'sessionBinding',
+    'phase',
+    'maxRequests',
+    'comments',
+    'replies',
+    'task',
+  ])
+    await expect(
+      api.confirmKnownAuthProfileProbe({
+        ...input,
+        digest: 'b'.repeat(64),
+        acknowledgedOneProfile: true,
+        [field]: 'injected',
+      } as any),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  await expect(
+    api.confirmKnownAuthProfileProbe({
+      ...input,
+      digest: 'b'.repeat(64),
+    } as any),
+  ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+  expect(whole.confirmKnownAuthProfileProbe).toHaveBeenCalledTimes(1);
+  const remote = fixture(false);
+  await expect(
+    remote.api.confirmKnownAuthProfileProbe({
+      ...input,
+      digest: 'b'.repeat(64),
+      acknowledgedOneProfile: true,
+    }),
+  ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  expect(remote.whole.confirmKnownAuthProfileProbe).not.toHaveBeenCalled();
 });

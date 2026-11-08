@@ -4,6 +4,7 @@ import {
   fullHistoryNoteExcluded,
 } from './xhs-full-history-scope';
 import { safeXhsAvatarUrl } from './xhs-profile';
+import { preserveKnownAuthTaskAudit } from './xhs-known-auth-response-review';
 import { load as loadHtml } from 'cheerio';
 import { readHistoryHandoffs } from './xhs-history-handoff';
 import {
@@ -227,6 +228,7 @@ type Task = XhsSubscriptionTask & {
     outcome: 'prepared';
   };
   legacyPendingReviews?: unknown[];
+  knownResponseAuthReviews?: unknown[];
   sourceUnknowns?: Array<
     {
       marker: string;
@@ -1307,6 +1309,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     const saved = own.length
       ? (JSON.parse(own[0].document) as Task)
       : undefined;
+    // The old blocked authentication task remains frozen, including updated_at.
+    if (preserveKnownAuthTaskAudit(saved, t)) return 0;
     if (
       saved?.supersededByTaskId &&
       saved.supersededByTaskId !== t.supersededByTaskId
@@ -1320,6 +1324,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.resumedFromTaskId}`;
       if (!rows.length) return reject('XHS_TASK_NOT_FOUND');
       const parent = JSON.parse(rows[0].document) as Task;
+      if (parent.knownResponseAuthReviews)
+        return reject('XHS_TASK_NOT_RESUMABLE');
       if (
         parent.creatorId !== t.creatorId ||
         (parent.supersededByTaskId && parent.supersededByTaskId !== t.taskId)
@@ -1375,6 +1381,8 @@ export class XhsSubscriptionService implements OnModuleInit {
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
+    if (checkpoint?.knownResponseAuthReviews)
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     if (
@@ -1777,6 +1785,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       supersededByTaskId: t.supersededByTaskId,
       settling: this.pending.has(t.taskId),
       resumable:
+        !t.knownResponseAuthReviews &&
         !uncertain &&
         !t.sourceActive &&
         !t.sourceUnknowns?.length &&
@@ -1865,6 +1874,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (this.uncertain.has(input.taskId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
+    if (previous.knownResponseAuthReviews)
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
     if (
       previous.kind === 'download' &&

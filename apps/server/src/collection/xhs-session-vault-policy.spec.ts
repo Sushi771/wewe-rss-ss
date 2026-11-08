@@ -8,6 +8,24 @@ const synthetic = {
   web_session: 'synthetic-only-session',
 };
 describe('explicit restore policy and atomic update (synthetic only)', () => {
+  it('marks a saved legacy record expired even when no restore policy existed', async () => {
+    if (process.platform !== 'win32') return;
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'wewe-xhs-legacy-expiry-synthetic-'),
+    );
+    const vault = new XhsDpapiSessionVault(root);
+    await vault.store(synthetic);
+    await expect(
+      fs.stat(path.join(root, '.wewe-xhs-session', 'restore-policy.json')),
+    ).rejects.toThrow();
+    await vault.markExpired();
+    expect(await vault.policy()).toEqual({
+      autoRestore: false,
+      needsReconnect: true,
+    });
+    expect(await vault.status()).toEqual({ stored: true });
+    // Synthetic fixture is retained; no backup or real session is deleted.
+  }, 60000);
   it('returns only validated booleans and never loads secrets while reading policy', async () => {
     const call = jest.fn(async () => ({
       autoRestore: false,

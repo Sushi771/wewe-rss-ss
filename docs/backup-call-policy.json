@@ -302,6 +302,13 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Explicitly confirmed exact creator/job narrowing takes one protected snapshot after idle/session/digest preflight. Database identity/fingerprint and transaction-local quiescence are rechecked before immutable review commit; existing unknown evidence, exclusions and budgets remain governed by the review core. Preparation sends no requests and creates no snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/xhs-whole-creator.service.ts",
+      "scope": "XhsWholeCreatorService.confirmKnownResponseAuthReview",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 0,
+      "rationale": "Exact two-row control metadata review uses exclusive coordinator admission and durable incremental SQLite transaction. Original task bytes and all risk fields are retained in the appended audit; exact CAS and rollback preserve history/budgets. It creates no grant, source request, or full database snapshot."
     }
   ]
 }

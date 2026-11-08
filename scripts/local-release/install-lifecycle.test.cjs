@@ -919,6 +919,7 @@ for (const contractPath of [
   for (const baseline of [
     '5e5ffe5139528ae97dfdbee724918ac2d303cc230d05ca473edbfc281179592d',
     'ba87c177ea1b326780392ec19367f732517b0ee42a36b66f9e1c87bb597580f6',
+    'a648104d5726f5f62c8db343720c9807766ecf5fb9e9c4a973d7a0eaec98ace9',
   ]) {
     function exact813Roles() {
       const files = {

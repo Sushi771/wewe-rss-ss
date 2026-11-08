@@ -4520,6 +4520,10 @@ describe('durable synthetic source risk fence', () => {
       body: {},
     }));
     const storage = {
+      policy: jest.fn(async () => ({
+        autoRestore: false,
+        needsReconnect: false,
+      })),
       status: jest.fn(async () => ({ stored: true })),
       load: jest.fn(async () => ({
         a1: 'synthetic-a1',

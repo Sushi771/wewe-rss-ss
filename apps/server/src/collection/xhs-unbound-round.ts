@@ -1,4 +1,9 @@
 import {
+  KNOWN_AUTH_PROFILE_KIND,
+  admitKnownAuthProfile,
+  assertKnownAuthProfileDispatch,
+} from './xhs-known-auth-profile-probe';
+import {
   admitFullHistoryRequest,
   FULL_HISTORY_KIND,
 } from './xhs-full-history-scope';
@@ -256,6 +261,8 @@ export async function admitUnboundRequest(
   check(reviews.length === 1, 'APPROVED_NEW_ROUND_REQUIRED');
   const review = reviews[0],
     scope = JSON.parse(review.scope_json);
+  if (scope.reviewKind === KNOWN_AUTH_PROFILE_KIND)
+    return admitKnownAuthProfile(tx, reviewId, r);
   if (scope.reviewKind === FULL_HISTORY_KIND)
     return admitFullHistoryRequest(tx, reviewId, review, r);
   if (scope.reviewKind === SCHEDULED_ROUND_KIND)
@@ -390,6 +397,11 @@ export async function assertUnboundDispatch(tx: RoundTx) {
     JSON.parse(reviews[0].scope_json).reviewKind === SCHEDULED_ROUND_KIND
   )
     await assertScheduledDispatch(tx, context!.reviewId, r);
+  if (
+    reviews.length === 1 &&
+    JSON.parse(reviews[0].scope_json).reviewKind === KNOWN_AUTH_PROFILE_KIND
+  )
+    await assertKnownAuthProfileDispatch(tx, context!.reviewId, r);
 }
 
 export async function settleUnboundRequest(

@@ -19,7 +19,10 @@ it('reads real millisecond INTEGER approvals and orders 9/10 numerically through
   const db = new PrismaClient({
     datasources: {
       db: {
-        url: 'file:' + path.join(dir, 'synthetic.sqlite').replace(/\\/g, '/'),
+        url:
+          'file:' +
+          path.join(dir, 'synthetic.sqlite').replace(/\\/g, '/') +
+          '?connection_limit=1',
       },
     },
   });
