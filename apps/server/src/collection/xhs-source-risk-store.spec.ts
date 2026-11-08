@@ -93,7 +93,11 @@ describe('durable synthetic source risk fence', () => {
     db = new PrismaClient({
       datasources: {
         db: {
-          url: 'file:' + path.join(folder, 'risk.sqlite').replace(/\\/g, '/'),
+          // Native BEGIN/COMMIT migration statements must share one connection.
+          url:
+            'file:' +
+            path.join(folder, 'risk.sqlite').replace(/\\/g, '/') +
+            '?connection_limit=1',
         },
       },
     });

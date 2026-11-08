@@ -157,7 +157,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
   const finish = async (taskId: string) => {
     for (let i = 0; i < 2000; i++) {
       const t = await service.task({ taskId });
-      if (!['queued', 'running'].includes(t.state)) return t;
+      if (!['queued', 'running'].includes(t.state) && !t.settling) return t;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error('SYNTHETIC_TASK_TIMEOUT');
@@ -1287,10 +1287,18 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     try {
       const first = await service.downloadNotes(request);
       await committed;
-      expect(await finish(first.taskId)).toMatchObject({
+      expect(await service.task(first)).toMatchObject({
         state: 'completed',
         completed: 1,
+        settling: true,
       });
+      let finished = false;
+      const finishing = finish(first.taskId).then((task) => {
+        finished = true;
+        return task;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(finished).toBe(false);
       expect((service as any).pending.has(first.taskId)).toBe(true);
       expect((service as any).controllers.has(first.taskId)).toBe(true);
       await expect(service.downloadNotes(request)).rejects.toThrow(
@@ -1299,6 +1307,10 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       expect(source.detail).toHaveBeenCalledTimes(1);
       release();
       await (service as any).lane;
+      expect(await finishing).toMatchObject({
+        state: 'completed',
+        settling: false,
+      });
       expect((service as any).pending.has(first.taskId)).toBe(false);
       expect((service as any).controllers.has(first.taskId)).toBe(false);
       const repeat = await service.downloadNotes(request);
