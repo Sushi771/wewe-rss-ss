@@ -68,6 +68,13 @@ jobs:
         with:
           node-version: 24.11.1
           cache: pnpm
+      - name: Canonical Windows fixture temp paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $fixtureTemp = node -e "process.stdout.write(require('node:fs').realpathSync.native(require('node:os').tmpdir()))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8 -Value "TEMP=$fixtureTemp", "TMP=$fixtureTemp"
       - name: Exact current-package pin and preserving installer guards
         run: node --test scripts/local-release/install-lifecycle.test.cjs
       - name: Privacy inventory and protected package regressions

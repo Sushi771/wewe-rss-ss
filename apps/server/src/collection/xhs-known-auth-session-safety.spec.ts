@@ -3,8 +3,8 @@ import type { XhsSessionVault } from './xhs-session-vault';
 
 const cookies = { a1: 'synthetic-a1', web_session: 'synthetic-session' };
 function fixture() {
-  let stored = true,
-    policy = { autoRestore: true, needsReconnect: true };
+  let stored = true;
+  const policy = { autoRestore: true, needsReconnect: true };
   const api = jest.fn(async () => {
     throw Error('SOURCE_FORBIDDEN');
   });

@@ -3,7 +3,8 @@ import {
   runKnownAuthProfile,
 } from './xhs-known-auth-profile-probe';
 import { PrismaClient } from '@prisma/client';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readdir } from 'node:fs/promises';
+import { prepareWriterSelf } from '../../../../scripts/local-release/writer-self.fixture.test.cjs';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { sqliteWrites } from './sqlite-write-coordinator';
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
@@ -1333,10 +1334,7 @@ jest.mock('./sqlite-backup', () => ({
   ...jest.requireActual('./sqlite-backup'),
   createVerifiedSqliteBackup: jest.fn(),
 }));
-beforeAll(
-  require('../../../../scripts/local-release/writer-self.fixture.test.cjs')
-    .prepareWriterSelf,
-);
+beforeAll(prepareWriterSelf);
 
 async function profileFixture(now = 400n) {
   runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
@@ -1969,7 +1967,7 @@ it.each([
 ])(
   'one-profile probe saved restore policy drift stays closed: %s',
   async (mode) => {
-    let policy = { autoRestore: true, needsReconnect: false };
+    const policy = { autoRestore: true, needsReconnect: false };
     runtime.onModuleDestroy();
     runtime = new XhsSubscriptionRuntime({
       enabled: () => true,

@@ -51,8 +51,8 @@ function proof(folder) {
   };
 }
 function fixture(run, schema = false) {
-  const base = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'wewe-install-lifecycle-'),
+  const base = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-install-lifecycle-')),
     ),
     root = path.join(base, 'installed'),
     sources = path.join(base, 'sources');

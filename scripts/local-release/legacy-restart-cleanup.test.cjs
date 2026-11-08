@@ -7,19 +7,42 @@ const test = require('node:test'),
 const gate = require('./project-writer-gate.cjs');
 const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
 test.before(require('./writer-self.fixture.test.cjs').prepareWriterSelf);
-const source = fs
-  .readFileSync(path.join(__dirname, 'restart.cjs'), 'utf8')
-  .replace(/\r\n/g, '\n');
-const from = source.indexOf(
-    '      if(newChild){',
-    source.indexOf('} catch (error) {', source.indexOf('const baseline =')),
-  ),
-  to = source.indexOf('    } finally {\n      if (options.rehearsal)', from);
-assert(from > 0 && to > from);
+const source = fs.readFileSync(path.join(__dirname, 'restart.cjs'), 'utf8');
+function extractRestartCatch(value) {
+  const text = value.replace(/\r\n/g, '\n');
+  const baseline = text.indexOf('const baseline =');
+  const caught = text.indexOf('} catch (error) {', baseline);
+  const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
+  const from = opening ? caught + opening.index : -1;
+  const ending = /\}\s*finally\s*\{\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+    text.slice(from),
+  );
+  const to = ending ? from + ending.index : -1;
+  assert(baseline > 0 && caught > baseline && from > caught && to > from);
+  return text.slice(from, to);
+}
 const runCatch = new Function(
   'ctx',
-  'return(async()=>{with(ctx){' + source.slice(from, to) + '}})()',
+  'return(async()=>{with(ctx){' + extractRestartCatch(source) + '}})()',
 );
+test('restart catch extraction tolerates formatting but requires exact orchestration anchors', () => {
+  const expected = extractRestartCatch(source).replace(/\s/g, '');
+  for (const value of [
+    source.replace(/\r?\n/g, '\r\n'),
+    source.replace(/if\s*\(newChild\)\s*\{/, 'if(newChild){'),
+  ])
+    assert.equal(extractRestartCatch(value).replace(/\s/g, ''), expected);
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replace('const baseline =', 'const changedBaseline ='),
+    ),
+  );
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replaceAll('options.rehearsal', 'options.changedRehearsal'),
+    ),
+  );
+});
 for (const kind of [
   'after-stop-backup-failure',
   'bound-candidate-health-failure',
