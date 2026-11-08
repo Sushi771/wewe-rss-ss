@@ -141,18 +141,20 @@ function fixture() {
   };
   return { request, effects, trace, restored };
 }
-test('三角色同schema回退及新增迁移从包哈希推导，不使用历史固定名称', () => {
+test('unreviewed package identities cannot authorize a same-schema rollback or additive migration', () => {
   const r = roles();
-  assert.equal(validateRoles(r), r);
-  assert.deepEqual(
-    expectedPending(r, {
-      integrity: 'ok',
-      applied: ['001_initial'],
-      pending: ['002_tasks'],
-    }),
-    ['002_tasks'],
+  assert.throws(() => validateRoles(r), /RELEASE_EXACT_27_BASELINE_REQUIRED/);
+  assert.throws(
+    () =>
+      expectedPending(r, {
+        integrity: 'ok',
+        applied: ['001_initial'],
+        pending: ['002_tasks'],
+      }),
+    /RELEASE_EXACT_27_BASELINE_REQUIRED/,
   );
 });
+
 test('无helper当前包通过；声明helper但缺文件或版本错拒绝', () => {
   for (const change of [
     (r) => (r.current.manifest.desktopHelperIncluded = true),

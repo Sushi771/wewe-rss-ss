@@ -889,6 +889,11 @@ test('packaged prewrite gates bind identical root and installer dependency bytes
         "'5e5ffe5139528ae97dfdbee724918ac2d303cc230d05ca473edbfc281179592d'",
       ),
     );
+    assert(
+      source.includes(
+        "'ba87c177ea1b326780392ec19367f732517b0ee42a36b66f9e1c87bb597580f6'",
+      ),
+    );
   }
 });
 test.after(() => {
@@ -911,93 +916,97 @@ for (const contractPath of [
     `scripts/local-release/${relative}`,
   );
   const exact813Contract = require(entry);
-  function exact813Roles() {
-    const files = {
-      'runtime/node.exe': '1'.repeat(64),
-      'server/prisma/schema.prisma': '2'.repeat(64),
-    };
-    for (let i = 1; i <= 35; i++)
-      files[
-        `server/prisma/migrations/${String(i).padStart(3, '0')}_synthetic/migration.sql`
-      ] = '3'.repeat(64);
-    const m = {
-      format: 1,
-      id: 'exact-current',
-      schemaCompatibility: 'current',
-      sourceCommit: '1'.repeat(40),
-      sourceHash: '2'.repeat(64),
-      desktopHelperIncluded: false,
-      files,
-      links: {},
-      prisma: {
-        clientVersion: '5.22.0',
-        cliVersion: '5.22.0',
-        engineSha256: '4'.repeat(64),
-        engineCommit: '5'.repeat(40),
-      },
-    };
-    m.migrationContract = exact813Contract.migrationContract(m);
-    const current = {
-      manifest: m,
-      manifestSha256:
-        '5e5ffe5139528ae97dfdbee724918ac2d303cc230d05ca473edbfc281179592d',
-    };
-    const candidate = JSON.parse(JSON.stringify(m));
-    candidate.id = 'exact-candidate';
-    return {
-      current,
-      rollback: JSON.parse(JSON.stringify(current)),
-      candidate: { manifest: candidate, manifestSha256: '8'.repeat(64) },
-    };
-  }
-  test(`${contractPath}: exact 813 admits unchanged 35-migration candidate and pinned rollback`, () => {
-    const r = exact813Roles();
-    assert.equal(exact813Contract.validateRoles(r), r);
-    assert.deepEqual(
-      exact813Contract.expectedPending(r, {
-        integrity: 'ok',
-        applied: Object.keys(
-          exact813Contract.migrationFiles(r.current.manifest),
-        ),
-        pending: [],
-      }),
-      [],
-    );
-  });
-  test(`${contractPath}: exact 813 rejects unknown baseline and different rollback`, () => {
-    for (const kind of ['baseline', 'rollback']) {
-      const r = exact813Roles();
-      if (kind === 'baseline')
-        r.current.manifestSha256 = r.rollback.manifestSha256 = '9'.repeat(64);
-      else {
-        r.rollback.manifest.id = 'other-rollback';
-        r.rollback.manifestSha256 = '9'.repeat(64);
-      }
-      assert.throws(
-        () => exact813Contract.validateRoles(r),
-        /RELEASE_EXACT_27_BASELINE_REQUIRED/,
-      );
-    }
-  });
-  test(`${contractPath}: exact 813 rejects schema, migration and engine changes`, () => {
-    for (const kind of ['schema', 'migration', 'engine']) {
-      const r = exact813Roles(),
-        m = r.candidate.manifest;
-      if (kind === 'schema')
-        m.files['server/prisma/schema.prisma'] = '9'.repeat(64);
-      if (kind === 'migration')
-        m.files['server/prisma/migrations/001_synthetic/migration.sql'] =
-          '9'.repeat(64);
-      if (kind === 'engine') m.prisma.engineCommit = '9'.repeat(40);
+  for (const baseline of [
+    '5e5ffe5139528ae97dfdbee724918ac2d303cc230d05ca473edbfc281179592d',
+    'ba87c177ea1b326780392ec19367f732517b0ee42a36b66f9e1c87bb597580f6',
+  ]) {
+    function exact813Roles() {
+      const files = {
+        'runtime/node.exe': '1'.repeat(64),
+        'server/prisma/schema.prisma': '2'.repeat(64),
+      };
+      for (let i = 1; i <= 35; i++)
+        files[
+          `server/prisma/migrations/${String(i).padStart(3, '0')}_synthetic/migration.sql`
+        ] = '3'.repeat(64);
+      const m = {
+        format: 1,
+        id: 'exact-current',
+        schemaCompatibility: 'current',
+        sourceCommit: '1'.repeat(40),
+        sourceHash: '2'.repeat(64),
+        desktopHelperIncluded: false,
+        files,
+        links: {},
+        prisma: {
+          clientVersion: '5.22.0',
+          cliVersion: '5.22.0',
+          engineSha256: '4'.repeat(64),
+          engineCommit: '5'.repeat(40),
+        },
+      };
       m.migrationContract = exact813Contract.migrationContract(m);
-      assert.throws(
-        () => exact813Contract.validateRoles(r),
-        kind === 'engine'
-          ? /EXACT_35_ENGINE_REQUIRED/
-          : kind === 'schema'
-            ? /RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION/
-            : /RELEASE_HISTORICAL_MIGRATION_CHANGED/,
-      );
+      const current = {
+        manifest: m,
+        manifestSha256: baseline,
+      };
+      const candidate = JSON.parse(JSON.stringify(m));
+      candidate.id = 'exact-candidate';
+      return {
+        current,
+        rollback: JSON.parse(JSON.stringify(current)),
+        candidate: { manifest: candidate, manifestSha256: '8'.repeat(64) },
+      };
     }
-  });
+    test(`${contractPath}: exact ${baseline.slice(0, 8)} admits unchanged 35-migration candidate and pinned rollback`, () => {
+      const r = exact813Roles();
+      assert.equal(exact813Contract.validateRoles(r), r);
+      assert.deepEqual(
+        exact813Contract.expectedPending(r, {
+          integrity: 'ok',
+          applied: Object.keys(
+            exact813Contract.migrationFiles(r.current.manifest),
+          ),
+          pending: [],
+        }),
+        [],
+      );
+    });
+    test(`${contractPath}: exact ${baseline.slice(0, 8)} rejects unknown baseline and different rollback`, () => {
+      for (const kind of ['baseline', 'rollback']) {
+        const r = exact813Roles();
+        if (kind === 'baseline')
+          r.current.manifestSha256 = r.rollback.manifestSha256 = '9'.repeat(64);
+        else {
+          r.rollback.manifest.id = 'other-rollback';
+          r.rollback.manifestSha256 = '9'.repeat(64);
+        }
+        assert.throws(
+          () => exact813Contract.validateRoles(r),
+          /RELEASE_EXACT_27_BASELINE_REQUIRED/,
+        );
+      }
+    });
+    test(`${contractPath}: exact ${baseline.slice(0, 8)} rejects schema, migration and engine changes`, () => {
+      for (const kind of ['schema', 'migration', 'engine']) {
+        const r = exact813Roles(),
+          m = r.candidate.manifest;
+        if (kind === 'schema')
+          m.files['server/prisma/schema.prisma'] = '9'.repeat(64);
+        if (kind === 'migration')
+          m.files['server/prisma/migrations/001_synthetic/migration.sql'] =
+            '9'.repeat(64);
+        if (kind === 'engine') m.prisma.engineCommit = '9'.repeat(40);
+        m.migrationContract = exact813Contract.migrationContract(m);
+        assert.throws(
+          () => exact813Contract.validateRoles(r),
+          kind === 'engine'
+            ? /EXACT_35_ENGINE_REQUIRED/
+            : kind === 'schema'
+              ? /RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION/
+              : /RELEASE_HISTORICAL_MIGRATION_CHANGED/,
+        );
+      }
+    });
+  }
 }
