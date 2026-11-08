@@ -87,6 +87,7 @@ async function withFixture(source, run, aliases = {}, options = {}) {
             'node_modules/@tanstack/react-query',
           ),
           ...aliases,
+          '@web': path.join(web, 'src'),
         },
       },
       logLevel: 'error',

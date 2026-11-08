@@ -52,7 +52,11 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
           await pause(80);
           assert.match(
             await evaluate('document.body.innerText'),
-            /图片补齐失败 1 篇.*MEDIA_RETRY_EXHAUSTED.*图片完整性待确认 1 篇/,
+            /图片补齐失败 1 篇.*图片完整性待确认 1 篇/,
+          );
+          assert.match(
+            await evaluate('document.querySelector("p[role=status]").title'),
+            /MEDIA_RETRY_EXHAUSTED/,
           );
           await evaluate(
             `window.fixture.set({mediaFailure:'IMAGE_REQUEST_BLOCKED'});window.fixture.seed()`,
@@ -60,7 +64,11 @@ createRoot(document.getElementById('root')).render(<QueryClientProvider client={
           await pause(80);
           assert.match(
             await evaluate('document.body.innerText'),
-            /图片补齐暂停.*IMAGE_REQUEST_BLOCKED/,
+            /图片补齐暂停，请查看详情/,
+          );
+          assert.match(
+            await evaluate('document.querySelector("p[role=status]").title'),
+            /IMAGE_REQUEST_BLOCKED/,
           );
           assert.equal(
             await evaluate(
