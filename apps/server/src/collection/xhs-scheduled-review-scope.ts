@@ -670,7 +670,7 @@ function assertContext(reviewId: string, scope: any) {
     'SCHEDULED_CONTEXT_CHANGED',
   );
 }
-export async function scheduledReviewedMarkers(
+export async function scheduledReviewedEvidence(
   tx: RoundTx,
   input: Omit<ScheduledTaskReviewInput, 'sessionBinding' | 'authorId'>,
 ) {
@@ -690,7 +690,18 @@ export async function scheduledReviewedMarkers(
     'SCHEDULED_TASK_BINDING_CHANGED',
   );
   await assertBaseline(tx, s);
-  return s.baseline.fences.map((f: any) => f.id) as string[];
+  check(hash(s.baseline) === s.baselineDigest, 'REVIEW_STATE_CHANGED');
+  // Both views come from the same exact, live-verified retained baseline.
+  // This preserves old unknown receipts without treating them as new work or
+  // exempting a new/changed source request from the global admission fence.
+  return {
+    markers: s.baseline.fences.map((f: any) => f.id) as string[],
+    sourceActives: s.baseline.unknowns.filter((u: any) => u.sourceActive) as {
+      id: string;
+      creatorId: string;
+      sourceActive: unknown;
+    }[],
+  };
 }
 export async function assertScheduledDispatch(
   tx: RoundTx,
