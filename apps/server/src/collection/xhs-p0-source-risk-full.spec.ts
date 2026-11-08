@@ -4531,6 +4531,11 @@ describe('durable synthetic source risk fence', () => {
       body: {},
     }));
     const storage = {
+      // Loading a healthy saved session is allowed; it never clears a 461 fence.
+      policy: jest.fn(async () => ({
+        autoRestore: false,
+        needsReconnect: false,
+      })),
       status: jest.fn(async () => ({ stored: true })),
       load: jest.fn(async () => ({
         a1: 'synthetic-a1',
@@ -4580,7 +4585,23 @@ describe('durable synthetic source risk fence', () => {
     });
     expect(storage.status).not.toHaveBeenCalled();
     enabled = true;
-    await runtime.restoreSession();
+    const policyReadsBeforeRestore = storage.policy.mock.calls.length;
+    expect(await runtime.restoreSession()).toMatchObject({
+      sessionPresent: true,
+      verified: false,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    });
+    expect(storage.policy).toHaveBeenCalledTimes(policyReadsBeforeRestore + 2);
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    await expect(
+      runtime.resolve(
+        'https://www.xiaohongshu.com/user/profile/synthetic-author',
+      ),
+    ).rejects.toThrow('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(
+      await db.$queryRaw`SELECT state,code,http_status,endpoint,owner FROM xhs_source_risk WHERE id='source'`,
+    ).toEqual(rows);
     await runtime.disconnectSession();
     await runtime.connectSession({
       a1: 'synthetic-a1',
