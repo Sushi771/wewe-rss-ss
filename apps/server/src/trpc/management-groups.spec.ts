@@ -111,10 +111,19 @@ describe('single-level platform-scoped management groups (real offline SQLite)',
         path.join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
+      // Native BEGIN/COMMIT must stay on one migration connection. Keep the
+      // business clients and their concurrency coverage on the original URL.
+      const migrationClient = new PrismaClient({
+        datasources: { db: { url: url + '?connection_limit=1' } },
+      });
+      try {
+        for (const statement of splitSqliteStatements(sql)
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await migrationClient.$executeRawUnsafe(statement);
+      } finally {
+        await migrationClient.$disconnect();
+      }
     };
     for (const entry of (await fs.readdir(migrations, { withFileTypes: true }))
       .filter((e) => e.isDirectory())
