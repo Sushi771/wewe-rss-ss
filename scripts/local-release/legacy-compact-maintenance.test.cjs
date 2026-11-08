@@ -7,6 +7,20 @@ const assert = require('node:assert/strict'),
   { once } = require('node:events');
 const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
 
+function extractRestartCatch(value) {
+  const text = value.replace(/\r\n/g, '\n');
+  const baseline = text.indexOf('const baseline =');
+  const caught = text.indexOf('} catch (error) {', baseline);
+  const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
+  const from = opening ? caught + opening.index : -1;
+  const ending = /\}\s*finally\s*\{\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+    text.slice(from),
+  );
+  const to = ending ? from + ending.index : -1;
+  assert(baseline > 0 && caught > baseline && from > caught && to > from);
+  return text.slice(from, to);
+}
+
 async function isolated() {
   const release = __dirname,
     work = process.argv[3],
@@ -254,21 +268,31 @@ async function isolated() {
         port,
         { executable: process.execPath, commandLine: command(port) },
       );
-      const restartSource = fs
-          .readFileSync(path.join(control, 'restart.cjs'), 'utf8')
-          .replace(/\r\n/g, '\n'),
-        from = restartSource.indexOf(
-          '      if(newChild){',
-          restartSource.indexOf('const baseline ='),
-        ),
-        to = restartSource.indexOf(
-          '    } finally {\n      if (options.rehearsal)',
-          from,
+      const restartSource = fs.readFileSync(
+        path.join(control, 'restart.cjs'),
+        'utf8',
+      );
+      const extracted = extractRestartCatch(restartSource);
+      for (const value of [
+        restartSource.replace(/\r?\n/g, '\r\n'),
+        restartSource.replace(/if\s*\(newChild\)\s*\{/, 'if(newChild){'),
+      ])
+        assert.equal(
+          extractRestartCatch(value).replace(/\s/g, ''),
+          extracted.replace(/\s/g, ''),
         );
-      assert(from > 0 && to > from);
+      for (const [anchor, replacement] of [
+        ['const baseline =', 'const changedBaseline ='],
+        ['} catch (error) {', '} catch (changedError) {'],
+        ['newChild', 'changedChild'],
+        ['options.rehearsal', 'options.changedRehearsal'],
+      ])
+        assert.throws(() =>
+          extractRestartCatch(restartSource.replaceAll(anchor, replacement)),
+        );
       const catchRun = new Function(
         'ctx',
-        'return(async()=>{with(ctx){' + restartSource.slice(from, to) + '}})()',
+        'return(async()=>{with(ctx){' + extracted + '}})()',
       );
       const ctx = {
         newChild: candidate,
