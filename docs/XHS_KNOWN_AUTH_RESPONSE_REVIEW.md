@@ -22,7 +22,7 @@ The existing pending natural schedule cannot get ahead of this verification. It 
 
 The finite review identity derives from the original task, original response operation and full original risk, not from a new login time or session binding. Any durable outcome consumes that event: started, response-received, unknown or not-sent. Double clicks, another connection, restart and a lost acknowledgement cannot repeat it. There is no automatic retry.
 
-A later genuinely new authentication failure is a different event, not a retry of the original one. This implementation handles the exact scheduled known-response shape only. A failure of the verification request itself is retained in its own ledger and is **not** automatically converted into another eligible scheduled event after another login. Further recovery for that distinct shape requires a separately reviewed path; historical evidence is never deleted or relabelled to enable it.
+A later genuinely new authentication failure is a different event, not a retry of the original one. This implementation handles the exact scheduled known-response shape only. A failure of the verification request itself is retained in its own ledger and is **not** automatically converted into another eligible scheduled event after another login. Further recovery for that distinct shape requires a separately reviewed path; historical evidence is never deleted or relabelled to enable it. A later scheduled authentication event may also remain blocked by the existing strict check of earlier authentication-task evidence, even when that earlier task has an audit. This release does not add a historical-authentication exemption or promise unlimited automatic recovery after future logins.
 
 ## Failure semantics
 
