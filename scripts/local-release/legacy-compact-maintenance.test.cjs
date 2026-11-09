@@ -295,6 +295,9 @@ async function isolated() {
         'return(async()=>{with(ctx){' + extracted + '}})()',
       );
       const ctx = {
+        confirmFamilyExit: require(path.join(control, 'restart.cjs'))
+          .confirmFamilyExit,
+        sealFamily: require(path.join(control, 'restart.cjs')).sealFamily,
         newChild: candidate,
         ownedIdentities: new Map([
           [
@@ -329,6 +332,13 @@ async function isolated() {
         fallbackChild: undefined,
         start() {
           fallback = startBackend(port);
+          // Match the owned command registration performed by restart.start().
+          ctx.ownedIdentities.set(fallback.pid, {
+            commandLine: controller.launchCommandLine(
+              process.execPath,
+              fallback.spawnargs.slice(1),
+            ),
+          });
           return fallback;
         },
         waitReady: async (_port, c) => started.get(c.pid),

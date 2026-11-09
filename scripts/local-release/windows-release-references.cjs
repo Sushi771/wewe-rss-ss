@@ -106,6 +106,14 @@ function argv(command) {
   }
   return out;
 }
+function consoleInvocation(tokens, executable) {
+  return (
+    tokens.length === 2 &&
+    tokens[0].startsWith('\\??\\') &&
+    same(tokens[0].slice(4), executable) &&
+    /^0x[0-9a-f]{1,16}$/i.test(tokens[1])
+  );
+}
 function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   const result = {
     complete: false,
@@ -125,6 +133,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const controlOnly = buildOnly && !!rootRoles;
     const projectOnly = applicability.projectOnly,
       narrowControl = controlOnly || projectOnly;
+    const processFamily = policy.preservingUpdate?.processFamily?.format === 1;
     const effectScope =
       projectOnly &&
       require('./preserving-contract.cjs').preservingEffectScope(policy);
@@ -241,6 +250,25 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       if (digest(value) !== spec.sha256) fail('REFERENCE_PIN_CHANGED');
       return value;
     }
+    const consoleSpec =
+      processFamily && policy.preservingUpdate.processFamily.consoleHost;
+    let consolePath;
+    if (consoleSpec) {
+      consolePath = canonical(consoleSpec.path);
+      if (
+        process.platform !== 'win32' ||
+        !same(
+          consolePath,
+          path.join(process.env.SystemRoot, 'System32/conhost.exe'),
+        ) ||
+        !Array.isArray(consoleSpec.argv) ||
+        !consoleInvocation(consoleSpec.argv, consolePath) ||
+        hash(identity(fs.lstatSync(consolePath, { bigint: true }))) !==
+          hash(consoleSpec.identity)
+      )
+        fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+      watchPinned(consoleSpec, 256 * 1024 ** 2);
+    }
     if (rootRoles) {
       for (const root of rootRoles.readOnlyRoots)
         if (
@@ -353,16 +381,68 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watchPinned(f);
       }
       watchPinned(l.executable, 256 * 1024 ** 2);
-      if (!same(canonical(l.argv[0]), canonical(l.executable.path)))
+      const fixed = l.packageId !== undefined;
+      if (
+        (!fixed || path.isAbsolute(l.argv[0])) &&
+        !same(canonical(l.argv[0]), canonical(l.executable.path))
+      )
         fail('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED');
-      const ptr = canonical(l.pointerPath);
-      if (!pointers.has(ptr)) fail('REFERENCE_LAUNCHER_POINTER_UNRESOLVED');
+      let ref;
+      if (fixed) {
+        // Runtime invocations bind to immutable packages, not the active pointer.
+        // A bare interpreter name is accepted only as an exact reviewed argv;
+        // the actual process executable must still match its pinned path.
+        if (l.pointerPath !== undefined) fail('REFERENCE_LAUNCHER_INVALID');
+        ref = packages.find((p) => p.packageId === l.packageId);
+        if (!ref || !same(packageAt(l.entry).packagePath, ref.packagePath))
+          fail('REFERENCE_LAUNCHER_INVALID');
+        if (
+          l.parentEntry !== undefined &&
+          !same(packageAt(l.parentEntry).packagePath, ref.packagePath)
+        )
+          fail('REFERENCE_LAUNCHER_INVALID');
+      } else {
+        if (l.parentEntry !== undefined) fail('REFERENCE_LAUNCHER_INVALID');
+        const ptr = canonical(l.pointerPath);
+        if (!pointers.has(ptr)) fail('REFERENCE_LAUNCHER_POINTER_UNRESOLVED');
+        ref = pointers.get(ptr);
+      }
       return {
         ...l,
-        ref: pointers.get(ptr),
+        ref,
+        invocationSha256: fixed ? hash(l) : undefined,
         cwd: canonical(l.workingDirectory),
       };
     });
+    for (const l of launchers.filter((l) => l.packageId !== undefined)) {
+      if (
+        launchers.filter(
+          (p) => p.packageId === l.packageId && same(p.entry, l.entry),
+        ).length !== 1
+      )
+        fail('REFERENCE_LAUNCHER_INVALID');
+      if (l.parentEntry !== undefined) {
+        const parent = launchers.find(
+          (p) => p.packageId === l.packageId && same(p.entry, l.parentEntry),
+        );
+        if (!parent || parent.parentEntry !== undefined)
+          fail('REFERENCE_LAUNCHER_INVALID');
+        l.parentInvocationSha256 = parent.invocationSha256;
+      }
+    }
+    if (processFamily) {
+      for (const id of [
+        policy.preservingUpdate.active.currentId,
+        policy.preservingUpdate.active.candidateId,
+      ]) {
+        if (
+          launchers.filter(
+            (l) => l.packageId === id && l.parentEntry === undefined,
+          ).length !== 1
+        )
+          fail('REFERENCE_LAUNCHER_INVALID');
+      }
+    }
     const harmlessActions = buildOnly ? [] : cfg.harmlessActions || [];
     if (!Array.isArray(harmlessActions) || harmlessActions.length > 64)
       fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
@@ -415,6 +495,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     ) {
       const launch = launchers.find(
         (l) =>
+          (l.packageId === undefined || isProcess) &&
           hash(tokens) === hash(l.argv) &&
           (cwd
             ? same(canonical(cwd), l.cwd)
@@ -434,6 +515,12 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         return [
           {
             ...launch.ref,
+            ...(launch.packageId === undefined
+              ? {}
+              : {
+                  invocationSha256: launch.invocationSha256,
+                  parentInvocationSha256: launch.parentInvocationSha256 || null,
+                }),
             ...(isProcess
               ? {}
               : {
@@ -736,10 +823,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
                   : effectScope.allocations.map((a) => a.path)
               ).map((p) => p.replaceAll('\\', '/').toLowerCase());
             if (
-              tokens.length !== 2 ||
-              !tokens[0].startsWith('\\??\\') ||
-              !same(tokens[0].slice(4), canonical(self.consoleHost.path)) ||
-              !/^0x[0-9a-f]{1,16}$/i.test(tokens[1]) ||
+              !consoleInvocation(tokens, canonical(self.consoleHost.path)) ||
               [p.executable, p.commandLine, p.workingDirectory].some(
                 (t) =>
                   typeof t === 'string' &&
@@ -761,8 +845,58 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         after.delete(pid);
       }
     }
+    if (processFamily) {
+      // Topology only, never unrelated argv or executable paths. Exit confirmation
+      // uses both observations to reject PID reuse and newly orphaned children.
+      result.processTopology = [before, after].flatMap((sample, phase) =>
+        [...sample.values()].map(({ pid, parentPid }) => ({
+          pid,
+          parentPid,
+          phase,
+        })),
+      );
+      result.exitedProcesses = [];
+      result.consoleProcesses = [];
+      result.exitedConsoleProcesses = [];
+    }
+    const consoleRows = new Set();
+    if (consoleSpec) {
+      for (const p of before.values()) {
+        if (
+          !visible(p) ||
+          !same(p.executable, consolePath) ||
+          !consoleInvocation(argv(p.commandLine), consolePath) ||
+          hash(argv(p.commandLine)) !== hash(consoleSpec.argv)
+        )
+          continue;
+        const current = after.get(p.pid);
+        if (current && hash(p) !== hash(current)) continue;
+        const row = {
+          pid: p.pid,
+          parentPid: p.parentPid,
+          startUtc: p.startUtc,
+          executableSha256: consoleSpec.sha256,
+          consoleHost: true,
+          invocationSha256: hash(consoleSpec),
+          identity: hash([
+            p.pid,
+            p.parentPid,
+            p.startUtc,
+            canonical(p.executable),
+            consoleSpec.sha256,
+            p.commandLine,
+          ]),
+        };
+        (current
+          ? result.consoleProcesses
+          : result.exitedConsoleProcesses
+        ).push(row);
+        consoleRows.add(p.pid);
+      }
+    }
     if (!controlOnly) {
       for (const p of before.values()) {
+        if (consoleRows.has(p.pid)) continue;
         if (
           projectOnly &&
           p.pid !== policy.preservingUpdate.active.oldProcess.pid &&
@@ -784,12 +918,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           !refs.some((r) => same(r.packagePath, executableRef.packagePath))
         )
           refs.push(executableRef);
-        if (refs.length) matched.set(p.pid, refs);
+        if (refs.length) {
+          if (processFamily && (refs.length !== 1 || !refs[0].invocationSha256))
+            fail('REFERENCE_PROCESS_FAMILY_UNREVIEWED');
+          matched.set(p.pid, refs);
+        }
       }
       for (let pass = 0; pass < before.size; pass++) {
         let changed = false;
         for (const p of before.values())
           if (!matched.has(p.pid) && matched.has(p.parentPid)) {
+            if (processFamily && !consoleRows.has(p.pid))
+              fail('REFERENCE_PROCESS_FAMILY_UNREVIEWED');
             matched.set(p.pid, matched.get(p.parentPid));
             changed = true;
           }
@@ -798,17 +938,33 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       for (const [pid, refs] of matched) {
         const p = before.get(pid),
           current = after.get(pid);
-        if (projectOnly && (!visible(p) || !visible(current)))
+        if (
+          projectOnly &&
+          (!visible(p) ||
+            (processFamily ? current && !visible(current) : !visible(current)))
+        )
           fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
-        if (!current || hash(p) !== hash(current)) {
+        if (
+          (!current && !processFamily) ||
+          (current && hash(p) !== hash(current))
+        ) {
           result.uncertainChildren.push(pid);
           fail('REFERENCE_PROCESS_CHANGED');
         }
+        if (consoleRows.has(pid)) continue;
         const exe = canonical(p.executable),
           executableSha256 = digest(watch(exe, true, 256 * 1024 ** 2));
         for (const ref of refs)
-          record('processes', ref, {
+          (current
+            ? (detail) => record('processes', ref, detail)
+            : (detail) =>
+                result.exitedProcesses.push({
+                  kind: 'processes',
+                  ...ref,
+                  ...detail,
+                }))({
             pid,
+            ...(processFamily ? { parentPid: p.parentPid } : {}),
             startUtc: p.startUtc,
             executableSha256,
             identity: hash([

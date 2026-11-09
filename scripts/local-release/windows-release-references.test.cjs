@@ -214,14 +214,21 @@ function fixture(run) {
       policy.windowsReferences.compatibilityProof = pin(compatibility);
     },
   };
-  try {
-    run(f);
-  } finally {
+  function clean() {
     assert(
       path.dirname(base) === fs.realpathSync.native(os.tmpdir()) &&
         path.basename(base).startsWith('wewe-reference-adapter-'),
     );
     fs.rmSync(base, { recursive: true, force: true });
+  }
+  try {
+    const result = run(f);
+    if (result?.then) return result.finally(clean);
+    clean();
+    return result;
+  } catch (error) {
+    clean();
+    throw error;
   }
 }
 function reject(f, expected) {
@@ -229,6 +236,222 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+
+test(
+  'native Windows synthetic family uses original identity tools and probe across old new fallback',
+  { skip: process.platform !== 'win32', timeout: 180000 },
+  () =>
+    fixture(async (f) => {
+      const { spawn } = require('node:child_process');
+      const { once } = require('node:events');
+      const {
+        processIdentity,
+        unusedPort,
+        stopOwned,
+      } = require('./switch.cjs');
+      const { launchCommandLine, confirmFamilyExit } = require('./restart.cjs');
+      const families = require('./preserving-process-family.cjs');
+      const c = fixedFamilyFixture(f),
+        port = await unusedPort();
+      const python = fs.realpathSync.native(
+        execFileSync('python', ['-c', 'import sys;print(sys.executable)'], {
+          encoding: 'utf8',
+          windowsHide: true,
+        }).trim(),
+      );
+      const controls = f.native.processesBefore.filter((p) => p.pid >= 99);
+      const oldForce = process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+      process.env.LOCAL_RELEASE_FORCE_POWERSHELL = '1';
+      // Do not compile/cache an identity executable or enumerate unrelated process
+      // argv. Tree reads only the PIDs of these disposable synthetic subprocesses.
+      let child,
+        owned,
+        observedFamily = [];
+      try {
+        for (const id of ['current', 'candidate']) {
+          const launchers = c.launchers.filter((l) => l.packageId === id);
+          for (const l of launchers.slice(1)) {
+            f.write(l.entry, 'import sys\nfor line in sys.stdin:\n    pass\n');
+            l.executable = f.pin(python);
+            l.files = [f.pin(l.entry)];
+          }
+          const root = launchers[0];
+          f.write(
+            root.entry,
+            `const {spawn}=require('node:child_process');\n` +
+              `const children=${JSON.stringify(launchers.slice(1).map((l) => l.argv))}.map(a=>spawn(a[0],a.slice(1),{windowsHide:true,stdio:['pipe','pipe','pipe']}));\n` +
+              `console.log(JSON.stringify(children.map(c=>c.pid)));setInterval(()=>{},1000);\n`,
+          );
+          root.argv[0] = process.execPath;
+          root.executable = f.pin(process.execPath);
+          root.files = [f.pin(root.entry)];
+        }
+        for (const [pointerId, runtimeId] of [
+          ['current', 'current'],
+          ['current', 'candidate'],
+          ['candidate', 'current'],
+        ]) {
+          f.write(f.pointer, { format: 1, id: pointerId });
+          const root = c.launchers.find(
+            (l) => l.packageId === runtimeId && !l.parentEntry,
+          );
+          child = spawn(root.argv[0], root.argv.slice(1), {
+            cwd: f.project,
+            windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          const [ready] = await once(child.stdout, 'data');
+          const pids = JSON.parse(ready.toString());
+          assert.equal(pids.length, 2);
+          owned = processIdentity('OwnedSnapshot', child.pid, port, {
+            executable: process.execPath,
+            commandLine: launchCommandLine(root.argv[0], root.argv.slice(1)),
+          });
+          const observe = (expected = []) => {
+            const sample = () => {
+              const rows = new Map();
+              for (const pid of new Set(
+                expected.length ? expected.map((r) => r.pid) : [child.pid],
+              )) {
+                const fact = processIdentity('Tree', pid, port);
+                assert.equal(fact.complete, true);
+                for (const row of fact.active) {
+                  if (rows.has(row.pid))
+                    assert.deepEqual(rows.get(row.pid), row);
+                  rows.set(row.pid, row);
+                }
+              }
+              return { complete: true, active: [...rows.values()] };
+            };
+            const before = sample();
+            const after = sample();
+            assert.equal(before.complete, true);
+            assert.equal(after.complete, true);
+            if (!f.policy.preservingUpdate.processFamily.consoleHost) {
+              const host = before.active.find(
+                (p) =>
+                  path.basename(p.executable).toLowerCase() === 'conhost.exe',
+              );
+              assert(
+                host,
+                'real Windows fixture must exercise system console descendants',
+              );
+              const at = fs.realpathSync.native(host.executable),
+                stat = fs.lstatSync(at, { bigint: true });
+              f.policy.preservingUpdate.processFamily.consoleHost = {
+                ...f.pin(at),
+                argv: argv(host.commandLine),
+                identity: [
+                  stat.dev,
+                  stat.ino,
+                  stat.size,
+                  stat.birthtimeNs,
+                  stat.mtimeNs,
+                  stat.ctimeNs,
+                ].map(String),
+              };
+            }
+            f.native.processesBefore = [
+              ...before.active,
+              ...structuredClone(controls),
+            ];
+            f.native.processesAfter = [
+              ...after.active,
+              ...structuredClone(controls),
+            ];
+            return families.includeConsoles(f.run(), expected, f.policy);
+          };
+          const initial = observe();
+          assert.deepEqual(
+            initial.errors,
+            [],
+            JSON.stringify(
+              f.native.processesBefore.map((p) => ({
+                pid: p.pid,
+                parent: p.parentPid,
+                exe: path.basename(p.executable),
+                tokens: argv(p.commandLine).map((t) =>
+                  path.isAbsolute(t) ? path.basename(t) : t,
+                ),
+                matches: c.launchers.some(
+                  (l) => hash(l.argv) === hash(argv(p.commandLine)),
+                ),
+              })),
+            ),
+          );
+          const rows = initial.records.filter((r) => r.kind === 'processes');
+          observedFamily = rows;
+          assert.equal(rows.filter((r) => !r.consoleHost).length, 3);
+          assert(rows.some((r) => r.consoleHost));
+          assert.deepEqual(
+            rows
+              .filter((r) => !r.consoleHost)
+              .map((r) => r.pid)
+              .sort(),
+            [child.pid, ...pids].sort(),
+          );
+          families.family(rows, child.pid, runtimeId, f.policy, true);
+          families.admit([], rows, owned, runtimeId, f.policy, false);
+          // Exercise action-time identity refusal on a real owned root before stop.
+          assert.throws(() =>
+            processIdentity('OwnedStop', child.pid, port, {
+              ...owned,
+              startUtc: '2000-01-01T00:00:00Z',
+            }),
+          );
+          assert.equal(
+            processIdentity('OwnedSnapshot', child.pid, port, owned).startUtc,
+            owned.startUtc,
+          );
+          const receipt = processIdentity('OwnedStop', child.pid, port, owned);
+          assert.equal(receipt.stopped, true);
+          const exited = new Set();
+          await confirmFamilyExit(
+            {
+              confirmPreservingProcessExit() {
+                const fact = observe(rows);
+                assert.deepEqual(fact.errors, []);
+                return (
+                  families.remaining(
+                    rows,
+                    fact.records.filter((r) => r.kind === 'processes'),
+                    exited,
+                    fact.processTopology,
+                    fact.exitedProcesses,
+                  ) === 0
+                );
+              },
+            },
+            child.pid,
+            receipt,
+          );
+          assert.equal(exited.size, rows.length);
+          child = undefined;
+          owned = undefined;
+          observedFamily = [];
+        }
+      } finally {
+        if (child) {
+          await stopOwned(child, owned);
+          const deadline = Date.now() + 15000;
+          for (;;) {
+            const active = [
+              ...new Set([child.pid, ...observedFamily.map((r) => r.pid)]),
+            ].flatMap((pid) => processIdentity('Tree', pid, port).active);
+            if (!active.length) break;
+            assert(
+              Date.now() < deadline,
+              'synthetic family cleanup exit timeout',
+            );
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        if (oldForce === undefined)
+          delete process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+        else process.env.LOCAL_RELEASE_FORCE_POWERSHELL = oldForce;
+      }
+    }),
+);
 
 function sameSchemaPair(f) {
   const manifests = f.packages.slice(0, 2).map((pkg, index) => {
@@ -369,6 +592,285 @@ function projectEffectFixture(f) {
   f.run = () => probe(f.policy, f.native, { callerPid: 99, self });
   return self;
 }
+function fixedFamilyFixture(f) {
+  projectEffectFixture(f);
+  f.policy.preservingUpdate.processFamily = { format: 1 };
+  const data = path.join(f.project, 'data.db');
+  f.write(data, 'inert data outside package roots');
+  const launchers = [];
+  for (const pkg of f.packages.slice(0, 2)) {
+    const entry = path.join(pkg.path, 'entry.cjs');
+    for (const [name, executable, args] of [
+      [
+        'entry.cjs',
+        path.join(pkg.path, 'runtime.exe'),
+        ['start', '--database', data],
+      ],
+      ['watch.py', f.worker, ['--database', data, '--event-hints']],
+      [
+        'guard.py',
+        f.worker,
+        [
+          '--database',
+          data,
+          '--backup-root',
+          f.project,
+          '--interval-seconds',
+          '86400',
+        ],
+      ],
+    ]) {
+      const file = path.join(pkg.path, name);
+      if (name !== 'entry.cjs') f.write(file, '# inert synthetic child');
+      launchers.push({
+        packageId: pkg.id,
+        entry: file,
+        ...(name === 'entry.cjs' ? {} : { parentEntry: entry }),
+        argv: [name === 'entry.cjs' ? executable : 'python', file, ...args],
+        executable: f.pin(executable),
+        files: [f.pin(file)],
+        workingDirectory: f.project,
+        cwdIndependent: true,
+      });
+    }
+  }
+  f.policy.windowsReferences.launchers.push(...launchers);
+  const controls = f.native.processesBefore.filter((p) => p.pid >= 99);
+  const set = (id, count = 3) => {
+    const rows = launchers
+      .filter((l) => l.packageId === id)
+      .slice(0, count)
+      .map((l, i) =>
+        f.process(
+          10 + i,
+          i ? 10 : 1,
+          l.executable.path,
+          l.argv.map(quote).join(' '),
+        ),
+      );
+    f.native.processesBefore = [...rows, ...structuredClone(controls)];
+    f.native.processesAfter = structuredClone(f.native.processesBefore);
+    return rows;
+  };
+  set('current');
+  return { set, launchers, data };
+}
+function familyConsoles(f) {
+  const at = fs.realpathSync.native(
+    path.join(process.env.SystemRoot, 'System32/conhost.exe'),
+  );
+  const stat = fs.lstatSync(at, { bigint: true });
+  const spec = {
+    ...f.pin(at),
+    argv: ['\\??\\' + at, '0x4'],
+    identity: [
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.birthtimeNs,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ].map(String),
+  };
+  f.policy.preservingUpdate.processFamily.consoleHost = spec;
+  const host = (pid, parentPid) =>
+    f.process(pid, parentPid, at, spec.argv.map(quote).join(' '));
+  f.native.processesBefore.push(host(13, 11), host(14, 12));
+  f.native.processesAfter = structuredClone(f.native.processesBefore);
+  return { spec, host };
+}
+for (const rootHost of [false, true])
+  test(
+    'family console exact proof permits zero or one root host and retains helper hosts root=' +
+      rootHost,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        const c = familyConsoles(f),
+          families = require('./preserving-process-family.cjs');
+        if (rootHost) f.native.processesBefore.push(c.host(15, 10));
+        f.native.processesAfter = structuredClone(f.native.processesBefore);
+        const fact = families.includeConsoles(f.run(), [], f.policy);
+        assert.deepEqual(fact.errors, []);
+        const rows = fact.records.filter((r) => r.kind === 'processes');
+        families.family(rows, 10, 'current', f.policy, true);
+        assert.equal(rows.length, rootHost ? 6 : 5);
+      }),
+  );
+for (const mutation of [
+  'argument',
+  'executable',
+  'pin',
+  'identity',
+  'duplicate-host',
+  'descendant',
+])
+  test(
+    'family console refuses ' + mutation,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        const c = familyConsoles(f),
+          families = require('./preserving-process-family.cjs');
+        const p = f.native.processesBefore.find((p) => p.pid === 13);
+        if (mutation === 'argument')
+          p.commandLine = p.commandLine.replace('0x4', '0x8');
+        if (mutation === 'executable') p.executable = f.controller;
+        if (mutation === 'pin') c.spec.sha256 = 'a'.repeat(64);
+        if (mutation === 'identity') c.spec.identity[0] = '-1';
+        if (mutation === 'duplicate-host')
+          f.native.processesBefore.push(c.host(15, 11));
+        if (mutation === 'descendant')
+          f.native.processesBefore.push(
+            f.process(15, 13, f.worker, quote(f.worker)),
+          );
+        f.native.processesAfter = structuredClone(f.native.processesBefore);
+        const fact = f.run();
+        if (mutation === 'duplicate-host') {
+          assert.deepEqual(fact.errors, []);
+          const rows = families
+            .includeConsoles(fact, [], f.policy)
+            .records.filter((r) => r.kind === 'processes');
+          assert.throws(() =>
+            families.family(rows, 10, 'current', f.policy, true),
+          );
+        } else assert(fact.errors.length, mutation);
+      }),
+  );
+for (const mutation of ['none', 'reused-exiting-pid', 'late-unknown'])
+  test(
+    'family cross-frame child exit retains full identity and both topologies ' +
+      mutation,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        familyConsoles(f);
+        const families = require('./preserving-process-family.cjs');
+        const initial = families.includeConsoles(f.run(), [], f.policy);
+        assert.deepEqual(initial.errors, []);
+        const rows = initial.records.filter((r) => r.kind === 'processes');
+        f.native.processesBefore = f.native.processesBefore.filter(
+          (p) => p.pid !== 10,
+        );
+        if (mutation === 'reused-exiting-pid')
+          f.native.processesBefore.find((p) => p.pid === 11).startUtc =
+            '2026-02-02T00:00:00Z';
+        f.native.processesAfter = structuredClone(
+          f.native.processesBefore.filter((p) => p.pid !== 11),
+        );
+        if (mutation === 'late-unknown')
+          f.native.processesAfter.push(
+            f.process(15, 11, f.controller, quote(f.controller)),
+          );
+        const fact = families.includeConsoles(f.run(), rows, f.policy);
+        if (mutation === 'late-unknown') {
+          assert.deepEqual(fact.errors, ['REFERENCE_PROCESS_APPEARED']);
+          return;
+        }
+        assert.deepEqual(fact.errors, []);
+        assert.equal(fact.exitedProcesses.length, 1);
+        const check = () =>
+          families.remaining(
+            rows,
+            fact.records.filter((r) => r.kind === 'processes'),
+            new Set(),
+            fact.processTopology,
+            fact.exitedProcesses,
+          );
+        if (mutation === 'none') assert.equal(check(), 3);
+        else assert.throws(check, /FAMILY_CHANGED/);
+      }),
+  );
+test('fixed runtime families retain one package per PID before pointer change and during fallback', () =>
+  fixture((f) => {
+    const c = fixedFamilyFixture(f);
+    for (const [pointerId, runtimeId] of [
+      ['current', 'current'],
+      ['current', 'candidate'],
+      ['candidate', 'candidate'],
+      ['candidate', 'current'],
+    ]) {
+      f.write(f.pointer, { format: 1, id: pointerId });
+      c.set(runtimeId);
+      const r = f.run();
+      assert.deepEqual(r.errors, []);
+      const rows = r.records.filter((r) => r.kind === 'processes');
+      assert.equal(rows.length, 3);
+      assert(rows.every((r) => r.packageId === runtimeId));
+      assert.equal(new Set(rows.map((r) => r.pid)).size, 3);
+      require('./preserving-process-family.cjs').family(
+        rows,
+        10,
+        runtimeId,
+        f.policy,
+        true,
+      );
+      assert(r.records.find((r) => r.kind === 'tasks').viaPointer);
+    }
+  }));
+for (const mutation of [
+  'argv',
+  'data',
+  'entry-pin',
+  'executable-pin',
+  'actual-executable',
+  'unknown-child',
+  'late-child',
+  'pid-reuse',
+  'parent',
+  'dual-binding',
+  'duplicate-entry',
+])
+  test('fixed runtime family refuses ' + mutation, () =>
+    fixture((f) => {
+      const c = fixedFamilyFixture(f);
+      if (mutation === 'argv')
+        f.native.processesBefore[1].commandLine += ' --unknown';
+      if (mutation === 'data')
+        f.native.processesBefore[1].commandLine =
+          f.native.processesBefore[1].commandLine.replace(
+            c.data,
+            c.data + '-other',
+          );
+      if (mutation === 'entry-pin') f.write(c.launchers[1].entry, '# changed');
+      if (mutation === 'executable-pin') f.write(f.worker, 'changed');
+      if (mutation === 'actual-executable')
+        f.native.processesBefore[1].executable = f.controller;
+      if (mutation === 'unknown-child')
+        f.native.processesBefore.push(
+          f.process(15, 10, f.controller, quote(f.controller)),
+        );
+      if (mutation === 'parent') f.native.processesBefore[1].parentPid = 98;
+      if (mutation === 'dual-binding') c.launchers[0].pointerPath = f.pointer;
+      if (mutation === 'duplicate-entry')
+        f.policy.windowsReferences.launchers.push(
+          structuredClone(c.launchers[0]),
+        );
+      f.native.processesAfter = structuredClone(f.native.processesBefore);
+      if (mutation === 'late-child')
+        f.native.processesAfter.push(
+          f.process(15, 10, f.controller, quote(f.controller)),
+        );
+      if (mutation === 'pid-reuse')
+        f.native.processesAfter[1].startUtc = '2026-02-02T00:00:00Z';
+      const r = f.run();
+      if (mutation === 'parent') {
+        assert.deepEqual(r.errors, []);
+        assert.throws(() =>
+          require('./preserving-process-family.cjs').family(
+            r.records.filter((r) => r.kind === 'processes'),
+            10,
+            'current',
+            f.policy,
+            true,
+          ),
+        );
+      } else assert(r.errors.length, mutation);
+    }),
+  );
 function installCallerFixture(f) {
   projectEffectFixture(f);
   f.policy.preservingUpdate.operation = 'install';

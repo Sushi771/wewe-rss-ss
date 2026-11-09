@@ -315,6 +315,513 @@ function effectRestart(f) {
   f.save();
   return s;
 }
+function familyRestart(f) {
+  const s = effectRestart(f),
+    hash = (value) =>
+      crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  f.policy.preservingUpdate.processFamily = { format: 1 };
+  f.policy.windowsReferences.launchers = [];
+  for (const pkg of f.policy.windowsReferences.packages) {
+    fs.mkdirSync(path.join(pkg.path, 'runtime'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pkg.path, 'runtime/node.exe'),
+      'inert family runtime',
+    );
+    const entry = path.join(pkg.path, 'runtime.cjs');
+    for (const name of ['runtime.cjs', 'watch.py', 'guard.py']) {
+      const file = path.join(pkg.path, name),
+        executable = path.join(pkg.path, 'runtime/node.exe');
+      fs.writeFileSync(file, '// inert family entry');
+      f.policy.windowsReferences.launchers.push({
+        packageId: pkg.id,
+        entry: file,
+        ...(name === 'runtime.cjs' ? {} : { parentEntry: entry }),
+        argv: [executable, file, '--database', 'synthetic-only'],
+        executable: { path: executable, sha256: fileHash(executable) },
+        files: [{ path: file, sha256: fileHash(file) }],
+        workingDirectory: pkg.path,
+        cwdIndependent: true,
+      });
+    }
+  }
+  const make = (id, pid) => {
+    const launchers = f.policy.windowsReferences.launchers.filter(
+      (l) => l.packageId === id,
+    );
+    const snapshots = launchers.map((l, index) => ({
+      pid: pid + index,
+      parentPid: index ? pid : 1,
+      startUtc: '2026-01-01T00:00:00Z',
+      executable: l.executable.path,
+      commandLine: l.argv.join(' '),
+    }));
+    const rows = snapshots.map((snapshot, i) => ({
+      kind: 'processes',
+      packageId: id,
+      packagePath: path.dirname(path.dirname(snapshot.executable)),
+      pid: snapshot.pid,
+      parentPid: snapshot.parentPid,
+      startUtc: snapshot.startUtc,
+      executableSha256: fileHash(snapshot.executable),
+      identity: hash([
+        snapshot.pid,
+        snapshot.parentPid,
+        snapshot.startUtc,
+        snapshot.executable,
+        fileHash(snapshot.executable),
+        snapshot.commandLine,
+      ]),
+      invocationSha256: hash(launchers[i]),
+      parentInvocationSha256: i ? hash(launchers[0]) : null,
+    }));
+    return { rows, snapshot: snapshots[0] };
+  };
+  const set = (rows, topology = rows) => {
+    f.facts.records = [
+      ...f.facts.records.filter((r) => r.kind !== 'processes'),
+      ...structuredClone(rows),
+    ];
+    f.facts.processTopology = [0, 1].flatMap((phase) =>
+      topology.map(({ pid, parentPid }) => ({
+        pid,
+        parentPid,
+        phase,
+      })),
+    );
+  };
+  const old = make('current', process.pid);
+  set(old.rows);
+  f.policy.preservingUpdate.active.oldProcess.executableSha256 =
+    old.rows[0].executableSha256;
+  Object.assign(
+    f.policy,
+    scope.inspect([f.installed, f.build], {
+      privateAccounting: 'private-names-v1',
+      preservingUpdate: f.policy.preservingUpdate,
+    }),
+  );
+  f.save();
+  return { ...s, old, make, set };
+}
+test('family parent creation order keeps sub-millisecond precision for helper and console ownership', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      families = require('./preserving-process-family.cjs');
+    const rows = structuredClone(c.old.rows);
+    rows[0].startUtc = '2026-01-01T00:00:00.0000002Z';
+    rows[1].startUtc = '2026-01-01T00:00:00.0000001Z';
+    rows[2].startUtc = '2026-01-01T00:00:00.0000003Z';
+    assert.throws(
+      () => families.family(rows, rows[0].pid, 'current', f.policy, true),
+      /FAMILY_CHANGED/,
+    );
+    rows[1].startUtc = '2026-01-01T00:00:00.0000002Z';
+    families.family(rows, rows[0].pid, 'current', f.policy, true);
+    const spec = { synthetic: 'console' };
+    f.policy.preservingUpdate.processFamily.consoleHost = spec;
+    const host = {
+      ...rows[1],
+      pid: 987999,
+      parentPid: rows[1].pid,
+      consoleHost: true,
+      invocationSha256: crypto
+        .createHash('sha256')
+        .update(JSON.stringify(spec))
+        .digest('hex'),
+      parentInvocationSha256: rows[1].invocationSha256,
+      startUtc: '2026-01-01T00:00:00.0000001Z',
+    };
+    assert.throws(
+      () =>
+        families.family(
+          [...rows, host],
+          rows[0].pid,
+          'current',
+          f.policy,
+          true,
+        ),
+      /FAMILY_CHANGED/,
+    );
+    host.startUtc = rows[1].startUtc;
+    families.family([...rows, host], rows[0].pid, 'current', f.policy, true);
+  }));
+test('family lease confirms staggered exits and admits children only until sealed across candidate and fallback', () =>
+  fixture((f) => {
+    const c = familyRestart(f);
+    scope.within(
+      c.request,
+      (lease) => {
+        lease.preparePreservingProcessFamily(c.old.snapshot);
+        const stopped = { ...c.old.snapshot, stopped: true };
+        c.set(c.old.rows.slice(1));
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          false,
+        );
+        c.set(c.old.rows.slice(2));
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          false,
+        );
+        c.set([]);
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          true,
+        );
+        lease.assertLegacyMaintenanceQuiescent(c.old.snapshot);
+        for (const [id, pid] of [
+          ['candidate', 987641],
+          ['current', 987651],
+        ]) {
+          const family = c.make(id, pid);
+          for (let n = 1; n <= 3; n++) {
+            c.set(family.rows.slice(0, n));
+            lease.bindPreservingChild(
+              family.snapshot,
+              id,
+              family.snapshot.commandLine,
+            );
+          }
+          lease.sealPreservingProcessFamily(
+            family.snapshot,
+            id,
+            family.snapshot.commandLine,
+          );
+          lease.check(true);
+          c.set([]);
+          assert.equal(
+            lease.confirmPreservingProcessExit(pid, {
+              ...family.snapshot,
+              stopped: true,
+            }),
+            true,
+          );
+        }
+      },
+      f.options(),
+    );
+  }));
+for (const mutation of [
+  'unknown-child',
+  'missing-child',
+  'parent',
+  'duplicate',
+  'start',
+  'argv',
+  'child-predates-parent',
+])
+  test('family admission fails before output or callback on ' + mutation, () =>
+    fixture((f) => {
+      const c = familyRestart(f),
+        rows = structuredClone(c.old.rows);
+      if (mutation === 'unknown-child')
+        rows.push({
+          ...rows[1],
+          pid: 987666,
+          invocationSha256: 'f'.repeat(64),
+        });
+      if (mutation === 'missing-child') rows.pop();
+      if (mutation === 'parent') rows[1].parentPid = 987777;
+      if (mutation === 'child-predates-parent')
+        rows[1].startUtc = '2025-12-31T23:59:59.9999999Z';
+      if (mutation === 'duplicate') rows.push({ ...rows[1], pid: 987666 });
+      if (mutation === 'start') rows[0].startUtc += '-changed';
+      if (mutation === 'argv') rows[0].invocationSha256 = 'f'.repeat(64);
+      c.set(rows);
+      let called = false;
+      assert.throws(() =>
+        scope.within(
+          c.request,
+          () => {
+            called = true;
+          },
+          f.options(),
+        ),
+      );
+      assert.equal(called, false);
+      assert.deepEqual(fs.readdirSync(f.build), []);
+    }),
+  );
+for (const mutation of [
+  'pid-reuse',
+  'unknown-orphan',
+  'parent-change',
+  'resurrection',
+])
+  test('family exit refuses ' + mutation, () =>
+    fixture((f) => {
+      const c = familyRestart(f);
+      assert.throws(
+        () =>
+          scope.within(
+            c.request,
+            (lease) => {
+              const receipt = { ...c.old.snapshot, stopped: true };
+              c.set(c.old.rows.slice(1));
+              assert.equal(
+                lease.confirmPreservingProcessExit(receipt.pid, receipt),
+                false,
+              );
+              if (mutation === 'pid-reuse')
+                c.set([], [{ pid: receipt.pid, parentPid: 0 }]);
+              if (mutation === 'unknown-orphan')
+                c.set([], [{ pid: 987888, parentPid: receipt.pid }]);
+              if (mutation === 'parent-change')
+                c.set(
+                  c.old.rows.slice(1).map((r) => ({ ...r, parentPid: 987888 })),
+                );
+              if (mutation === 'resurrection') c.set(c.old.rows);
+              lease.confirmPreservingProcessExit(receipt.pid, receipt);
+            },
+            f.options(),
+          ),
+        mutation === 'resurrection'
+          ? /EXIT_UNCONFIRMED/
+          : /FAMILY_CHANGED|REFERENCES_CHANGED/,
+      );
+    }),
+  );
+test('family startup waits only for absent reviewed helpers and refuses replaced or sealed additions', () =>
+  fixture((f) => {
+    const c = familyRestart(f);
+    scope.within(
+      c.request,
+      (lease) => {
+        c.set([]);
+        lease.confirmPreservingProcessExit(c.old.snapshot.pid, {
+          ...c.old.snapshot,
+          stopped: true,
+        });
+        const next = c.make('candidate', 987641),
+          command = next.snapshot.commandLine;
+        c.set(next.rows.slice(0, 1));
+        lease.bindPreservingChild(next.snapshot, 'candidate', command);
+        assert.equal(
+          lease.sealPreservingProcessFamily(
+            next.snapshot,
+            'candidate',
+            command,
+          ),
+          false,
+        );
+        c.set(next.rows.slice(0, 2));
+        lease.bindPreservingChild(next.snapshot, 'candidate', command);
+        c.set([next.rows[0], { ...next.rows[1], pid: 987999 }]);
+        assert.throws(
+          () => lease.bindPreservingChild(next.snapshot, 'candidate', command),
+          /FAMILY_CHANGED/,
+        );
+        c.set(next.rows);
+        assert.equal(
+          lease.sealPreservingProcessFamily(
+            next.snapshot,
+            'candidate',
+            command,
+          ),
+          true,
+        );
+        c.set([...next.rows, { ...next.rows[1], pid: 987999 }]);
+        assert.throws(
+          () => lease.bindPreservingChild(next.snapshot, 'candidate', command),
+          /FAMILY_CHANGED/,
+        );
+        c.set(next.rows);
+      },
+      f.options(),
+    );
+  }));
+for (const observation of [
+  'late',
+  'missing',
+  'unknown',
+  'reused',
+  'exited',
+  'incomplete',
+])
+  test(
+    'family seal after HTTP readiness handles only reviewed absence: ' +
+      observation,
+    () =>
+      fixture(async (f) => {
+        const c = familyRestart(f),
+          { sealFamily } = require('./restart.cjs');
+        const consoleSpec = {
+          path: 'synthetic-console',
+          sha256: 'a'.repeat(64),
+          identity: ['synthetic'],
+          argv: ['synthetic', '0x4'],
+        };
+        f.policy.preservingUpdate.processFamily.consoleHost = consoleSpec;
+        f.save();
+        await scope.within(
+          c.request,
+          async (lease) => {
+            c.set([]);
+            lease.confirmPreservingProcessExit(c.old.snapshot.pid, {
+              ...c.old.snapshot,
+              stopped: true,
+            });
+            const next = c.make('candidate', 987641),
+              command = next.snapshot.commandLine,
+              partial = next.rows.slice(0, 2);
+            c.set(partial);
+            lease.bindPreservingChild(next.snapshot, 'candidate', command);
+            let clock = 0,
+              waits = 0,
+              calls = 0;
+            const sealed = {
+              sealPreservingProcessFamily(...args) {
+                calls++;
+                return lease.sealPreservingProcessFamily(...args);
+              },
+            };
+            const promise = sealFamily(
+              sealed,
+              next.snapshot,
+              'candidate',
+              command,
+              {
+                now: () => clock,
+                timeoutMs: 250,
+                wait: async (ms) => {
+                  waits++;
+                  clock += ms;
+                  if (observation === 'late') c.set(next.rows);
+                  if (observation === 'unknown')
+                    c.set([
+                      ...partial,
+                      { ...next.rows[2], invocationSha256: 'f'.repeat(64) },
+                    ]);
+                  if (observation === 'reused')
+                    c.set([
+                      next.rows[0],
+                      {
+                        ...next.rows[1],
+                        startUtc: '2026-01-02T00:00:00Z',
+                        identity: 'reused',
+                      },
+                    ]);
+                  if (observation === 'exited') c.set(next.rows.slice(0, 1));
+                  if (observation === 'incomplete')
+                    f.facts.observationComplete = false;
+                },
+              },
+            );
+            if (observation === 'late') {
+              await promise;
+              assert.equal(calls, 2);
+              assert.equal(waits, 1);
+              c.set([...next.rows, { ...next.rows[1], pid: 987999 }]);
+              assert.throws(
+                () =>
+                  lease.sealPreservingProcessFamily(
+                    next.snapshot,
+                    'candidate',
+                    command,
+                  ),
+                /FAMILY_CHANGED/,
+              );
+              // Even an otherwise valid optional console cannot join after seal.
+              const host = {
+                pid: 987998,
+                parentPid: next.rows[1].pid,
+                startUtc: next.rows[1].startUtc,
+                executableSha256: consoleSpec.sha256,
+                consoleHost: true,
+                identity: 'synthetic-console-identity',
+                invocationSha256: crypto
+                  .createHash('sha256')
+                  .update(JSON.stringify(consoleSpec))
+                  .digest('hex'),
+              };
+              c.set(next.rows, [...next.rows, host]);
+              f.facts.consoleProcesses = [host];
+              assert.throws(
+                () =>
+                  lease.sealPreservingProcessFamily(
+                    next.snapshot,
+                    'candidate',
+                    command,
+                  ),
+                /FAMILY_CHANGED/,
+              );
+              f.facts.consoleProcesses = [];
+              c.set(next.rows);
+            } else {
+              await assert.rejects(
+                promise,
+                observation === 'missing'
+                  ? /SEAL_TIMEOUT/
+                  : /FAMILY_CHANGED|REFERENCE/,
+              );
+              assert.equal(waits, observation === 'missing' ? 3 : 1);
+              assert.equal(calls, observation === 'missing' ? 3 : 2);
+              assert.equal(clock, observation === 'missing' ? 250 : 100);
+              c.set(partial);
+              f.facts.observationComplete = true;
+            }
+          },
+          f.options(),
+        );
+      }),
+  );
+test('family lease preserves console ownership after parents exit and validates cross-frame identities', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      hash = (value) =>
+        crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const spec = {
+      path: 'synthetic-system-console',
+      sha256: 'a'.repeat(64),
+      identity: ['synthetic'],
+      argv: ['synthetic', '0x4'],
+    };
+    f.policy.preservingUpdate.processFamily.consoleHost = spec;
+    const hosts = c.old.rows.slice(1).map((row, i) => ({
+      pid: 987881 + i,
+      parentPid: row.pid,
+      startUtc: row.startUtc,
+      executableSha256: spec.sha256,
+      consoleHost: true,
+      invocationSha256: hash(spec),
+      identity: hash(['synthetic-console', i]),
+    }));
+    c.set(c.old.rows, [...c.old.rows, ...hosts]);
+    f.facts.consoleProcesses = hosts;
+    f.save();
+    scope.within(
+      c.request,
+      (lease) => {
+        lease.preparePreservingProcessFamily(c.old.snapshot);
+        const receipt = { ...c.old.snapshot, stopped: true };
+        c.set(c.old.rows.slice(2), [...c.old.rows.slice(2), ...hosts]);
+        f.facts.exitedProcesses = [c.old.rows[1]];
+        f.facts.processTopology.push({
+          pid: c.old.rows[1].pid,
+          parentPid: receipt.pid,
+          phase: 0,
+        });
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          false,
+        );
+        f.facts.exitedProcesses = [];
+        c.set([], [hosts[1]]);
+        f.facts.consoleProcesses = [hosts[1]];
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          false,
+        );
+        c.set([]);
+        f.facts.consoleProcesses = [];
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          true,
+        );
+      },
+      f.options(),
+    );
+  }));
 test('effect restart accounts real audit outputs and rejects old-file or unapproved pointer writes', () =>
   fixture((f) => {
     const s = effectRestart(f),

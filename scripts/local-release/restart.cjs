@@ -52,6 +52,50 @@ function launchCommandLine(executable, args) {
 
 const { loadLegacyMaintenance } = require('./legacy-maintenance-loader.cjs');
 
+async function confirmFamilyExit(
+  lease,
+  pid,
+  receipt,
+  owned,
+  {
+    now = Date.now,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    timeoutMs = 15000,
+  } = {},
+) {
+  const deadline = now() + timeoutMs;
+  while (lease?.confirmPreservingProcessExit?.(pid, receipt, owned) === false) {
+    if (now() >= deadline)
+      throw Error('RELEASE_PRESERVING_PROCESS_EXIT_TIMEOUT');
+    await wait(100);
+  }
+}
+
+async function sealFamily(
+  lease,
+  snapshot,
+  packageId,
+  command,
+  {
+    now = Date.now,
+    wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    timeoutMs = 15000,
+  } = {},
+) {
+  // HTTP listens before the async helper filesystem checks/spawn. This is a
+  // separate admission deadline, not proof that HTTP readiness covers helpers.
+  const deadline = now() + timeoutMs;
+  while (
+    lease?.sealPreservingProcessFamily?.(snapshot, packageId, command) === false
+  ) {
+    const remaining = deadline - now();
+    if (remaining <= 0) throw Error('RELEASE_PRESERVING_PROCESS_SEAL_TIMEOUT');
+    await wait(Math.min(100, remaining));
+    if (now() >= deadline)
+      throw Error('RELEASE_PRESERVING_PROCESS_SEAL_TIMEOUT');
+  }
+}
+
 function commandLine(release, database, port, verifiedManifest) {
   const node = path.join(release, 'runtime/node.exe');
   const manifest = verifiedManifest || verifyRelease(release);
@@ -201,6 +245,15 @@ async function controlledRestartInner(options) {
         'Production control refuses inherited test backup policy',
       );
     loadProductionEnvironment();
+  }
+  // Family admission is read-only and precedes audit allocation, backup or stop.
+  if (preserving?.processFamily && options.production) {
+    const identity = processIdentity('Snapshot', options.expected?.pid, 4000);
+    sameIdentity(identity, { ...options.expected, port: 4000 });
+    assert.equal(identity.commandLine, commandLine(previous, source, 4000));
+    require('./release-scope.cjs')
+      .session()
+      .preparePreservingProcessFamily(identity);
   }
   // Only an older rollback package needs the historical pause marker.
   const artifacts = options.rehearsal
@@ -518,12 +571,11 @@ async function controlledRestartInner(options) {
           scopeLease: require('./release-scope.cjs').session(),
         };
         if (preserving)
-          require('./release-scope.cjs')
-            .session()
-            ?.confirmPreservingProcessExit?.(identity.pid, {
-              pid: identity.pid,
-              stopped: result.stopped === true,
-            });
+          await confirmFamilyExit(
+            require('./release-scope.cjs').session(),
+            identity.pid,
+            result,
+          );
         finalBackup = backup(database, 'after-stop');
         if (!options.legacyMaintenanceCheckpoint)
           require('./project-writer-gate.cjs').retireStoppedWriter(database, {
@@ -652,6 +704,15 @@ async function controlledRestartInner(options) {
       );
       const newIdentity = processIdentity('Snapshot', newChild.pid, port);
       assert.equal(newIdentity.pid, newChild.pid);
+      if (preserving) {
+        const owned = ownedIdentities.get(newChild.pid);
+        await sealFamily(
+          require('./release-scope.cjs').session(),
+          newIdentity,
+          manifest.id,
+          owned.commandLine,
+        );
+      }
       if (rssItems === 20 && manifest.executionLayout === 'compact-cjs-v1')
         recordAcceptance(
           release,
@@ -685,20 +746,41 @@ async function controlledRestartInner(options) {
     } catch (error) {
       if (newChild) {
         const owned = ownedIdentities.get(newChild.pid);
+        let familyError;
+        if (
+          preserving?.processFamily &&
+          owned &&
+          newChild.exitCode === null &&
+          typeof newChild.signalCode !== 'string'
+        ) {
+          try {
+            require('./release-scope.cjs')
+              .session()
+              .bindPreservingChild(
+                owned.identity,
+                owned.packageId,
+                owned.commandLine,
+              );
+          } catch (failure) {
+            familyError = failure;
+          }
+        }
         const receipt = await stopOwned(newChild, owned?.identity);
+        // Cleanup may stop our exact spawned root, but a rejected family must
+        // never be adopted or grant a backup/fallback transition.
+        if (familyError) throw familyError;
         if (preserving)
-          require('./release-scope.cjs')
-            .session()
-            ?.confirmPreservingProcessExit?.(
-              newChild.pid,
-              receipt || {
-                pid: newChild.pid,
-                stopped:
-                  newChild.exitCode !== null ||
-                  typeof newChild.signalCode === 'string',
-              },
-              owned,
-            );
+          await confirmFamilyExit(
+            require('./release-scope.cjs').session(),
+            newChild.pid,
+            receipt || {
+              pid: newChild.pid,
+              stopped:
+                newChild.exitCode !== null ||
+                typeof newChild.signalCode === 'string',
+            },
+            owned,
+          );
         if (owned)
           require('./project-writer-gate.cjs').retireStoppedWriter(database, {
             identity: owned.identity,
@@ -730,6 +812,15 @@ async function controlledRestartInner(options) {
             fallbackChild.pid,
             port,
           );
+          if (preserving) {
+            const owned = ownedIdentities.get(fallbackChild.pid);
+            await sealFamily(
+              require('./release-scope.cjs').session(),
+              fallbackIdentity,
+              previousManifest.id,
+              owned.commandLine,
+            );
+          }
           if (options.production)
             await writeActiveReleaseAsync(previous, { recovery: true });
           const summary = {
@@ -843,4 +934,6 @@ module.exports = {
   requireFreePort,
   loadLegacyMaintenance,
   launchCommandLine,
+  confirmFamilyExit,
+  sealFamily,
 };

@@ -120,6 +120,8 @@ for (const kind of [
           ],
     );
     const ctx = {
+      confirmFamilyExit: require('./restart.cjs').confirmFamilyExit,
+      sealFamily: require('./restart.cjs').sealFamily,
       newChild,
       ownedIdentities,
       oldStopCheckpoint: {
@@ -155,6 +157,8 @@ for (const kind of [
       start() {
         starts++;
         fallbackLease = gate.acquireWriter(database);
+        // The real start() records the owned command before returning its child.
+        ownedIdentities.set(33333, { commandLine: 'synthetic fallback' });
         return { pid: 33333 };
       },
       waitReady: async () => {},

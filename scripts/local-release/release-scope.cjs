@@ -257,7 +257,7 @@ function projectionScan(
     ]),
   };
 }
-function validateReferences(value, policy) {
+function validateReferences(value, policy, allowExits = false) {
   const applicability =
     require('./preserving-contract.cjs').referenceApplicability(policy);
   const { preserving } = applicability;
@@ -297,7 +297,8 @@ function validateReferences(value, policy) {
     !Array.isArray(value.errors) ||
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
-    value.uncertainChildren.length
+    value.uncertainChildren.length ||
+    (!allowExits && value.exitedProcesses?.length)
   )
     throw new Error(
       'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE [' +
@@ -319,7 +320,7 @@ function validateReferences(value, policy) {
     value.compatibility.proofSha256 !== policy.compatibilityProofSha256
   )
     throw new Error('RELEASE_SCOPE_COMPATIBILITY_UNPROVEN');
-  for (const r of value.records) {
+  for (const r of [...value.records, ...(value.exitedProcesses || [])]) {
     if (
       !kinds.includes(r.kind) ||
       typeof r.packageId !== 'string' ||
@@ -361,7 +362,29 @@ function validateReferences(value, policy) {
     )
       throw new Error('RELEASE_SCOPE_PROCESS_IDENTITY_UNCERTAIN');
   }
-  return hash(value);
+  if (
+    policy.preservingUpdate?.processFamily &&
+    (!Array.isArray(value.processTopology) ||
+      value.processTopology.length > 16384 ||
+      value.processTopology.some(
+        (r) =>
+          !Number.isInteger(r.pid) ||
+          r.pid < 0 ||
+          ![0, 1].includes(r.phase) ||
+          !Number.isInteger(r.parentPid) ||
+          r.parentPid < 0,
+      ))
+  )
+    throw Error('RELEASE_SCOPE_PROCESS_IDENTITY_UNCERTAIN');
+  // Unrelated host PID churn is not a reference transition. Topology is used
+  // solely to prove absence of the exact family during an approved stop.
+  return hash({
+    ...value,
+    processTopology: undefined,
+    consoleProcesses: undefined,
+    exitedConsoleProcesses: undefined,
+    exitedProcesses: undefined,
+  });
 }
 function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
@@ -585,6 +608,10 @@ function open(request, options = {}, boundOperation) {
     claim,
     ledgerIdentity;
   let expectedProcesses;
+  const processFamily = preserving?.processFamily?.format === 1;
+  const families = require('./preserving-process-family.cjs');
+  const sealedFamilies = new Set(),
+    stoppingFamilies = new Map();
   const configIdentity = fileIdentity(file);
   // Narrow reviewed binding repair; uses this existing scope lock and never adopts.
   const repairPath =
@@ -1221,17 +1248,24 @@ function open(request, options = {}, boundOperation) {
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
   };
   const query = () => {
-    if (options.query) return options.query();
-    if (!policy.probe || fileHash(policy.probe.path) !== policy.probe.sha256)
+    if (
+      !options.query &&
+      (!policy.probe || fileHash(policy.probe.path) !== policy.probe.sha256)
+    )
       throw new Error('RELEASE_SCOPE_REFERENCE_PROBE_UNAVAILABLE');
-    return JSON.parse(
-      execFileSync(process.execPath, [policy.probe.path, file], {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 30000,
-        maxBuffer: 1024 * 1024,
-      }),
-    );
+    const result = options.query
+      ? options.query()
+      : JSON.parse(
+          execFileSync(process.execPath, [policy.probe.path, file], {
+            encoding: 'utf8',
+            windowsHide: true,
+            timeout: 30000,
+            maxBuffer: 1024 * 1024,
+          }),
+        );
+    return processFamily
+      ? families.includeConsoles(result, expectedProcesses, policy)
+      : result;
   };
   const references = (allowTransition = false) => {
     const value = query();
@@ -1254,6 +1288,14 @@ function open(request, options = {}, boundOperation) {
     }
     if (preserving && preserving.operation !== 'build' && !refs) {
       const a = preserving.active;
+      if (processFamily)
+        families.family(
+          expectedProcesses,
+          a.oldProcess.pid,
+          a.currentId,
+          policy,
+          true,
+        );
       if (
         canonical(a.pointer) !== a.pointer ||
         !policy.roots.some((r) => contains(r.path, a.pointer)) ||
@@ -1670,11 +1712,87 @@ function open(request, options = {}, boundOperation) {
           claimAcquiredAt: legacyClaimAcquiredAt,
         });
       },
+      preparePreservingProcessFamily(snapshot) {
+        if (!processFamily) return;
+        owner();
+        check(true);
+        const rows = families.family(
+          expectedProcesses,
+          snapshot.pid,
+          preserving.active.currentId,
+          policy,
+          true,
+        );
+        families.assertSnapshot(rows[0], snapshot);
+      },
+      sealPreservingProcessFamily(snapshot, packageId, expectedCommand) {
+        if (!processFamily) return;
+        this.bindPreservingChild(snapshot, packageId, expectedCommand);
+        // bind has already validated a complete query and every present member.
+        // Only a reviewed ordinary invocation that has never appeared may wait.
+        if (
+          expectedProcesses.filter((r) => !r.consoleHost).length <
+          policy.windowsReferences.launchers.filter(
+            (l) => l.packageId === packageId,
+          ).length
+        )
+          return false;
+        families.family(
+          expectedProcesses,
+          snapshot.pid,
+          packageId,
+          policy,
+          true,
+        );
+        sealedFamilies.add(snapshot.pid);
+        return true;
+      },
       confirmPreservingProcessExit(pid, receipt, owned) {
         if (!preserving || preserving.operation !== 'restart') return;
         owner();
         if (receipt?.pid !== pid || receipt.stopped !== true)
           throw new Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+        if (processFamily) {
+          const root = expectedProcesses.find((r) => r.pid === pid);
+          if (
+            !root ||
+            (pid !== preserving.active.oldProcess.pid && !root.ownedTransition)
+          )
+            throw Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+          families.assertSnapshot(root, receipt);
+          const rows = families.family(
+            expectedProcesses,
+            pid,
+            root.packageId,
+            policy,
+          );
+          let stopped = stoppingFamilies.get(pid);
+          if (!stopped) {
+            stopped = { rows: structuredClone(rows), exited: new Set() };
+            stoppingFamilies.set(pid, stopped);
+          }
+          const facts = query();
+          validateReferences(facts, policy, true);
+          verifier.assertBudget();
+          const actual = facts.records.filter((r) => r.kind === 'processes');
+          if (actual.some((r) => r.pid === pid))
+            throw Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+          if (
+            families.remaining(
+              stopped.rows,
+              actual,
+              stopped.exited,
+              facts.processTopology,
+              facts.exitedProcesses,
+            )
+          )
+            return false;
+          expectedProcesses = [];
+          stoppingFamilies.delete(pid);
+          if (pid === preserving.active.oldProcess.pid)
+            legacyStopped = Date.now();
+          return true;
+        }
         const known = expectedProcesses.filter((r) => r.pid === pid);
         if (!known.length && owned) {
           const s = owned.identity,
@@ -1734,7 +1852,8 @@ function open(request, options = {}, boundOperation) {
           !Number.isInteger(snapshot.pid) ||
           snapshot.pid < 1 ||
           snapshot.pid === a.oldProcess.pid ||
-          expectedProcesses.some((r) => r.pid === snapshot.pid) ||
+          (!processFamily &&
+            expectedProcesses.some((r) => r.pid === snapshot.pid)) ||
           snapshot.commandLine !== expectedCommand
         )
           throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
@@ -1742,6 +1861,17 @@ function open(request, options = {}, boundOperation) {
         validateReferences(facts, policy);
         verifier.assertBudget();
         const actual = facts.records.filter((r) => r.kind === 'processes');
+        if (processFamily) {
+          expectedProcesses = families.admit(
+            expectedProcesses,
+            actual,
+            snapshot,
+            packageId,
+            policy,
+            sealedFamilies.has(snapshot.pid),
+          );
+          return;
+        }
         const added = actual.filter((r) => r.pid === snapshot.pid);
         const clean = (rows) =>
           rows

@@ -58,6 +58,7 @@ const catalog = {
     'windows-release-references',
     'legacy-maintenance-loader',
     'preserving-contract',
+    'preserving-process-family',
     'private-artifact-proof',
     'updater/legacy-maintenance-adapter',
     'updater/install-binding/restore-identity-binding',
