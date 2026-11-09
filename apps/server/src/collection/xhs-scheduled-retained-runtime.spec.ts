@@ -56,7 +56,9 @@ it.each([false, true])(
     });
     let service: any;
     try {
-      await applyFixtureMigrations(db);
+      await applyFixtureMigrations(
+        'file:' + path.join(dir, 'fixture.sqlite').replace(/\\/g, '/'),
+      );
       const ids = ['a', 'b', 'c'];
       for (const id of ids)
         await db.xhsCreator.create({

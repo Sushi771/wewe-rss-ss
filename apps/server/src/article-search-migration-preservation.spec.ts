@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../test/fixture-migration-connection';
 import { PrismaClient } from '@prisma/client';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
@@ -53,13 +54,19 @@ describe('search migration20 to21 preserves all existing business tables', () =>
         db: { url: 'file:' + join(root, 'synthetic.db').replace(/\\/g, '/') },
       },
     });
-    for (const name of readdirSync(migrations)
-      .filter((n) => /^\d/.test(n) && n !== migration)
-      .sort())
-      for (const statement of splitSqliteStatements(
-        readFileSync(join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        if (statement.trim()) await p.$executeRawUnsafe(statement);
+    await withFixtureMigrationConnection(
+      'file:' + join(root, 'synthetic.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of readdirSync(migrations)
+          .filter((n) => /^\d/.test(n) && n !== migration)
+          .sort())
+          for (const statement of splitSqliteStatements(
+            readFileSync(join(migrations, name, 'migration.sql'), 'utf8'),
+          ))
+            if (statement.trim())
+              await migrationClient.$executeRawUnsafe(statement);
+      },
+    );
     await p.managementGroup.create({
       data: { id: 'group', name: 'Synthetic group', platform: 'wechat' },
     });

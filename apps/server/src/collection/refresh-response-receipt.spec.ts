@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -51,15 +52,20 @@ describe('validated refresh response proof (tiny owned SQLite, no network)', () 
       datasources: { db: { url: 'file:' + database } },
     });
     const directory = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(directory)).sort()) {
-      const sql = await fs
-        .readFile(path.join(directory, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + database,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(directory)).sort()) {
+          const sql = await fs
+            .readFile(path.join(directory, name, 'migration.sql'), 'utf8')
+            .catch(() => '');
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     const feed = await prisma.feed.create({
       data: {
         id,

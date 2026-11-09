@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- CommonJS fixture exports register the existing beforeAll without changing Jest setup order.
@@ -21,13 +22,22 @@ it('defers the actual whole-creator hook under the startup write gate', async ()
   const db = new PrismaService();
   try {
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        await db.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(dir, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
     await db.xhsCreator.create({
       data: {
         id: 'synthetic',

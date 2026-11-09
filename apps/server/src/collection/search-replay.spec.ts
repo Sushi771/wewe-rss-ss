@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -64,14 +65,22 @@ describe('verified search SQLite rehearsal protection (no HTTP)', () => {
       datasources: { db: { url: process.env.DATABASE_URL } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const file = path.join(migrations, name, 'migration.sql');
-      for (const sql of splitSqliteStatements(await fs.readFile(file, 'utf8'))
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      process.env.DATABASE_URL!,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          const file = path.join(migrations, name, 'migration.sql');
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(file, 'utf8'),
+          )
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
     const source = path.join(dir, 'source.db');
     await fs.writeFile(source, 'isolated test source marker');
     await fs.writeFile(

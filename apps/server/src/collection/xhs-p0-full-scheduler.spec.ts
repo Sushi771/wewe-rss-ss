@@ -29,7 +29,7 @@ it.each(['parse', 'restricted', 'unknown'] as const)(
     const deny = jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-    await applyFixtureMigrations(db);
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
     const api = jest.fn(async (request: any) => {
       const note = JSON.parse(request.body).source_note_id;
       if (api.mock.calls.length === 1 && mode === 'unknown')
@@ -208,7 +208,7 @@ it.each(['settled-unknown', 'started-unknown'] as const)(
     const deny = jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-    await applyFixtureMigrations(db);
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
     const creator = 'creator',
       author = 'author',
       oldId = 'old-task',

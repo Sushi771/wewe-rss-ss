@@ -1,0 +1,11 @@
+# SQLite test fixture migration connections
+
+SQLite migrations that contain native BEGIN/COMMIT statements must execute all statements of that migration on one connection. Awaiting statements in sequence on an ordinary Prisma pool does not provide that guarantee.
+
+The test-only withFixtureMigrationConnection helper takes an explicit synthetic fixture URL and the caller's existing migration body. It creates a separate Prisma client with connection_limit=1 and disconnects it in finally. It retains the original path and other URL parameters, accepts an existing unambiguous connection_limit=1, and rejects conflicting or duplicate limits. It does not discover URLs from environment variables or client internals, retry statements, wrap native transactions in Prisma transactions, select migrations, or change production clients.
+
+Callers retain their ordinary business clients and their existing connection settings. Migration order, filters, historical through/after phases, deferred table creation, SQL, seed data and business assertions remain in the caller. The insert-only-cache restoration call continues using its original business receiver. Existing safe single-connection and DatabaseSync fixtures are unchanged.
+
+The audit covered all 258 Server specs, 14 research specs, the e2e spec and all 35 SQLite migrations at the reviewed base. It found 48 direct initialization gaps and six shared-helper callers with the same missing affinity guarantee. One additional shared-helper caller was already single-connection and only needed the explicit URL interface adaptation. Not every source-level gap had failed in CI. Observed setup failures included missing transaction-local rebuild tables and locked databases; the logs do not identify the connection used by each statement.
+
+Regression coverage includes exact URL preservation, invalid/ambiguous URL rejection before connection, callback error propagation, disconnect behavior, and a real isolated SQLite BEGIN/rebuild/COMMIT read from an unchanged ordinary business client. Existing full Server and cross-platform CI suites remain required. This test-only change does not establish production collection recovery or authorize installation.

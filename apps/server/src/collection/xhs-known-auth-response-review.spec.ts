@@ -113,7 +113,11 @@ beforeEach(async () => {
     api,
     profileParser: (_raw, id) => profileResult(id),
   });
-  await applyFixtureMigrations(db);
+  await applyFixtureMigrations(
+    'file:' +
+      path.join(dir, 'fixture.sqlite').replace(/\\/g, '/') +
+      '?connection_limit=1',
+  );
   for (const id of ['a', 'b', 'c'])
     await db.xhsCreator.create({
       data: {

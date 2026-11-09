@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -52,15 +53,20 @@ describe('ordinary collection boundaries on synthetic SQLite', () => {
     database = path.join(root, 'synthetic.db');
     db = new PrismaClient({ datasources: { db: { url: 'file:' + database } } });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await db.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + database,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          const sql = await fs
+            .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+            .catch(() => '');
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
   });
   beforeEach(async () => {
     jest.clearAllMocks();

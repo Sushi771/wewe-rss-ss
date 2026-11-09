@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../test/fixture-migration-connection';
 import { PrismaClient } from '@prisma/client';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,16 +33,24 @@ describe('local body search on actual Prisma SQLite', () => {
         db: { url: 'file:' + join(root, 'test.db').replace(/\\/g, '/') },
       },
     });
-    for (const dir of readdirSync(resolve(__dirname, '../prisma/migrations'))
-      .filter((x) => /^\d/.test(x))
-      .sort())
-      for (const statement of splitSqliteStatements(
-        readFileSync(
-          resolve(__dirname, '../prisma/migrations', dir, 'migration.sql'),
-          'utf8',
-        ),
-      ))
-        if (statement.trim()) await p.$executeRawUnsafe(statement);
+    await withFixtureMigrationConnection(
+      'file:' + join(root, 'test.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const dir of readdirSync(
+          resolve(__dirname, '../prisma/migrations'),
+        )
+          .filter((x) => /^\d/.test(x))
+          .sort())
+          for (const statement of splitSqliteStatements(
+            readFileSync(
+              resolve(__dirname, '../prisma/migrations', dir, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            if (statement.trim())
+              await migrationClient.$executeRawUnsafe(statement);
+      },
+    );
     await p.managementGroup.create({
       data: { id: 'g', name: 'group', platform: 'wechat' },
     });

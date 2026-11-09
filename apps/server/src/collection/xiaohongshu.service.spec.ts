@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -90,10 +91,12 @@ describe('production XHS router/service → additive SQLite and original export 
         path.join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
+      await withFixtureMigrationConnection(url, async (migrationClient) => {
+        for (const statement of splitSqliteStatements(sql)
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await migrationClient.$executeRawUnsafe(statement);
+      });
     };
     for (const name of all.filter(
       (n) =>

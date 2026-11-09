@@ -20,7 +20,7 @@ it('keeps an unknown source outcome closed across another account and runtime re
   const deny = jest
     .spyOn(global, 'fetch')
     .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-  await applyFixtureMigrations(db);
+  await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
   const entries = ['a', 'b'].map((label) => ({
     creator: 'creator-' + label,
     author: 'author-' + label,
@@ -130,7 +130,7 @@ it.each([
     const deny = jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-    await applyFixtureMigrations(db);
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
     const creator = 'creator-b',
       author = 'author-b',
       note = 'note-b',

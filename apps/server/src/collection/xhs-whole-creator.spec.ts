@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import * as incremental from './incremental-write';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { LocalArticleStore, ArticlePreparation } from '../article-local-save';
@@ -38,15 +39,21 @@ describe('whole creator durable offline closure', () => {
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql))
-        await db.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await db.xhsCreator.create({
       data: {
         id: 'creator',

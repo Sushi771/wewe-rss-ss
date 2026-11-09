@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 jest.mock('./sqlite-backup', () => ({ createVerifiedSqliteBackup: jest.fn() }));
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { promises as fs } from 'node:fs';
@@ -85,17 +86,22 @@ it.each(['before-dispatch', 'inflight-detail'] as const)(
     });
     try {
       const migrations = path.resolve(__dirname, '../../prisma/migrations');
-      for (const name of (await fs.readdir(migrations)).sort()) {
-        if (!(await fs.stat(path.join(migrations, name))).isDirectory())
-          continue;
-        for (const sql of splitSqliteStatements(
-          await fs.readFile(
-            path.join(migrations, name, 'migration.sql'),
-            'utf8',
-          ),
-        ))
-          await db.$executeRawUnsafe(sql);
-      }
+      await withFixtureMigrationConnection(
+        'file:' + database.replace(/\\/g, '/'),
+        async (migrationClient) => {
+          for (const name of (await fs.readdir(migrations)).sort()) {
+            if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+              continue;
+            for (const sql of splitSqliteStatements(
+              await fs.readFile(
+                path.join(migrations, name, 'migration.sql'),
+                'utf8',
+              ),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+          }
+        },
+      );
       const bindings = ['a', 'b', 'c'].map((creatorId) => ({
         creatorId,
         jobId: randomUUID(),

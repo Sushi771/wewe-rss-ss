@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
@@ -81,17 +82,23 @@ describe('本机单篇正文重试（隔离SQLite）', () => {
     databaseUrl = `file:${path.join(root, 'test.db').replace(/\\/g, '/')}`;
     prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      databaseUrl,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     collection = new CollectionService(prisma as any);
     (axios.create as jest.Mock).mockReturnValue({
       interceptors: { response: { use: jest.fn() } },

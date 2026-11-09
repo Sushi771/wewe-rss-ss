@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import express from 'express';
 import type { Server } from 'node:http';
 import { XhsRequestBudget } from './xhs-request-budget';
@@ -123,13 +124,22 @@ describe('protected transient original links and durable source budgets (offline
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        await db.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
     await db.xhsCreator.create({
       data: {
         id: creatorId,
