@@ -681,7 +681,12 @@ function open(request, options = {}, boundOperation) {
       };
       if (!hex(repairSha)) reject();
       const preliminary = JSON.parse(bytes(repairPath, repairSha, 65536));
-      if (preliminary.kind === 'adopted-empty-install-caller-binding-repair') {
+      const recoverEmpty =
+        preliminary.kind === 'interrupted-empty-install-claim-recovery';
+      if (
+        recoverEmpty ||
+        preliminary.kind === 'adopted-empty-install-caller-binding-repair'
+      ) {
         const a = preliminary;
         if (
           a.format !== 1 ||
@@ -702,9 +707,10 @@ function open(request, options = {}, boundOperation) {
           !a.reviewEvidence ||
           !Array.isArray(a.priorLedgerIdentity) ||
           a.priorLedgerIdentity.length !== 3 ||
-          !a.launcher ||
-          typeof a.launcher !== 'object' ||
-          Array.isArray(a.launcher)
+          (!recoverEmpty &&
+            (!a.launcher ||
+              typeof a.launcher !== 'object' ||
+              Array.isArray(a.launcher)))
         )
           reject();
         const oldBytes = bytes(a.oldPolicyPath, a.oldPolicySha256),
@@ -728,19 +734,117 @@ function open(request, options = {}, boundOperation) {
         const changes = differences(old, policy).sort(),
           oldLaunchers = old.windowsReferences?.launchers,
           newLaunchers = policy.windowsReferences?.launchers;
+        let recoveredClaim, failureBytes, changedLauncher, releasedLockBytes;
+        const installWriter = path.join(__dirname, 'install-lifecycle.cjs');
+        if (recoverEmpty) {
+          // Only the omitted small-profile timeout and this module's existing
+          // launcher pin may change. No new launchers, probe, roots or budgets.
+          const budget = {
+            profile: 'legacy-stream-v1',
+            checkpointMode: 'full',
+            scanEntries: 100000,
+            operationEntries: 1000000,
+            scanReadBytes: 1073741824,
+            operationReadBytes: 2147483648,
+            durationMs: 300000,
+          };
+          const pin = a.toolBinding,
+            restored = structuredClone(policy);
+          if (
+            Object.hasOwn(old, 'scanBudget') ||
+            !policy.scanBudget ||
+            Object.keys(policy.scanBudget).length !==
+              Object.keys(budget).length ||
+            Object.entries(budget).some(
+              ([k, v]) => policy.scanBudget[k] !== v,
+            ) ||
+            !Array.isArray(oldLaunchers) ||
+            !Array.isArray(newLaunchers) ||
+            !pin ||
+            pin.path !== canonical(__filename) ||
+            !hex(pin.oldSha256) ||
+            !hex(pin.newSha256) ||
+            pin.oldSha256 === pin.newSha256 ||
+            fileHash(pin.path) !== pin.newSha256 ||
+            !hex(a.claimSha256) ||
+            !/^[a-f0-9-]{36}$/.test(a.claimId || '') ||
+            a.failureCode !== 'RELEASE_SCOPE_SCAN_TIME_BUDGET' ||
+            !hex(a.failureEvidenceSha256)
+          )
+            reject();
+          const matches = [];
+          oldLaunchers.forEach((l, i) =>
+            l.files?.forEach((f, j) => {
+              if (f.path === pin.path) matches.push([i, j]);
+            }),
+          );
+          if (matches.length !== 1) reject();
+          const [i, j] = matches[0],
+            nextPin = newLaunchers[i]?.files?.[j];
+          if (
+            oldLaunchers[i].files[j].sha256 !== pin.oldSha256 ||
+            nextPin?.path !== pin.path ||
+            nextPin.sha256 !== pin.newSha256 ||
+            !oldLaunchers[i].pointerPath ||
+            oldLaunchers[i].packageId !== undefined
+          )
+            reject();
+          restored.windowsReferences.launchers[i].files[j].sha256 =
+            pin.oldSha256;
+          delete restored.scanBudget;
+          if (
+            hash(restored) !== hash(old) ||
+            hash(a.allowedDifferences) !==
+              hash([
+                'scanBudget',
+                `windowsReferences.launchers.${i}.files.${j}.sha256`,
+              ])
+          )
+            reject();
+          changedLauncher = {
+            pointer: oldLaunchers[i].pointerPath,
+            oldSha: hash(oldLaunchers[i].files),
+            newSha: hash(newLaunchers[i].files),
+          };
+          const released = a.releasedBuildLock;
+          if (
+            !released ||
+            !Number.isInteger(released.ownerPidDigits) ||
+            released.ownerPidDigits < 1 ||
+            released.ownerPidDigits > 10 ||
+            !hex(released.writerSha256) ||
+            oldLaunchers[i].files.some(
+              (f) =>
+                f.path === installWriter && f.sha256 !== released.writerSha256,
+            )
+          )
+            reject();
+          bytes(installWriter, released.writerSha256);
+          // The old installer charged its own transient lock before open().
+          // This explains only its reviewed byte count, not the former PID/token.
+          releasedLockBytes = Buffer.byteLength(
+            JSON.stringify({
+              pid: 10 ** (released.ownerPidDigits - 1),
+              token: '00000000-0000-0000-0000-000000000000',
+            }),
+          );
+          failureBytes = bytes(a.failureEvidencePath, a.failureEvidenceSha256);
+        }
         if (
-          !Array.isArray(oldLaunchers) ||
-          !Array.isArray(newLaunchers) ||
-          newLaunchers.length !== oldLaunchers.length + 1 ||
-          hash(newLaunchers.slice(0, -1)) !== hash(oldLaunchers) ||
-          hash(newLaunchers.at(-1)) !== hash(a.launcher) ||
-          !Array.isArray(a.allowedDifferences) ||
-          hash(changes) !== hash([...a.allowedDifferences].sort()) ||
-          new Set(a.allowedDifferences).size !== changes.length ||
-          !changes.includes('windowsReferences.launchers') ||
-          changes.some(
-            (k) => !['windowsReferences.launchers', 'probe.sha256'].includes(k),
-          ) ||
+          (!recoverEmpty &&
+            (!Array.isArray(oldLaunchers) ||
+              !Array.isArray(newLaunchers) ||
+              newLaunchers.length !== oldLaunchers.length + 1 ||
+              hash(newLaunchers.slice(0, -1)) !== hash(oldLaunchers) ||
+              hash(newLaunchers.at(-1)) !== hash(a.launcher) ||
+              !Array.isArray(a.allowedDifferences) ||
+              hash(changes) !== hash([...a.allowedDifferences].sort()) ||
+              new Set(a.allowedDifferences).size !== changes.length ||
+              !changes.includes('windowsReferences.launchers') ||
+              changes.some(
+                (k) =>
+                  !['windowsReferences.launchers', 'probe.sha256'].includes(k),
+              ))) ||
           old.scopeId !== policy.scopeId ||
           old.format !== 2 ||
           old.preservingUpdate?.operation !== 'install' ||
@@ -750,7 +854,7 @@ function open(request, options = {}, boundOperation) {
         const origin = bytes(ledger + '.adopted', a.adoptionSha256, 64);
         if (
           origin.toString('utf8') !== a.oldPolicySha256 ||
-          prior.claim !== null ||
+          (!recoverEmpty && prior.claim !== null) ||
           !Array.isArray(prior.outputs) ||
           prior.outputs.length ||
           prior.format !== 2
@@ -790,12 +894,34 @@ function open(request, options = {}, boundOperation) {
           before.digest !== a.priorPayloadDigest ||
           before.payload.format !== 2 ||
           before.payload.configSha !== a.oldPolicySha256 ||
-          before.payload.claim !== null ||
+          (!recoverEmpty && before.payload.claim !== null) ||
           !Array.isArray(before.payload.outputs) ||
           before.payload.outputs.length ||
           before.payload.bindingRepair
         )
           reject();
+        if (recoverEmpty) {
+          recoveredClaim = before.payload.claim;
+          if (
+            !recoveredClaim ||
+            hash(recoveredClaim) !== a.claimSha256 ||
+            recoveredClaim.id !== a.claimId ||
+            recoveredClaim.kind !== 'install' ||
+            recoveredClaim.root !== target ||
+            request.kind !== 'install' ||
+            request.transition ||
+            recoveredClaim.reserveBytes !== request.reserveBytes ||
+            recoveredClaim.runtimeCopies !== request.runtimeCopies ||
+            recoveredClaim.startBytes !==
+              policy.baseline.bytes + releasedLockBytes ||
+            recoveredClaim.startRuntimeCopies !==
+              policy.baseline.runtimeCopies ||
+            !hex(recoveredClaim.refs) ||
+            !Array.isArray(recoveredClaim.outputs) ||
+            recoveredClaim.outputs.length
+          )
+            reject();
+        }
         const approvalBytes = bytes(repairPath, repairSha, 65536);
         const snapshot = Buffer.from(
           JSON.stringify({
@@ -804,18 +930,29 @@ function open(request, options = {}, boundOperation) {
             oldPolicyBase64: oldBytes.toString('base64'),
             newPolicyBase64: nextBytes.toString('base64'),
             approvalBase64: approvalBytes.toString('base64'),
+            ...(recoverEmpty
+              ? { failureEvidenceBase64: failureBytes.toString('base64') }
+              : {}),
           }),
         );
         if (snapshot.length > 4 * 1024 * 1024) reject();
         const after = {
           ...before.payload,
           configSha,
+          ...(recoverEmpty ? { claim: null } : {}),
           bindingRepair: {
             kind: a.kind,
             approvalSha256: repairSha,
             snapshotSha256: digest(snapshot),
             oldPolicySha256: a.oldPolicySha256,
             newPolicySha256: configSha,
+            ...(recoverEmpty
+              ? {
+                  claimId: recoveredClaim.id,
+                  claimSha256: a.claimSha256,
+                  failureEvidenceSha256: a.failureEvidenceSha256,
+                }
+              : {}),
           },
         };
         const replay = prior.configSha === configSha;
@@ -827,7 +964,7 @@ function open(request, options = {}, boundOperation) {
             ))
         )
           reject();
-        const validate = () => {
+        const validate = (observe = false) => {
           owner();
           checkRoots(referenceRoots);
           checkControls((n) => verifier.chargeExternal(n));
@@ -853,8 +990,41 @@ function open(request, options = {}, boundOperation) {
           bytes(a.oldPolicyPath, a.oldPolicySha256);
           bytes(file, configSha);
           bytes(ledger + '.adopted', a.adoptionSha256, 64);
+          if (recoverEmpty) {
+            bytes(a.failureEvidencePath, a.failureEvidenceSha256);
+            bytes(a.toolBinding.path, a.toolBinding.newSha256);
+            bytes(installWriter, a.releasedBuildLock.writerSha256);
+            if (
+              measured.bytes !== policy.baseline.bytes ||
+              measured.runtimeCopies !== recoveredClaim.startRuntimeCopies ||
+              present(path.join(effectScope.container, '.build-budget.lock')) ||
+              present(
+                path.join(
+                  path.dirname(effectScope.container),
+                  '.active-release.lock',
+                ),
+              )
+            )
+              reject();
+            if (observe) {
+              const facts = structuredClone(references().value);
+              // Undo only the reviewed launcher-file hash when comparing the
+              // fresh complete references to the interrupted claim's digest.
+              for (const r of facts.records) {
+                if (
+                  r.viaPointer?.path === changedLauncher.pointer &&
+                  r.viaPointer.launcherSha256 === changedLauncher.newSha
+                )
+                  r.viaPointer.launcherSha256 = changedLauncher.oldSha;
+              }
+              if (validateReferences(facts, old) !== recoveredClaim.refs)
+                reject();
+              // References can be slow: recheck every local guard afterwards.
+              validate(false);
+            }
+          }
         };
-        validate();
+        validate(recoverEmpty);
         if (replay) return;
         options.onBindingRepairStep?.('before-snapshot');
         validate();
@@ -875,7 +1045,7 @@ function open(request, options = {}, boundOperation) {
           }
         }
         options.onBindingRepairStep?.('before-commit');
-        validate();
+        validate(recoverEmpty);
         if (
           !bytes(ledger, a.priorLedgerSha256, 65536).equals(original) ||
           hash(fileIdentity(ledger)) !== hash(a.priorLedgerIdentity)

@@ -3125,3 +3125,485 @@ test('install caller repair: unknown reference remains refused after binding', (
     assert.equal(state.claim, null);
     assert.deepEqual(state.outputs, []);
   }));
+
+function emptyInstallRecoveryFixture(run) {
+  return fixture((f) => {
+    const e = effectInstallScope(f),
+      tool = fs.realpathSync.native(path.join(__dirname, 'release-scope.cjs')),
+      writer = path.join(__dirname, 'install-lifecycle.cjs'),
+      hash = (v) =>
+        crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
+    e.request.reserveBytes = 64 * 1024;
+    for (const p of f.policy.windowsReferences.packages) {
+      fs.mkdirSync(path.join(p.path, 'runtime'), { recursive: true });
+      fs.writeFileSync(
+        path.join(p.path, 'runtime/node.exe'),
+        'inert synthetic runtime',
+      );
+      const manifestPath = path.join(p.path, 'release.json'),
+        manifest = JSON.parse(fs.readFileSync(manifestPath));
+      Object.assign(
+        manifest,
+        {
+          sourceHash: 'e'.repeat(64),
+          platform: process.platform,
+          arch: process.arch,
+        },
+        require('./lib.cjs').fingerprint(p.path),
+      );
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+      f.policy.packageProofs[p.id] = fileHash(manifestPath);
+      f.policy.preservingUpdate.active[p.id + 'ManifestSha256'] =
+        fileHash(manifestPath);
+    }
+    f.policy.windowsReferences.launchers = [
+      {
+        entry: path.join(f.base, 'synthetic-launcher.cjs'),
+        argv: ['synthetic', 'start'],
+        pointerPath: f.policy.preservingUpdate.active.pointer,
+        files: [
+          { path: tool, sha256: 'a'.repeat(64) },
+          { path: writer, sha256: fileHash(writer) },
+        ],
+      },
+    ];
+    const oldLauncher = f.policy.windowsReferences.launchers[0];
+    f.facts.records.push({
+      kind: 'tasks',
+      packageId: 'current',
+      packagePath: f.current,
+      identity: 'synthetic-startup-task',
+      viaPointer: {
+        path: oldLauncher.pointerPath,
+        launcherSha256: hash(oldLauncher.files),
+      },
+    });
+    f.save();
+    const old = structuredClone(f.policy),
+      oldFile = path.join(f.base, 'interrupted-policy.json');
+    fs.copyFileSync(f.config, oldFile);
+    let now = 0;
+    const clock = test.mock.method(performance, 'now', () => now);
+    const lock = path.join(f.installed, '.build-budget.lock');
+    fs.writeFileSync(
+      lock,
+      JSON.stringify({ pid: 12345, token: crypto.randomUUID() }),
+    );
+    assert.equal(fs.statSync(lock).size, 60);
+    try {
+      const lease = scope.open(e.request, f.options());
+      now = 31000;
+      assert.throws(() => lease.check(), /SCAN_TIME_BUDGET/);
+      assert.throws(
+        () => lease.close(Error('original-timeout')),
+        /SCAN_TIME_BUDGET/,
+      );
+    } finally {
+      clock.mock.restore();
+      fs.unlinkSync(lock);
+    }
+    const ledger = path.join(f.base, old.scopeId + '.state.json'),
+      adopted = ledger + '.adopted',
+      prior = JSON.parse(fs.readFileSync(ledger));
+    prior.payload.futureCounter = {
+      used: 7,
+      history: ['failed attempt retained'],
+    };
+    prior.digest = hash(prior.payload);
+    fs.writeFileSync(ledger, JSON.stringify(prior));
+    const original = fs.readFileSync(ledger),
+      origin = fs.readFileSync(adopted),
+      failure = path.join(f.base, 'synthetic-failure.json');
+    fs.writeFileSync(
+      failure,
+      JSON.stringify({
+        outcome: 'UNKNOWN',
+        error: 'RELEASE_SCOPE_SCAN_TIME_BUDGET',
+      }),
+    );
+    const next = structuredClone(old);
+    next.scanBudget = {
+      profile: 'legacy-stream-v1',
+      checkpointMode: 'full',
+      scanEntries: 100000,
+      operationEntries: 1000000,
+      scanReadBytes: 1073741824,
+      operationReadBytes: 2147483648,
+      durationMs: 300000,
+    };
+    next.windowsReferences.launchers[0].files[0].sha256 = fileHash(tool);
+    f.facts.records.at(-1).viaPointer.launcherSha256 = hash(
+      next.windowsReferences.launchers[0].files,
+    );
+    const approval = path.join(f.base, 'empty-install-approval.json'),
+      st = fs.lstatSync(ledger, { bigint: true }),
+      receipt = {
+        format: 1,
+        kind: 'interrupted-empty-install-claim-recovery',
+        scopeId: old.scopeId,
+        registryDirectory: old.registryDirectory,
+        registryIdentity: old.registryIdentity,
+        oldPolicyPath: oldFile,
+        oldPolicySha256: fileHash(oldFile),
+        newPolicySha256: '',
+        priorLedgerSha256: fileHash(ledger),
+        priorPayloadDigest: prior.digest,
+        priorLedgerIdentity: [st.dev, st.ino, st.birthtimeNs].map(String),
+        adoptionSha256: fileHash(adopted),
+        auditedSourceIdentity: 'b'.repeat(64),
+        reviewEvidence: 'synthetic exact empty-claim review',
+        claimId: prior.payload.claim.id,
+        claimSha256: hash(prior.payload.claim),
+        failureCode: 'RELEASE_SCOPE_SCAN_TIME_BUDGET',
+        failureEvidencePath: failure,
+        failureEvidenceSha256: fileHash(failure),
+        releasedBuildLock: {
+          ownerPidDigits: 5,
+          writerSha256: fileHash(writer),
+        },
+        allowedDifferences: [
+          'scanBudget',
+          'windowsReferences.launchers.0.files.0.sha256',
+        ],
+        toolBinding: {
+          path: tool,
+          oldSha256: 'a'.repeat(64),
+          newSha256: fileHash(tool),
+        },
+      };
+    const save = () => {
+      fs.writeFileSync(f.config, JSON.stringify(next));
+      receipt.newPolicySha256 = fileHash(f.config);
+      fs.writeFileSync(approval, JSON.stringify(receipt));
+    };
+    save();
+    const options = () => ({
+      ...f.options(),
+      bindingRepairFile: approval,
+      bindingRepairSha256: fileHash(approval),
+    });
+    run({
+      f,
+      e,
+      old,
+      next,
+      oldFile,
+      receipt,
+      save,
+      options,
+      ledger,
+      adopted,
+      approval,
+      original,
+      origin,
+      prior,
+      failure,
+      hash,
+      open: (extra) => scope.open(e.request, { ...options(), ...extra }),
+    });
+  });
+}
+test('empty install recovery: real timeout keeps original claim and reviewed recovery preserves evidence', () =>
+  emptyInstallRecoveryFixture((x) => {
+    assert.throws(() =>
+      scope.open(x.e.request, {
+        ...x.options(),
+        bindingRepairFile: '',
+        bindingRepairSha256: '',
+      }),
+    );
+    x.open().close();
+    const d = JSON.parse(fs.readFileSync(x.ledger)).payload,
+      snapshot = JSON.parse(
+        fs.readFileSync(
+          x.ledger + '.binding-repair-' + fileHash(x.approval) + '.json',
+        ),
+      );
+    assert.equal(d.claim, null);
+    assert.deepEqual(d.outputs, []);
+    assert.deepEqual(d.futureCounter, x.prior.payload.futureCounter);
+    assert.equal(d.bindingRepair.claimId, x.prior.payload.claim.id);
+    assert(Buffer.from(snapshot.ledgerBase64, 'base64').equals(x.original));
+    assert(
+      Buffer.from(snapshot.oldPolicyBase64, 'base64').equals(
+        fs.readFileSync(x.oldFile),
+      ),
+    );
+    assert(
+      Buffer.from(snapshot.failureEvidenceBase64, 'base64').equals(
+        fs.readFileSync(x.failure),
+      ),
+    );
+    assert(fs.readFileSync(x.adopted).equals(x.origin));
+    const saved = fs.readFileSync(x.ledger);
+    x.open().close();
+    assert(fs.readFileSync(x.ledger).equals(saved));
+  }));
+for (const mutation of [
+  'unknown claim',
+  'claim output',
+  'ledger output',
+  'claim kind',
+  'claim root',
+  'claim reserve',
+  'claim runtime',
+  'claim start',
+  'prior repair',
+  'ledger identity',
+  'adoption',
+  'evidence',
+  'allocation',
+  'active lock',
+  'build lock',
+  'unknown references',
+  'process tick',
+  'task identity',
+  'pointer reference',
+  'unrelated launcher hash',
+  'tool pin',
+  'other launcher field',
+  'probe',
+  'budget bytes',
+  'budget entries',
+  'budget duration',
+  'metadata checkpoint',
+  'implicit profile limits',
+  'missing lock accounting',
+  'wrong lock width',
+  'unbounded lock width',
+  'changed lock writer',
+])
+  test('empty install recovery: rejects ' + mutation, () =>
+    emptyInstallRecoveryFixture((x) => {
+      if (
+        mutation.startsWith('claim ') ||
+        mutation === 'ledger output' ||
+        mutation === 'unknown claim' ||
+        mutation === 'prior repair'
+      ) {
+        const d = JSON.parse(fs.readFileSync(x.ledger));
+        if (mutation === 'unknown claim')
+          d.payload.claim.id = crypto.randomUUID();
+        if (mutation === 'claim output')
+          d.payload.claim.outputs.push(x.e.target);
+        if (mutation === 'ledger output')
+          d.payload.outputs.push({ path: x.e.target });
+        if (mutation === 'claim kind') d.payload.claim.kind = 'build';
+        if (mutation === 'claim root') d.payload.claim.root = x.f.build;
+        if (mutation === 'claim reserve') d.payload.claim.reserveBytes++;
+        if (mutation === 'claim runtime') d.payload.claim.runtimeCopies++;
+        if (mutation === 'claim start') d.payload.claim.startBytes++;
+        if (mutation === 'prior repair')
+          d.payload.bindingRepair = { unknown: true };
+        d.digest = x.hash(d.payload);
+        fs.writeFileSync(x.ledger, JSON.stringify(d));
+        x.receipt.priorLedgerSha256 = fileHash(x.ledger);
+        x.receipt.priorPayloadDigest = d.digest;
+        // Even reviewing changed bytes cannot admit a nonempty or wrong-kind claim.
+        if (mutation !== 'unknown claim')
+          x.receipt.claimSha256 = x.hash(d.payload.claim);
+      }
+      if (mutation === 'ledger identity')
+        x.receipt.priorLedgerIdentity[1] = '999';
+      if (mutation === 'adoption') fs.writeFileSync(x.adopted, '0'.repeat(64));
+      if (mutation === 'evidence') fs.appendFileSync(x.failure, 'changed');
+      if (mutation === 'allocation') fs.mkdirSync(x.e.target);
+      if (mutation === 'active lock')
+        fs.writeFileSync(
+          path.join(path.dirname(x.f.installed), '.active-release.lock'),
+          'busy',
+        );
+      if (mutation === 'build lock')
+        fs.writeFileSync(
+          path.join(x.f.installed, '.build-budget.lock'),
+          'busy',
+        );
+      if (mutation === 'unknown references')
+        x.f.facts.observationComplete = false;
+      if (mutation === 'process tick')
+        x.f.facts.records[0].startUtc += 'changed';
+      if (mutation === 'task identity')
+        x.f.facts.records.at(-1).identity += 'changed';
+      if (mutation === 'pointer reference')
+        x.f.facts.records.at(-1).viaPointer.path = x.f.config;
+      if (mutation === 'unrelated launcher hash')
+        x.f.facts.records.at(-1).viaPointer.launcherSha256 = 'c'.repeat(64);
+      if (mutation === 'tool pin')
+        x.next.windowsReferences.launchers[0].files[0].sha256 = 'c'.repeat(64);
+      if (mutation === 'other launcher field')
+        x.next.windowsReferences.launchers[0].argv.push('extra');
+      if (mutation === 'probe') x.next.probe = { path: 'different' };
+      if (mutation === 'budget bytes') x.next.scanBudget.scanReadBytes++;
+      if (mutation === 'budget entries') x.next.scanBudget.operationEntries++;
+      if (mutation === 'budget duration') x.next.scanBudget.durationMs++;
+      if (mutation === 'metadata checkpoint')
+        x.next.scanBudget.checkpointMode = 'identity-times-v1';
+      if (mutation === 'implicit profile limits')
+        delete x.next.scanBudget.operationReadBytes;
+      if (mutation === 'missing lock accounting')
+        delete x.receipt.releasedBuildLock;
+      if (mutation === 'wrong lock width')
+        x.receipt.releasedBuildLock.ownerPidDigits = 4;
+      if (mutation === 'unbounded lock width')
+        x.receipt.releasedBuildLock.ownerPidDigits = 11;
+      if (mutation === 'changed lock writer')
+        x.receipt.releasedBuildLock.writerSha256 = 'c'.repeat(64);
+      x.save();
+      const before = fs.readFileSync(x.ledger);
+      assert.throws(() => x.open());
+      assert(fs.readFileSync(x.ledger).equals(before));
+    }),
+  );
+for (const stage of ['before-snapshot', 'before-commit', 'after-commit'])
+  test('empty install recovery: interruption ' + stage, () =>
+    emptyInstallRecoveryFixture((x) => {
+      assert.throws(
+        () =>
+          x.open({
+            onBindingRepairStep: (s) => {
+              if (s === stage) throw Error('interrupted');
+            },
+          }),
+        /BINDING_REPAIR/,
+      );
+      const d = JSON.parse(fs.readFileSync(x.ledger));
+      assert.equal(d.digest, x.hash(d.payload));
+      if (stage !== 'after-commit')
+        assert(fs.readFileSync(x.ledger).equals(x.original));
+      else assert.equal(d.payload.claim, null);
+      x.open().close();
+      assert(fs.readFileSync(x.adopted).equals(x.origin));
+    }),
+  );
+test('empty install recovery: concurrent owner refused and late new output remains held', () =>
+  emptyInstallRecoveryFixture((x) => {
+    assert.throws(() =>
+      x.open({
+        onBindingRepairStep: (s) => {
+          if (s !== 'before-commit') return;
+          assert.throws(() => x.open(), /EEXIST/);
+          fs.mkdirSync(x.e.target);
+        },
+      }),
+    );
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+    assert(fs.existsSync(x.e.target));
+  }));
+test('empty install recovery: same receipt cannot recover a newly interrupted install', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const lease = x.open();
+    const nextClaim = JSON.parse(fs.readFileSync(x.ledger)).payload.claim.id;
+    assert.notEqual(nextClaim, x.receipt.claimId);
+    x.f.facts.observationComplete = false;
+    assert.throws(() => lease.close(Error('new failure')));
+    x.f.facts.observationComplete = true;
+    const held = fs.readFileSync(x.ledger);
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert(fs.readFileSync(x.ledger).equals(held));
+  }));
+for (const mutation of ['ledger', 'active lock', 'build lock', 'allocation'])
+  test(
+    'empty install recovery: rejects late ' +
+      mutation +
+      ' during precommit query',
+    () =>
+      emptyInstallRecoveryFixture((x) => {
+        let queries = 0,
+          lateLedger;
+        assert.throws(() =>
+          x.open({
+            query: () => {
+              if (++queries === 2) {
+                if (mutation === 'ledger') {
+                  const d = JSON.parse(fs.readFileSync(x.ledger));
+                  d.payload.futureCounter.used++;
+                  d.digest = x.hash(d.payload);
+                  fs.writeFileSync(x.ledger, JSON.stringify(d));
+                  lateLedger = fs.readFileSync(x.ledger);
+                }
+                if (mutation === 'active lock')
+                  fs.writeFileSync(
+                    path.join(
+                      path.dirname(x.f.installed),
+                      '.active-release.lock',
+                    ),
+                    'busy',
+                  );
+                if (mutation === 'build lock')
+                  fs.writeFileSync(
+                    path.join(x.f.installed, '.build-budget.lock'),
+                    'busy',
+                  );
+                if (mutation === 'allocation') fs.mkdirSync(x.e.target);
+              }
+              return structuredClone(x.f.facts);
+            },
+          }),
+        );
+        assert.equal(queries, 2);
+        assert(fs.readFileSync(x.ledger).equals(lateLedger || x.original));
+        assert(fs.readFileSync(x.adopted).equals(x.origin));
+      }),
+  );
+test('empty install recovery: partial snapshot is held, never overwritten or replayed', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const at = x.ledger + '.binding-repair-' + fileHash(x.approval) + '.json';
+    fs.writeFileSync(at, 'incomplete snapshot');
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert.equal(fs.readFileSync(at, 'utf8'), 'incomplete snapshot');
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+  }));
+test('empty install recovery: normal output registration resumes without a second copy allowance', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const lease = x.open();
+    lease.registerOutput(x.e.target);
+    fs.mkdirSync(x.e.target);
+    lease.createdOutput(x.e.target);
+    fs.writeFileSync(path.join(x.e.target, 'node.exe'), 'inert runtime');
+    lease.close();
+    const state = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    assert.equal(state.claim, null);
+    assert.equal(state.outputs.length, 1);
+    assert(state.outputs[0].complete);
+    const saved = fs.readFileSync(x.ledger);
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert(fs.readFileSync(x.ledger).equals(saved));
+  }));
+test('empty install recovery: explicit lease feeds normal installPair with nine complete queries', () =>
+  emptyInstallRecoveryFixture((x) => {
+    let queries = 0;
+    const lease = x.open({
+      query: () => {
+        queries++;
+        return structuredClone(x.f.facts);
+      },
+    });
+    const candidate = path.join(x.f.build, 'candidate'),
+      proof = (root) => ({
+        sourceCommit: JSON.parse(
+          fs.readFileSync(path.join(root, 'release.json')),
+        ).sourceCommit,
+        manifestSha256: fileHash(path.join(root, 'release.json')),
+      });
+    const result = require('./install-lifecycle.cjs').installPair(
+      x.f.installed,
+      {
+        current: 'current',
+        candidate,
+        rollback: x.f.current,
+        proofs: {
+          current: proof(x.f.current),
+          candidate: proof(candidate),
+          rollback: proof(x.f.current),
+        },
+      },
+      { scope: lease },
+    );
+    assert.deepEqual(result.installedIds, ['candidate']);
+    assert.equal(queries, 9);
+    assert(!fs.existsSync(path.join(x.f.installed, '.build-budget.lock')));
+    const saved = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    assert.equal(saved.claim, null);
+    assert(saved.outputs[0].complete);
+    assert(fs.readFileSync(x.adopted).equals(x.origin));
+  }));
