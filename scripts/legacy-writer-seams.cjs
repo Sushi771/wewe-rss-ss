@@ -2,12 +2,37 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const seams = require('./fixtures/legacy-writer-seams.json');
 const installed = require('./fixtures/installed-writer-compat.json');
+const runtimeFamilies = require('./fixtures/runtime-family-compat.json');
 const sha = (source) =>
   crypto.createHash('sha256').update(source).digest('hex');
 function restoreCompatible(file, source) {
   const reviewed = installed[file];
   if (!reviewed) return source;
   if (sha(source) === reviewed.beforeSha256) return source;
+  const family = runtimeFamilies[file];
+  if (family && sha(source) !== reviewed.afterSha256) {
+    // Invert only the reviewed 52a34b1 installer-family delta. Both complete
+    // sources stay pinned; all earlier compatibility and admission pins remain.
+    assert.equal(family.beforeSha256, reviewed.afterSha256);
+    assert.equal(
+      sha(source),
+      family.afterSha256,
+      'exact candidate legacy writer seam: reviewed runtime family source',
+    );
+    for (const hunk of family.hunks) {
+      assert.equal(
+        source.split(hunk.after).length,
+        2,
+        'exact candidate legacy writer seam: runtime family hunk',
+      );
+      source = source.replace(hunk.after, hunk.before);
+    }
+    assert.equal(
+      sha(source),
+      family.beforeSha256,
+      'exact candidate legacy writer seam: unchanged pre-family source',
+    );
+  }
   if (
     file === 'scripts/local-release/runtime.cjs' &&
     sha(source) !== reviewed.afterSha256

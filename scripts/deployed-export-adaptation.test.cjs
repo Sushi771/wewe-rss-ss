@@ -44,6 +44,76 @@ test('approved startup and retired Mp2RSS inverses reject unrelated writer chang
   }
 });
 
+test('reviewed runtime family inverse preserves every historical pin and rejects changed new or old gates', () => {
+  const fixtures = require('./fixtures/runtime-family-compat.json'),
+    installed = require('./fixtures/installed-writer-compat.json'),
+    file = 'scripts/local-release/restart.cjs';
+  assert.deepEqual(Object.keys(fixtures), [file]);
+  const reviewed = fixtures[file],
+    source = read(file);
+  assert.equal(
+    reviewed.reviewedFromCommit,
+    '8fb806a54d415fc779881cee93fe7f3035dec385',
+  );
+  assert.equal(
+    reviewed.reviewedThroughCommit,
+    '52a34b16475728fbbd98b50db90cc339cd54270f',
+  );
+  assert.equal(hash(source), reviewed.afterSha256);
+  assert.equal(reviewed.beforeSha256, installed[file].afterSha256);
+  assert.equal(reviewed.hunks.length, 7);
+  let precursor = source;
+  for (const hunk of reviewed.hunks) {
+    assert.equal(precursor.split(hunk.after).length, 2);
+    precursor = precursor.replace(hunk.after, hunk.before);
+    assert.equal(source.split(hunk.after).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restoreCompatible(
+          file,
+          source.replace(
+            hunk.after,
+            '/* changed reviewed runtime family hunk */',
+          ),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+  assert.equal(hash(precursor), installed[file].afterSha256);
+  const restored = restoreLegacyWriter.restoreCompatible(file, source);
+  assert.equal(
+    restored,
+    restoreLegacyWriter.restoreCompatible(file, precursor),
+  );
+  assert.equal(hash(restored), installed[file].beforeSha256);
+  for (const [before, after] of [
+    [
+      '.preparePreservingProcessFamily(identity);',
+      '.preparePreservingProcessFamily(undefined);',
+    ],
+    [
+      'if (familyError) throw familyError;',
+      'if (familyError) void familyError;',
+    ],
+    [
+      'assert.equal(result.stopped, true);',
+      'assert.equal(result.stopped, false);',
+    ],
+    ["'PROJECT_WRITER_BOUNDARY_UNPROVEN'", "'BYPASSED_WRITER_BOUNDARY'"],
+    ['timeoutMs = 15000,', 'timeoutMs = Infinity,'],
+  ]) {
+    assert(source.includes(before));
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restoreCompatible(
+          file,
+          source.replace(before, after),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+});
+
 test('metadata-only exclusion inverse cannot hide changed new or historical writer gates', () => {
   const file = 'apps/server/src/collection/sqlite-write-coordinator.ts';
   const source = read(file);
