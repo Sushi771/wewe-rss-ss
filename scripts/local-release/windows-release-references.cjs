@@ -114,7 +114,11 @@ function consoleInvocation(tokens, executable) {
     /^0x[0-9a-f]{1,16}$/i.test(tokens[1])
   );
 }
-function probe(policy, native, { callerPid = process.ppid, self } = {}) {
+function probe(
+  policy,
+  native,
+  { callerPid = process.ppid, self, recovery } = {},
+) {
   const result = {
     complete: false,
     categories: Object.fromEntries(kinds.map((k) => [k, false])),
@@ -1226,7 +1230,249 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     const ledgerFile = prefix + '.state.json',
       ledger = envelope(ledgerFile);
-    if (ledger.configSha !== lock.configSha || !Array.isArray(ledger.outputs))
+    if (recovery !== undefined) {
+      // Read-only bridge for the exact old claim while the same controller owns
+      // the new-policy lock. Ordinary observations still require all three pins.
+      const refuse = () => fail('REFERENCE_INFLIGHT_STATE_INVALID');
+      const checked = (at, wanted, limit = 1024 * 1024) => {
+        if (
+          !hex(wanted) ||
+          canonical(at) !== at ||
+          require('./scope-inventory.cjs').isPrivatePath(at)
+        )
+          refuse();
+        const s = fs.lstatSync(at, { bigint: true });
+        if (s.nlink !== 1n) refuse();
+        const raw = watch(at, true, limit);
+        if (digest(raw) !== wanted) refuse();
+        return raw;
+      };
+      if (
+        !recovery ||
+        Object.keys(recovery).sort().join(',') !==
+          'approvalPath,approvalSha256,lockSha256,policyPath' ||
+        !hex(recovery.lockSha256) ||
+        digest(lockRaw) !== recovery.lockSha256 ||
+        ledger.configSha === lock.configSha ||
+        !projectOnly ||
+        policy.format !== 2 ||
+        policy.preservingUpdate.operation !== 'install'
+      )
+        refuse();
+      const a = JSON.parse(
+        checked(recovery.approvalPath, recovery.approvalSha256, 65536),
+      );
+      if (
+        !a ||
+        hash(Object.keys(a).sort()) !==
+          hash(
+            [
+              'format',
+              'kind',
+              'scopeId',
+              'registryDirectory',
+              'registryIdentity',
+              'oldPolicyPath',
+              'oldPolicySha256',
+              'newPolicySha256',
+              'priorLedgerSha256',
+              'priorPayloadDigest',
+              'priorLedgerIdentity',
+              'adoptionSha256',
+              'auditedSourceIdentity',
+              'reviewEvidence',
+              'claimId',
+              'claimSha256',
+              'failureCode',
+              'failureEvidencePath',
+              'failureEvidenceSha256',
+              'toolBinding',
+              'probeBinding',
+              'releasedBuildLock',
+              'allowedDifferences',
+            ].sort(),
+          ) ||
+        !/^[a-f0-9-]{36}$/.test(a.claimId || '') ||
+        !hex(a.claimSha256)
+      )
+        refuse();
+      const old = JSON.parse(checked(a.oldPolicyPath, a.oldPolicySha256));
+      const current = JSON.parse(
+        checked(recovery.policyPath, a.newPolicySha256),
+      );
+      const original = JSON.parse(
+        checked(ledgerFile, a.priorLedgerSha256, 65536),
+      );
+      const stat = fs.lstatSync(ledgerFile, { bigint: true });
+      const claim = ledger.claim;
+      if (
+        a.format !== 1 ||
+        a.kind !== 'interrupted-empty-install-claim-recovery' ||
+        a.scopeId !== policy.scopeId ||
+        a.registryDirectory !== registry ||
+        hash(a.registryIdentity) !== hash(policy.registryIdentity) ||
+        hash(directoryId(registry)) !== hash(policy.registryIdentity) ||
+        a.newPolicySha256 !== native.policySha256 ||
+        a.oldPolicySha256 !== ledger.configSha ||
+        hash(current) !== hash(policy) ||
+        old.scopeId !== policy.scopeId ||
+        old.format !== 2 ||
+        original.digest !== hash(original.payload) ||
+        original.digest !== a.priorPayloadDigest ||
+        hash(original.payload) !== hash(ledger) ||
+        ledger.format !== 2 ||
+        ledger.bindingRepair ||
+        hash(a.priorLedgerIdentity) !==
+          hash([stat.dev, stat.ino, stat.birthtimeNs].map(String)) ||
+        !Array.isArray(ledger.outputs) ||
+        ledger.outputs.length ||
+        !claim ||
+        claim.id !== a.claimId ||
+        hash(claim) !== a.claimSha256 ||
+        claim.kind !== 'install' ||
+        claim.root !== effectScope.container ||
+        !Number.isSafeInteger(claim.reserveBytes) ||
+        claim.reserveBytes < 1 ||
+        claim.runtimeCopies !== 1 ||
+        !hex(claim.refs) ||
+        !Array.isArray(claim.outputs) ||
+        claim.outputs.length ||
+        a.failureCode !== 'RELEASE_SCOPE_SCAN_TIME_BUDGET' ||
+        typeof a.reviewEvidence !== 'string' ||
+        !a.reviewEvidence
+      )
+        refuse();
+      if (
+        checked(ledgerFile + '.adopted', a.adoptionSha256, 64).toString(
+          'utf8',
+        ) !== a.oldPolicySha256
+      )
+        refuse();
+      watchDirectory(registry, policy.registryIdentity);
+      checked(a.failureEvidencePath, a.failureEvidenceSha256);
+      const budget = {
+        profile: 'legacy-stream-v1',
+        checkpointMode: 'full',
+        scanEntries: 100000,
+        operationEntries: 1000000,
+        scanReadBytes: 1073741824,
+        operationReadBytes: 2147483648,
+        durationMs: 300000,
+      };
+      if (
+        Object.hasOwn(old, 'scanBudget') ||
+        !policy.scanBudget ||
+        Object.keys(policy.scanBudget).length !== Object.keys(budget).length ||
+        Object.entries(budget).some(([k, v]) => policy.scanBudget[k] !== v)
+      )
+        refuse();
+      const pin = a.toolBinding,
+        observer = a.probeBinding;
+      if (
+        !pin ||
+        pin.path !== canonical(path.join(__dirname, 'release-scope.cjs')) ||
+        Object.keys(pin).sort().join(',') !== 'newSha256,oldSha256,path' ||
+        !hex(pin.oldSha256) ||
+        pin.oldSha256 === pin.newSha256 ||
+        a.auditedSourceIdentity !== pin.newSha256 ||
+        !observer ||
+        hash(observer.old) !== hash(old.probe) ||
+        hash(observer.new) !== hash(policy.probe) ||
+        Object.keys(observer).sort().join(',') !== 'new,old' ||
+        policy.probe.path !== canonical(__filename) ||
+        old.probe.path !== policy.probe.path ||
+        !hex(old.probe.sha256) ||
+        old.probe.sha256 === policy.probe.sha256
+      )
+        refuse();
+      checked(pin.path, pin.newSha256);
+      checked(policy.probe.path, policy.probe.sha256);
+      const ps = fs.lstatSync(policy.probe.path, { bigint: true });
+      if (
+        hash(policy.probe.identity) !==
+        hash([ps.dev, ps.ino, ps.size, ps.mtimeNs, ps.ctimeNs].map(String))
+      )
+        refuse();
+      if (
+        hash({
+          ...policy.probe,
+          sha256: old.probe.sha256,
+          identity: old.probe.identity,
+        }) !== hash(old.probe)
+      )
+        refuse();
+      const matches = [];
+      old.windowsReferences.launchers.forEach((l, i) =>
+        l.files.forEach((f, j) => {
+          if (f.path === pin.path) matches.push([i, j]);
+        }),
+      );
+      if (matches.length !== 1) refuse();
+      const [i, j] = matches[0],
+        restored = structuredClone(policy),
+        previous = old.windowsReferences.launchers[i],
+        next = policy.windowsReferences.launchers[i];
+      if (
+        !previous.pointerPath ||
+        previous.packageId !== undefined ||
+        previous.files[j].sha256 !== pin.oldSha256 ||
+        next.files[j].sha256 !== pin.newSha256
+      )
+        refuse();
+      restored.windowsReferences.launchers[i].files[j].sha256 = pin.oldSha256;
+      delete restored.scanBudget;
+      restored.probe = structuredClone(old.probe);
+      if (
+        hash(restored) !== hash(old) ||
+        hash(a.allowedDifferences) !==
+          hash([
+            'scanBudget',
+            `windowsReferences.launchers.${i}.files.${j}.sha256`,
+            'probe.sha256',
+            'probe.identity',
+          ])
+      )
+        refuse();
+      const released = a.releasedBuildLock,
+        writer = path.join(__dirname, 'install-lifecycle.cjs');
+      if (
+        !released ||
+        !Number.isInteger(released.ownerPidDigits) ||
+        released.ownerPidDigits < 1 ||
+        released.ownerPidDigits > 10 ||
+        Object.keys(released).sort().join(',') !==
+          'ownerPidDigits,writerSha256' ||
+        previous.files.some(
+          (f) => f.path === writer && f.sha256 !== released.writerSha256,
+        )
+      )
+        refuse();
+      checked(writer, released.writerSha256);
+      const extra = Buffer.byteLength(
+        JSON.stringify({
+          pid: 10 ** (released.ownerPidDigits - 1),
+          token: '00000000-0000-0000-0000-000000000000',
+        }),
+      );
+      if (
+        claim.startBytes !== policy.baseline.bytes + extra ||
+        claim.startRuntimeCopies !== policy.baseline.runtimeCopies
+      )
+        refuse();
+      for (const p of [
+        path.join(effectScope.container, '.build-budget.lock'),
+        path.join(path.dirname(effectScope.container), '.active-release.lock'),
+      ])
+        if (watch(p, false)) refuse();
+      for (const allocation of effectScope.allocations) {
+        if (allocation.mode !== 'exclusive-package' || exists(allocation.path))
+          refuse();
+        absentDirectories.add(allocation.path);
+      }
+    } else if (
+      ledger.configSha !== lock.configSha ||
+      !Array.isArray(ledger.outputs)
+    )
       fail('REFERENCE_INFLIGHT_STATE_INVALID');
     if (
       ledger.claim &&
@@ -1308,7 +1554,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   }
   return result;
 }
-function main(policyFile) {
+function main(policyFile, recovery) {
   const policyBytes = bytes(canonical(policyFile)),
     policy = JSON.parse(policyBytes.toString('utf8'));
   require('./preserving-contract.cjs').referenceApplicability(policy);
@@ -1422,10 +1668,25 @@ function main(policyFile) {
   )
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   const result = probe(policy, native, {
+    ...(recovery
+      ? { recovery: { ...recovery, policyPath: canonical(policyFile) } }
+      : {}),
     self: {
       pid: process.pid,
       executable: process.execPath,
-      argv: [process.execPath, process.argv[1], policyFile],
+      argv: [
+        process.execPath,
+        process.argv[1],
+        policyFile,
+        ...(recovery
+          ? [
+              '--empty-install-recovery',
+              recovery.approvalPath,
+              recovery.approvalSha256,
+              recovery.lockSha256,
+            ]
+          : []),
+      ],
       collectorExecutable,
       consoleHost,
       collectorArgv: [collectorExecutable, ...collectorArgs],
@@ -1456,11 +1717,32 @@ function main(policyFile) {
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   return result;
 }
+function policyArguments(args) {
+  if (
+    args.length !== 3 &&
+    (args.length !== 7 ||
+      args[3] !== '--empty-install-recovery' ||
+      !hex(args[5]) ||
+      !hex(args[6]))
+  )
+    fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
+  return {
+    policyFile: args[2],
+    recovery:
+      args.length === 7
+        ? {
+            approvalPath: args[4],
+            approvalSha256: args[5],
+            lockSha256: args[6],
+          }
+        : undefined,
+  };
+}
 if (require.main === module) {
   let value;
   try {
-    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
-    value = main(process.argv[2]);
+    const args = policyArguments(process.argv);
+    value = main(args.policyFile, args.recovery);
   } catch (error) {
     value = {
       complete: false,
@@ -1474,4 +1756,4 @@ if (require.main === module) {
   }
   process.stdout.write(JSON.stringify(value) + '\n');
 }
-module.exports = { probe, argv, main };
+module.exports = { probe, argv, main, policyArguments };

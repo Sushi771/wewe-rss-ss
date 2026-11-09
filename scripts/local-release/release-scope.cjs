@@ -792,12 +792,47 @@ function open(request, options = {}, boundOperation) {
           restored.windowsReferences.launchers[i].files[j].sha256 =
             pin.oldSha256;
           delete restored.scanBudget;
+          // The read-only precommit observer is also an exact reviewed source.
+          const observer = a.probeBinding;
+          const probePath = canonical(
+            path.join(__dirname, 'windows-release-references.cjs'),
+          );
+          if (
+            !observer ||
+            hash(observer.old) !== hash(old.probe) ||
+            hash(observer.new) !== hash(policy.probe) ||
+            old.probe.path !== probePath ||
+            policy.probe.path !== probePath ||
+            !hex(old.probe.sha256) ||
+            !hex(policy.probe.sha256) ||
+            old.probe.sha256 === policy.probe.sha256 ||
+            a.auditedSourceIdentity !== pin.newSha256
+          )
+            reject();
+          const ps = fs.lstatSync(probePath, { bigint: true });
+          if (
+            hash(policy.probe.identity) !==
+            hash([ps.dev, ps.ino, ps.size, ps.mtimeNs, ps.ctimeNs].map(String))
+          )
+            reject();
+          if (
+            hash({
+              ...policy.probe,
+              sha256: old.probe.sha256,
+              identity: old.probe.identity,
+            }) !== hash(old.probe)
+          )
+            reject();
+          bytes(probePath, policy.probe.sha256);
+          restored.probe = structuredClone(old.probe);
           if (
             hash(restored) !== hash(old) ||
             hash(a.allowedDifferences) !==
               hash([
                 'scanBudget',
                 `windowsReferences.launchers.${i}.files.${j}.sha256`,
+                'probe.sha256',
+                'probe.identity',
               ])
           )
             reject();
@@ -1007,7 +1042,19 @@ function open(request, options = {}, boundOperation) {
             )
               reject();
             if (observe) {
-              const facts = structuredClone(references().value);
+              const facts = structuredClone(
+                references(
+                  false,
+                  prior.configSha === configSha
+                    ? undefined
+                    : {
+                        approvalPath: repairPath,
+                        approvalSha256: repairSha,
+                        lockSha256: digest(Buffer.from(token)),
+                        policyPath: file,
+                      },
+                ).value,
+              );
               // Undo only the reviewed launcher-file hash when comparing the
               // fresh complete references to the interrupted claim's digest.
               for (const r of facts.records) {
@@ -1395,8 +1442,10 @@ function open(request, options = {}, boundOperation) {
       ledgerIdentity = fileIdentity(ledger);
       prior = after;
       options.onBindingRepairStep?.('after-commit');
-    } catch {
-      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');
+    } catch (cause) {
+      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED', {
+        cause,
+      });
     }
   };
 
@@ -1417,28 +1466,43 @@ function open(request, options = {}, boundOperation) {
     )
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
   };
-  const query = () => {
+  const query = (recovery) => {
     if (
       !options.query &&
       (!policy.probe || fileHash(policy.probe.path) !== policy.probe.sha256)
     )
       throw new Error('RELEASE_SCOPE_REFERENCE_PROBE_UNAVAILABLE');
     const result = options.query
-      ? options.query()
+      ? options.query(recovery)
       : JSON.parse(
-          execFileSync(process.execPath, [policy.probe.path, file], {
-            encoding: 'utf8',
-            windowsHide: true,
-            timeout: 30000,
-            maxBuffer: 1024 * 1024,
-          }),
+          execFileSync(
+            process.execPath,
+            [
+              policy.probe.path,
+              file,
+              ...(recovery
+                ? [
+                    '--empty-install-recovery',
+                    recovery.approvalPath,
+                    recovery.approvalSha256,
+                    recovery.lockSha256,
+                  ]
+                : []),
+            ],
+            {
+              encoding: 'utf8',
+              windowsHide: true,
+              timeout: 30000,
+              maxBuffer: 1024 * 1024,
+            },
+          ),
         );
     return processFamily
       ? families.includeConsoles(result, expectedProcesses, policy)
       : result;
   };
-  const references = (allowTransition = false) => {
-    const value = query();
+  const references = (allowTransition = false, recovery) => {
+    const value = query(recovery);
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
     if (preserving && !rootRoles && !expectedProcesses)

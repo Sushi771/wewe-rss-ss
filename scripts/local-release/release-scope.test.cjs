@@ -3168,6 +3168,13 @@ function emptyInstallRecoveryFixture(run) {
       },
     ];
     const oldLauncher = f.policy.windowsReferences.launchers[0];
+    const probePath = path.join(__dirname, 'windows-release-references.cjs'),
+      probeStat = fs.lstatSync(probePath, { bigint: true });
+    f.policy.probe = {
+      path: probePath,
+      sha256: 'd'.repeat(64),
+      identity: ['old'],
+    };
     f.facts.records.push({
       kind: 'tasks',
       packageId: 'current',
@@ -3222,6 +3229,17 @@ function emptyInstallRecoveryFixture(run) {
       }),
     );
     const next = structuredClone(old);
+    next.probe = {
+      path: probePath,
+      sha256: fileHash(probePath),
+      identity: [
+        probeStat.dev,
+        probeStat.ino,
+        probeStat.size,
+        probeStat.mtimeNs,
+        probeStat.ctimeNs,
+      ].map(String),
+    };
     next.scanBudget = {
       profile: 'legacy-stream-v1',
       checkpointMode: 'full',
@@ -3250,7 +3268,7 @@ function emptyInstallRecoveryFixture(run) {
         priorPayloadDigest: prior.digest,
         priorLedgerIdentity: [st.dev, st.ino, st.birthtimeNs].map(String),
         adoptionSha256: fileHash(adopted),
-        auditedSourceIdentity: 'b'.repeat(64),
+        auditedSourceIdentity: fileHash(tool),
         reviewEvidence: 'synthetic exact empty-claim review',
         claimId: prior.payload.claim.id,
         claimSha256: hash(prior.payload.claim),
@@ -3264,7 +3282,10 @@ function emptyInstallRecoveryFixture(run) {
         allowedDifferences: [
           'scanBudget',
           'windowsReferences.launchers.0.files.0.sha256',
+          'probe.sha256',
+          'probe.identity',
         ],
+        probeBinding: { old: old.probe, new: next.probe },
         toolBinding: {
           path: tool,
           oldSha256: 'a'.repeat(64),
