@@ -244,6 +244,7 @@ test(
     fixture(async (f) => {
       const { spawn } = require('node:child_process');
       const { once } = require('node:events');
+      const { createInterface } = require('node:readline');
       const {
         processIdentity,
         unusedPort,
@@ -266,21 +267,42 @@ test(
       // argv. Tree reads only the PIDs of these disposable synthetic subprocesses.
       let child,
         owned,
-        observedFamily = [];
+        observedFamily = [],
+        phase = 'prepare',
+        failure;
       try {
         for (const id of ['current', 'candidate']) {
           const launchers = c.launchers.filter((l) => l.packageId === id);
           for (const l of launchers.slice(1)) {
-            f.write(l.entry, 'import sys\nfor line in sys.stdin:\n    pass\n');
+            f.write(
+              l.entry,
+              'import os, sys\nprint(os.getpid(), flush=True)\nfor line in sys.stdin:\n    pass\n',
+            );
             l.executable = f.pin(python);
             l.files = [f.pin(l.entry)];
           }
           const root = launchers[0];
           f.write(
             root.entry,
-            `const {spawn}=require('node:child_process');\n` +
-              `const children=${JSON.stringify(launchers.slice(1).map((l) => l.argv))}.map(a=>spawn(a[0],a.slice(1),{windowsHide:true,stdio:['pipe','pipe','pipe']}));\n` +
-              `console.log(JSON.stringify(children.map(c=>c.pid)));setInterval(()=>{},1000);\n`,
+            [
+              "const {spawn}=require('node:child_process');",
+              "const {once}=require('node:events');",
+              "const {createInterface}=require('node:readline');",
+              `const children=${JSON.stringify(launchers.slice(1).map((l) => l.argv))}.map(a=>spawn(a[0],a.slice(1),{windowsHide:true,stdio:['pipe','pipe','pipe']}));`,
+              'Promise.all(children.map(async c=>{',
+              '  const input=createInterface({input:c.stdout});',
+              '  const [line]=await Promise.race([',
+              "    once(input,'line'),",
+              "    once(c,'exit').then(()=>{throw Error('synthetic helper exited before ready')})",
+              '  ]);',
+              '  input.close();',
+              "  if(line!==String(c.pid))throw Error('synthetic helper readiness PID mismatch');",
+              '  return c.pid;',
+              '})).then(pids=>console.log(JSON.stringify(pids)))',
+              '  .catch(error=>{console.error(error);process.exit(1)});',
+              'setInterval(()=>{},1000);',
+              '',
+            ].join('\n'),
           );
           root.argv[0] = process.execPath;
           root.executable = f.pin(process.execPath);
@@ -295,24 +317,47 @@ test(
           const root = c.launchers.find(
             (l) => l.packageId === runtimeId && !l.parentEntry,
           );
+          phase = `${pointerId}/${runtimeId}:ready`;
           child = spawn(root.argv[0], root.argv.slice(1), {
             cwd: f.project,
             windowsHide: true,
             stdio: ['pipe', 'pipe', 'pipe'],
           });
-          const [ready] = await once(child.stdout, 'data');
-          const pids = JSON.parse(ready.toString());
+          // A spawn PID is not a readiness receipt. Both helpers must execute.
+          const readyAbort = new AbortController(),
+            readyLines = createInterface({ input: child.stdout }),
+            readyTimer = setTimeout(() => readyAbort.abort(), 15000);
+          let pids;
+          try {
+            const [ready] = await Promise.race([
+              once(readyLines, 'line', { signal: readyAbort.signal }),
+              once(child, 'exit', { signal: readyAbort.signal }).then(() => {
+                throw Error('synthetic root exited before family ready');
+              }),
+            ]);
+            pids = JSON.parse(ready);
+          } finally {
+            clearTimeout(readyTimer);
+            readyAbort.abort();
+            readyLines.close();
+          }
+          assert(Array.isArray(pids));
           assert.equal(pids.length, 2);
+          phase = `${pointerId}/${runtimeId}:owned-snapshot`;
           owned = processIdentity('OwnedSnapshot', child.pid, port, {
             executable: process.execPath,
             commandLine: launchCommandLine(root.argv[0], root.argv.slice(1)),
           });
           const observe = (expected = []) => {
-            const sample = () => {
+            const stage = `${pointerId}/${runtimeId}:${
+              expected.length ? 'exit' : 'initial'
+            }`;
+            const sample = (frame) => {
               const rows = new Map();
               for (const pid of new Set(
                 expected.length ? expected.map((r) => r.pid) : [child.pid],
               )) {
+                phase = `${stage}:${frame}:tree:${pid}`;
                 const fact = processIdentity('Tree', pid, port);
                 assert.equal(fact.complete, true);
                 for (const row of fact.active) {
@@ -323,8 +368,8 @@ test(
               }
               return { complete: true, active: [...rows.values()] };
             };
-            const before = sample();
-            const after = sample();
+            const before = sample('before');
+            const after = sample('after');
             assert.equal(before.complete, true);
             assert.equal(after.complete, true);
             if (!f.policy.preservingUpdate.processFamily.consoleHost) {
@@ -359,6 +404,7 @@ test(
               ...after.active,
               ...structuredClone(controls),
             ];
+            phase = `${stage}:probe`;
             return families.includeConsoles(f.run(), expected, f.policy);
           };
           const initial = observe();
@@ -392,6 +438,7 @@ test(
           );
           families.family(rows, child.pid, runtimeId, f.policy, true);
           families.admit([], rows, owned, runtimeId, f.policy, false);
+          phase = `${pointerId}/${runtimeId}:owned-stop`;
           // Exercise action-time identity refusal on a real owned root before stop.
           assert.throws(() =>
             processIdentity('OwnedStop', child.pid, port, {
@@ -430,25 +477,49 @@ test(
           owned = undefined;
           observedFamily = [];
         }
+      } catch (error) {
+        failure = new Error(`synthetic family failed at ${phase}`, {
+          cause: error,
+        });
+        throw failure;
       } finally {
-        if (child) {
-          await stopOwned(child, owned);
-          const deadline = Date.now() + 15000;
-          for (;;) {
-            const active = [
-              ...new Set([child.pid, ...observedFamily.map((r) => r.pid)]),
-            ].flatMap((pid) => processIdentity('Tree', pid, port).active);
-            if (!active.length) break;
-            assert(
-              Date.now() < deadline,
-              'synthetic family cleanup exit timeout',
-            );
-            await new Promise((resolve) => setTimeout(resolve, 100));
+        let cleanupPhase = 'stop';
+        try {
+          if (child) {
+            await stopOwned(child, owned);
+            const deadline = Date.now() + 15000;
+            for (;;) {
+              const active = [
+                ...new Set([child.pid, ...observedFamily.map((r) => r.pid)]),
+              ].flatMap((pid) => {
+                cleanupPhase = `tree:${pid}`;
+                return processIdentity('Tree', pid, port).active;
+              });
+              if (!active.length) break;
+              assert(
+                Date.now() < deadline,
+                'synthetic family cleanup exit timeout',
+              );
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
           }
+        } catch (cleanupError) {
+          const cleanupFailure = new Error(
+            `synthetic family cleanup failed at ${cleanupPhase}`,
+            { cause: cleanupError },
+          );
+          if (failure)
+            throw new AggregateError(
+              [failure, cleanupFailure],
+              'synthetic family and cleanup both failed',
+              { cause: failure },
+            );
+          throw cleanupFailure;
+        } finally {
+          if (oldForce === undefined)
+            delete process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+          else process.env.LOCAL_RELEASE_FORCE_POWERSHELL = oldForce;
         }
-        if (oldForce === undefined)
-          delete process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
-        else process.env.LOCAL_RELEASE_FORCE_POWERSHELL = oldForce;
       }
     }),
 );
