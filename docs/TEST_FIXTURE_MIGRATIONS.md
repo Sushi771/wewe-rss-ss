@@ -9,3 +9,8 @@ Callers retain their ordinary business clients and their existing connection set
 The audit covered all 258 Server specs, 14 research specs, the e2e spec and all 35 SQLite migrations at the reviewed base. It found 48 direct initialization gaps and six shared-helper callers with the same missing affinity guarantee. One additional shared-helper caller was already single-connection and only needed the explicit URL interface adaptation. Not every source-level gap had failed in CI. Observed setup failures included missing transaction-local rebuild tables and locked databases; the logs do not identify the connection used by each statement.
 
 Regression coverage includes exact URL preservation, invalid/ambiguous URL rejection before connection, callback error propagation, disconnect behavior, and a real isolated SQLite BEGIN/rebuild/COMMIT read from an unchanged ordinary business client. Existing full Server and cross-platform CI suites remain required. This test-only change does not establish production collection recovery or authorize installation.
+
+The xhs-auth-session-review spec prepares its temporary SQLite directory, ordinary business client, and complete migration set in beforeAll; afterAll cleans up even after partial setup failure.
+Seed writes, all eight real business transactions, and all assertions remain in the test body.
+Setup, the test, and cleanup each retain Jest's default five-second timeout, rather than sharing the former single aggregate five-second budget.
+This separates fixture lifecycle from business verification; it does not establish which phase caused a CI timeout or demonstrate that CI is fixed.
