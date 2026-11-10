@@ -14,3 +14,13 @@ The xhs-auth-session-review spec prepares its temporary SQLite directory, ordina
 Seed writes, all eight real business transactions, and all assertions remain in the test body.
 Setup, the test, and cleanup each retain Jest's default five-second timeout, rather than sharing the former single aggregate five-second budget.
 This separates fixture lifecycle from business verification; it does not establish which phase caused a CI timeout or demonstrate that CI is fixed.
+
+The xhs-source-risk-store spec creates and migrates a separate temporary database for every case. Its teardown now disconnects and removes that database without the redundant common row-level UPDATE/SELECT/DELETE hook. The raw-author identity case retains runtime shutdown but omits four redundant row-cleanup calls. Business bodies, assertions, synthetic inputs, request counts and existing timeouts remain unchanged.
+
+Teardown captures the current client and directory before awaiting disconnect. This prevents a delayed teardown from reading a directory slot replaced by a later case. Removal occurs only after successful disconnect; a rejected disconnect leaves the directory intact. This does not cancel a timed-out test or prove that all asynchronous work has stopped.
+
+Offline targeted validation passed both raw-identity variants (2 cases). A private controlled-Promise check verified disconnect-before-removal, no removal after rejection, original-directory ownership after slot replacement, unchanged per-case setup and exact cleanup-only source differences. The observed Windows CI timeouts and EBUSY reports have not been reproduced or assigned a proven root cause. Full cross-platform CI remains required; these results do not establish production recovery or authorize installation.
+Adjacent offline coverage also passed the scheduled raw-identity mismatch, remaining-detail continuation after local pre-dispatch failure, and older-started-detail blocking cases (3 cases).
+The exact durable response-settlement failure case also passed in isolation (1 case). Six targeted cases passed in total; this remains offline evidence, not a demonstrated CI root-cause fix.
+
+The existing Windows CI failures on a2dde remain unresolved. Six passing local cases do not replace full cross-platform CI for this candidate.

@@ -111,38 +111,10 @@ describe('durable synthetic source risk fence', () => {
     }
   }, 40000);
   afterEach(async () => {
-    await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL,updated_at=0 WHERE id='source'`;
-    const scoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='creator-a'`;
-    if (scoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id IN ('task-a','task-a2','task-b','task-c','task-d')`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('creator-a','creator-b','creator-c','creator-d')`;
-    }
-    const mediaScoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='media-creator-a'`;
-    if (mediaScoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id IN ('media-creator-a','media-creator-b')`;
-      await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id IN ('media-creator-a','media-creator-b')`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('media-creator-a','media-creator-b')`;
-    }
-    const parseScoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='parse-creator'`;
-    if (parseScoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id IN (${JSON.stringify(['xiaohongshu', 'note', 'parse-a'])},${JSON.stringify(['xiaohongshu', 'note', 'parse-b'])})`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id='parse-creator'`;
-      await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id='parse-creator'`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id='parse-creator'`;
-    }
-  });
-  afterEach(async () => {
-    await db.$disconnect();
-    await fs.rm(folder, { recursive: true, force: true });
+    const fixtureDb = db;
+    const fixtureFolder = folder;
+    await fixtureDb.$disconnect();
+    await fs.rm(fixtureFolder, { recursive: true, force: true });
   }, 40000);
 
   it.each(['parse', 'transport', 'budget'] as const)(
@@ -1507,10 +1479,6 @@ describe('durable synthetic source risk fence', () => {
         expect(risk[0].state).toBe('clear');
       } finally {
         runtime.onModuleDestroy();
-        await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id=${creatorId}`;
-        await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id=${creatorId}`;
-        await db.xhsNote.deleteMany({ where: { creatorId } });
-        await db.xhsCreator.deleteMany({ where: { id: creatorId } });
       }
     },
     40000,
