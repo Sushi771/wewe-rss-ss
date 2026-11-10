@@ -1671,6 +1671,21 @@ it.each([
   expect(await taskRows()).toEqual(oldTasks);
   expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
 });
+// A revoked fixture needs a distinct valid digest even when the source has no a.
+const revokedFixtureDigestSql =
+  "(CASE substr(plan_digest,1,1) WHEN '0' THEN '1' ELSE '0' END)||substr(plan_digest,2)";
+it('revoked fixture digest always differs even without a', async () => {
+  for (const first of '0123456789abcdef') {
+    const original = first + 'b'.repeat(63);
+    const [row] = await db.$queryRawUnsafe<Array<{ digest: string }>>(
+      `SELECT ${revokedFixtureDigestSql} AS digest FROM (SELECT ? AS plan_digest)`,
+      original,
+    );
+    expect(row.digest).not.toBe(original);
+    expect(row.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.digest.slice(1)).toBe(original.slice(1));
+  }
+});
 it.each([
   'creator',
   'author',
@@ -1723,7 +1738,7 @@ it.each([
       );
     if (mode === 'revoked')
       await db.$executeRawUnsafe(
-        "INSERT INTO xhs_unbound_owner_reviews SELECT 'revoked',replace(plan_digest,'a','b'),original_risk_json,original_outcome,old_task_ids_json,old_job_ids_json,creator_bindings_json,budget_snapshot_json,replace(scope_json,'scheduled-policy-v1','scheduled-policy-revoked-v1'),backup_sha256,approved_at FROM xhs_unbound_owner_reviews WHERE id=?",
+        `INSERT INTO xhs_unbound_owner_reviews SELECT 'revoked',${revokedFixtureDigestSql},original_risk_json,original_outcome,old_task_ids_json,old_job_ids_json,creator_bindings_json,budget_snapshot_json,replace(scope_json,'scheduled-policy-v1','scheduled-policy-revoked-v1'),backup_sha256,approved_at FROM xhs_unbound_owner_reviews WHERE id=?`,
         plan.policy.id,
       );
     const before = await snapshot();
