@@ -1771,6 +1771,49 @@ test('L3: intent before mkdir and a failed partial output remain a held claim on
     assert.throws(() => f.open(), /INTERRUPTED_CLAIM/);
     assert(fs.existsSync(path.join(f.build, 'candidate/runtime')));
   }));
+for (const asynchronous of [false, true])
+  test(
+    'failed output retains the original error chain and held claim, async=' +
+      asynchronous,
+    () =>
+      fixture(async (f) => {
+        const origin = new Error('synthetic original cause');
+        const original = new assert.AssertionError({
+          message: 'PRIOR_BOOT_REBIND_PROJECT_PROCESS_EXITED',
+        });
+        original.cause = origin;
+        const stack = original.stack;
+        const request = { kind: 'build', root: f.build, reserveBytes: 4096 };
+        const run = () =>
+          scope.within(
+            request,
+            (lease) => {
+              output(f, lease);
+              if (asynchronous) return Promise.reject(original);
+              throw original;
+            },
+            f.options(),
+          );
+        const check = (error) => {
+          assert.equal(
+            error.message,
+            'RELEASE_SCOPE_FAILED_OUTPUT_HELD_REQUIRES_REVIEW',
+          );
+          assert.equal(error.cause, original);
+          assert.equal(error.cause.stack, stack);
+          assert.equal(error.cause.cause, origin);
+          return true;
+        };
+        if (asynchronous) await assert.rejects(run, check);
+        else assert.throws(run, check);
+        const state = path.join(f.base, f.policy.scopeId + '.state.json');
+        const before = fs.readFileSync(state);
+        assert.throws(() => f.open(), /INTERRUPTED_CLAIM/);
+        assert.deepEqual(fs.readFileSync(state), before);
+        assert(fs.existsSync(path.join(f.build, 'candidate/runtime')));
+      }),
+  );
+
 test('L3: confirmed inactive owned cleanup can finish without deleting any historical file', () =>
   fixture((f) => {
     const lease = f.open(),

@@ -30,11 +30,22 @@ function referenceDigest(value) {
   });
 }
 function processRows(facts) {
-  assert(Array.isArray(facts.records) && facts.records.length <= 4096);
-  assert(facts.observationComplete === true && facts.complete === false);
-  for (const key of ['errors', 'uncertainChildren']) equal(facts[key], []);
   assert(
-    !facts.exitedProcesses?.length && !facts.exitedConsoleProcesses?.length,
+    Array.isArray(facts.records) && facts.records.length <= 4096,
+    'PRIOR_BOOT_REBIND_RECORDS',
+  );
+  assert(
+    facts.observationComplete === true && facts.complete === false,
+    'PRIOR_BOOT_REBIND_OBSERVATION_INCOMPLETE',
+  );
+  for (const key of ['errors', 'uncertainChildren']) equal(facts[key], []);
+  // Native console arrays are host-wide. Only the project-family projection in
+  // records/exitedProcesses is relevant here. The raw recovery probe also fails
+  // on any observed project parent, before a console projection is necessary.
+  // Never infer a new-boot project parent from an old, possibly reused PID.
+  assert(
+    !facts.exitedProcesses?.length,
+    'PRIOR_BOOT_REBIND_PROJECT_PROCESS_EXITED',
   );
   return facts.records.filter((r) => r.kind === 'processes');
 }

@@ -191,6 +191,118 @@ test('exact reconstructed preimage admits only the prior-boot family becoming em
   assert.equal(out.oldFactsOrigin, 'reconstructed');
   assert.deepEqual(v, before);
 });
+function consoleFixture() {
+  const v = cold();
+  v.policy.preservingUpdate.processFamily.consoleHost = {
+    path: 'synthetic/conhost.exe',
+    sha256: H('b'),
+    argv: ['synthetic/conhost.exe', '0xffffffff', '-ForceV1'],
+  };
+  Object.assign(v.facts, {
+    consoleProcesses: [],
+    exitedConsoleProcesses: [],
+    exitedProcesses: [],
+  });
+  const host = (parentPid, pid = 80) => ({
+    pid,
+    parentPid,
+    startUtc: '2026-01-02T00:00:03Z',
+    executableSha256: H('b'),
+    invocationSha256: hash(v.policy.preservingUpdate.processFamily.consoleHost),
+    identity: 'synthetic-console-' + pid,
+    consoleHost: true,
+  });
+  const project = require('./preserving-process-family.cjs').includeConsoles;
+  return {
+    v,
+    host,
+    project: () => project(structuredClone(v.facts), [], v.policy),
+  };
+}
+
+for (const parentPid of [999, 10])
+  test(
+    'host-wide console exit remains outside the project, including reused old PID ' +
+      parentPid,
+    () => {
+      const { v, host, project } = consoleFixture();
+      v.facts.exitedConsoleProcesses.push(host(parentPid));
+      v.facts.processTopology = [{ pid: 80, parentPid, phase: 0 }];
+      // An unrelated current process may reuse the old numeric owner PID. Neither
+      // it nor its console becomes a project reference just from that number.
+      if (parentPid === 10) {
+        v.facts.processTopology.push({ pid: 10, parentPid: 2, phase: 0 });
+        v.observations[1].owner = { pid: 10, startUtc: '2026-01-02T00:00:01Z' };
+      }
+      const before = structuredClone(v),
+        projected = project();
+      assert.equal(projected.exitedProcesses.length, 0);
+      assert.equal(
+        projected.records.some((r) => r.consoleHost),
+        false,
+      );
+      assert.deepEqual(
+        projected.exitedConsoleProcesses,
+        v.facts.exitedConsoleProcesses,
+      );
+      validate(v); // Native recovery entry: not yet projected.
+      validate({ ...v, facts: projected }); // Scope entry: already projected.
+      assert.deepEqual(v, before);
+    },
+  );
+
+for (const key of ['records', 'exitedProcesses'])
+  test(
+    'current project parent and its console remain rejected in raw/projected ' +
+      key,
+    () => {
+      const { v, host, project } = consoleFixture();
+      v.facts[key].push({
+        ...v.oldFacts.records[1],
+        startUtc: '2026-01-02T00:00:01Z',
+      });
+      v.facts.exitedConsoleProcesses.push(host(10));
+      const projected = project();
+      assert.equal(
+        projected.exitedProcesses.some((r) => r.consoleHost),
+        true,
+      );
+      assert.throws(() => validate(v));
+      assert.throws(() => validate({ ...v, facts: projected }));
+    },
+  );
+
+for (const key of ['records', 'exitedProcesses'])
+  test('a projected orphan console cannot be ignored in ' + key, () => {
+    const { v, host } = consoleFixture();
+    v.facts[key].push({ kind: 'processes', packageId: 'app', ...host(10) });
+    assert.throws(() => validate(v));
+  });
+
+test('project console topology still rejects an unknown child; unrelated hosts do not grant a family', () => {
+  const { v, host, project } = consoleFixture();
+  v.facts.records.push(v.oldFacts.records[1]);
+  v.facts.consoleProcesses.push(host(10));
+  v.facts.processTopology = [{ pid: 81, parentPid: 80, phase: 1 }];
+  assert.throws(project, /PROCESS_FAMILY_CHANGED/);
+  v.facts.records = v.facts.records.filter((r) => r.kind !== 'processes');
+  assert.equal(
+    project().records.some((r) => r.consoleHost),
+    false,
+  );
+});
+
+test('incomplete console-bearing facts and unknown project members remain rejected', () => {
+  const { v, host } = consoleFixture();
+  v.facts.exitedConsoleProcesses.push(host(999));
+  v.facts.observationComplete = false;
+  assert.throws(() => validate(v), /PRIOR_BOOT_REBIND_OBSERVATION_INCOMPLETE/);
+  v.facts.observationComplete = true;
+  v.oldFacts.records.push({ ...v.oldFacts.records[2], pid: 12 });
+  v.spec.oldReferences = referenceDigest(v.oldFacts);
+  assert.throws(() => validate(v), /PROCESS_FAMILY_CHANGED/);
+});
+
 for (const [name, mutate] of Object.entries({
   'old facts missing': (v) => {
     v.oldFacts = {};

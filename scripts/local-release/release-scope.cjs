@@ -2612,6 +2612,7 @@ function open(request, options = {}, boundOperation) {
             if (error)
               throw new Error(
                 'RELEASE_SCOPE_FAILED_OUTPUT_HELD_REQUIRES_REVIEW',
+                { cause: error },
               );
             row.identity = identity(row.path);
             const receipt = verifier.scan([
