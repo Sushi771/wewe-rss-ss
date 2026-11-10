@@ -53,6 +53,7 @@ const catalog = {
     'switch-recovery',
   ],
   readonly: [
+    'normal-start-claim-rebind',
     'scope-inventory',
     'verify-source',
     'windows-release-references',

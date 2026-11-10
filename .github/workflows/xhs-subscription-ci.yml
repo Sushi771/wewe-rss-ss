@@ -88,6 +88,8 @@ jobs:
           node --test --test-name-pattern='^legacy (adapter|boundary)' scripts/local-release/release-scope.test.cjs
           node --test --test-name-pattern='^(empty install recovery|install caller repair)' scripts/local-release/release-scope.test.cjs
           node --test --test-name-pattern='^empty recovery original probe:' scripts/local-release/windows-release-references.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/normal-start-claim-rebind.test.cjs scripts/local-release/prior-boot-restart.test.cjs
+          node --test --test-name-pattern='^prior-boot (scope|empty claim)' scripts/local-release/release-scope.test.cjs
           node --test --test-concurrency=1 --test-name-pattern='^(preserving|original complete)' scripts/local-release/release-scope.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/windows-release-references.test.cjs
       - run: pnpm install --frozen-lockfile
       - name: Synthetic source, session, storage and shared grouping regressions

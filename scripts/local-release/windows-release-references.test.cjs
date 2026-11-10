@@ -1549,7 +1549,7 @@ test('adapter facts are accepted by the actual scope guard across own intent cha
 
 // Both scope and the original resolver run here. Only the native OS observation
 // is synthetic; the registry/lock/envelope rejection layer is never stubbed.
-function emptyRecoveryProbeFixture(run) {
+function emptyRecoveryProbeFixture(run, priorBoot = false) {
   return fixture((f) => {
     const self = projectEffectFixture(f);
     const tooling = path.join(f.base, 'tooling');
@@ -1626,6 +1626,9 @@ function emptyRecoveryProbeFixture(run) {
       { path: target, mode: 'exclusive-package' },
     ];
     f.policy.windowsReferences.launchers[0].files.push(f.pin(scopePath));
+    const restartPath = path.join(tooling, 'restart.cjs');
+    if (priorBoot)
+      f.policy.windowsReferences.launchers[0].files.push(f.pin(restartPath));
     f.policy.windowsReferences.collectorSha256 = f.pin(
       path.join(tooling, 'windows-release-reference-collector.ps1'),
     ).sha256;
@@ -1674,7 +1677,8 @@ function emptyRecoveryProbeFixture(run) {
         self,
         recovery,
       });
-    let now = 0;
+    let now = 0,
+      priorBootFacts;
     const clock = test.mock.method(performance, 'now', () => now);
     const buildLock = path.join(f.installed, '.build-budget.lock');
     f.write(buildLock, { pid: process.pid, token: crypto.randomUUID() });
@@ -1684,6 +1688,7 @@ function emptyRecoveryProbeFixture(run) {
         configSha256: oldSha,
         query,
       });
+      if (priorBoot) priorBootFacts = query();
       now = 31000;
       assert.throws(() => lease.close(Error('timeout')), /SCAN_TIME_BUDGET/);
     } finally {
@@ -1711,6 +1716,32 @@ function emptyRecoveryProbeFixture(run) {
       durationMs: 300000,
     };
     f.policy.windowsReferences.launchers[0].files[1] = f.pin(scopePath);
+    if (priorBoot) {
+      fs.appendFileSync(
+        restartPath,
+        '\n// reviewed synthetic prior-boot restart\n',
+      );
+      f.policy.windowsReferences.launchers[0].files[2] = f.pin(restartPath);
+      f.policy.preservingUpdate.priorBootExit = {
+        helperSha256: f.pin(path.join(tooling, 'normal-start-claim-rebind.cjs'))
+          .sha256,
+        oldReferences: doc.payload.claim.refs,
+        restartBinding: {
+          path: restartPath,
+          oldSha256: old.windowsReferences.launchers[0].files[2].sha256,
+          newSha256: f.pin(restartPath).sha256,
+        },
+        launcherTransition: {
+          pointer: old.preservingUpdate.active.pointer,
+          oldSha256: hash(old.windowsReferences.launchers[0].files),
+          newSha256: hash(f.policy.windowsReferences.launchers[0].files),
+        },
+      };
+      for (const key of ['processesBefore', 'processesAfter'])
+        f.native[key] = f.native[key].filter(
+          (p) => p.pid !== old.preservingUpdate.active.oldProcess.pid,
+        );
+    }
     f.policy.probe = { ...f.pin(probePath), identity: identity5(probePath) };
     const nextFile = path.join(f.registry, 'next-policy.json');
     f.write(nextFile, f.policy);
@@ -1753,6 +1784,12 @@ function emptyRecoveryProbeFixture(run) {
         'windowsReferences.launchers.0.files.1.sha256',
         'probe.sha256',
         'probe.identity',
+        ...(priorBoot
+          ? [
+              'windowsReferences.launchers.0.files.2.sha256',
+              'preservingUpdate.priorBootExit',
+            ]
+          : []),
       ],
     };
     const approval = path.join(f.registry, 'recovery.json');
@@ -1766,6 +1803,7 @@ function emptyRecoveryProbeFixture(run) {
     };
     run({
       f,
+      priorBootFacts,
       scope,
       resolver,
       request,
@@ -1788,6 +1826,53 @@ function emptyRecoveryProbeFixture(run) {
     });
   });
 }
+for (const mutation of ['none', 'restart-pin', 'extra-leaf'])
+  test(
+    'empty recovery original probe: prior-boot six-leaf bridge ' + mutation,
+    () =>
+      emptyRecoveryProbeFixture((x) => {
+        const helper = require(
+          path.join(path.dirname(x.probePath), 'normal-start-claim-rebind.cjs'),
+        );
+        const originalRead = helper.readPriorBootEvidence,
+          originalValidate = helper.validatePriorBootEmpty;
+        assert.equal(
+          helper.referenceDigest(x.priorBootFacts),
+          x.doc.payload.claim.refs,
+        );
+        helper.readPriorBootEvidence = () => ({ oldFacts: x.priorBootFacts });
+        helper.validatePriorBootEmpty = ({ facts }) =>
+          assert(!facts.records.some((r) => r.kind === 'processes'));
+        if (mutation === 'restart-pin')
+          x.f.policy.preservingUpdate.priorBootExit.restartBinding.oldSha256 =
+            'f'.repeat(64);
+        if (mutation === 'extra-leaf') x.f.policy.maxGrowthBytes++;
+        x.f.write(x.nextFile, x.f.policy);
+        x.f.native.policySha256 = x.f.pin(x.nextFile).sha256;
+        x.receipt.newPolicySha256 = x.f.native.policySha256;
+        x.f.write(x.approval, x.receipt);
+        x.options.configSha256 = x.f.native.policySha256;
+        x.options.bindingRepairSha256 = x.f.pin(x.approval).sha256;
+        try {
+          if (mutation === 'none') {
+            const lease = x.open();
+            lease.close();
+            assert.equal(
+              JSON.parse(fs.readFileSync(x.f.ledger)).payload.claim,
+              null,
+            );
+            assert(
+              fs
+                .readFileSync(x.adopted)
+                .equals(Buffer.from(x.receipt.oldPolicySha256)),
+            );
+          } else assert.throws(() => x.open(), /BINDING_REPAIR/);
+        } finally {
+          helper.readPriorBootEvidence = originalRead;
+          helper.validatePriorBootEmpty = originalValidate;
+        }
+      }, true),
+  );
 test('empty recovery original probe: old ledger/new lock fails without proof, reviewed bridge passes before CAS only', () =>
   emptyRecoveryProbeFixture((x) => {
     let observations = 0,

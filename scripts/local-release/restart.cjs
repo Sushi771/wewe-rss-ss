@@ -202,6 +202,15 @@ async function controlledRestartInner(options) {
   let schemaProof;
   const preserving = require('./release-scope.cjs').session()?.policy
     ?.preservingUpdate;
+  const priorBoot = preserving?.priorBootExit;
+  if (
+    priorBoot &&
+    (!options.production ||
+      options.mode !== 'restart' ||
+      options.legacyJobId !== undefined ||
+      options.legacyMaintenanceCheckpoint)
+  )
+    throw Error('RELEASE_PRIOR_BOOT_UNAPPROVED');
   if (preserving) {
     if (preserving.operation !== 'restart' || options.mode !== 'restart')
       throw new Error('RELEASE_PRESERVING_EFFECT_FORBIDDEN');
@@ -248,12 +257,16 @@ async function controlledRestartInner(options) {
   }
   // Family admission is read-only and precedes audit allocation, backup or stop.
   if (preserving?.processFamily && options.production) {
-    const identity = processIdentity('Snapshot', options.expected?.pid, 4000);
-    sameIdentity(identity, { ...options.expected, port: 4000 });
-    assert.equal(identity.commandLine, commandLine(previous, source, 4000));
-    require('./release-scope.cjs')
-      .session()
-      .preparePreservingProcessFamily(identity);
+    if (priorBoot)
+      require('./release-scope.cjs').session().preparePriorBootExit();
+    else {
+      const identity = processIdentity('Snapshot', options.expected?.pid, 4000);
+      sameIdentity(identity, { ...options.expected, port: 4000 });
+      assert.equal(identity.commandLine, commandLine(previous, source, 4000));
+      require('./release-scope.cjs')
+        .session()
+        .preparePreservingProcessFamily(identity);
+    }
   }
   // Only an older rollback package needs the historical pause marker.
   const artifacts = options.rehearsal
@@ -494,12 +507,117 @@ async function controlledRestartInner(options) {
     const ownedIdentities = new Map();
     let oldStopCheckpoint;
     let stopped = false;
+    let priorBootArchived = false,
+      priorBootReceipt,
+      priorBootLocks,
+      priorBootReleaseFailed = false;
+    const releasePriorBootLocks = () => {
+      if (!priorBootLocks) return;
+      const [budget, active] = priorBootLocks;
+      // A throwing release has an uncertain outcome. Never retry either lock
+      // in catch/finally; report the failure while attempting each own lock once.
+      priorBootLocks = undefined;
+      const errors = [];
+      try {
+        active.release();
+      } catch (error) {
+        errors.push(error);
+      }
+      try {
+        budget.release();
+      } catch (error) {
+        errors.push(error);
+      }
+      if (errors.length) {
+        priorBootReleaseFailed = true;
+        throw new AggregateError(
+          errors,
+          'RELEASE_PRIOR_BOOT_LOCK_RELEASE_FAILED',
+        );
+      }
+    };
+    const verifyNewWriter = (identity, bundlePath, bundle) => {
+      if (!priorBoot) return;
+      const gateFile = path.join(bundlePath, 'project-writer-gate.cjs');
+      assert.equal(fileHash(gateFile), bundle.files['project-writer-gate.cjs']);
+      const b = require(gateFile).binding(database),
+        raw = fs.readFileSync(b.file);
+      const writer = JSON.parse(raw);
+      assert.equal(b.databaseIdentity, priorBoot.database.identity);
+      assert.equal(writer.databaseIdentity, b.databaseIdentity);
+      assert.equal(writer.mode, 'writer');
+      assert.equal(writer.pid, identity.pid);
+      assert.equal(writer.startUtc, identity.startUtc);
+      assert.equal(writer.executableHash, bundle.files['runtime/node.exe']);
+      assert.equal(
+        writer.commandHash,
+        require('node:crypto')
+          .createHash('sha256')
+          .update(commandLine(bundlePath, database, port, bundle))
+          .digest('hex'),
+      );
+    };
     let finalBackup;
     const baseline = path.join(audit, 'final-baseline.json');
     let preparedBaseline = false;
     try {
       let identity;
-      if (options.mode === 'restart') {
+      if (priorBoot) {
+        const lease = require('./release-scope.cjs').session();
+        lease.preparePriorBootExit();
+        assert.equal(priorBoot.database.path, database);
+        assert.equal(
+          priorBoot.commandHash,
+          require('node:crypto')
+            .createHash('sha256')
+            .update(commandLine(previous, database, port, previousManifest))
+            .digest('hex'),
+        );
+        // Capacity was checked above. A rejected backup must leave the original
+        // writer and old-application availability exactly as they were.
+        finalBackup = backup(database, 'after-prior-boot');
+        lease.preparePriorBootExit();
+        const lockFile = path.join(__dirname, 'normal-start-lock.cjs');
+        const recoveryFile = path.join(__dirname, 'writer-exit-recovery.cjs');
+        assert.equal(fileHash(lockFile), priorBoot.lockSha256);
+        assert.equal(fileHash(recoveryFile), priorBoot.recoverySha256);
+        const lock = require(lockFile),
+          budget = lock.acquire(
+            path.join(root, '.local-releases/.build-budget.lock'),
+          );
+        try {
+          const active = lock.acquire(path.join(root, '.active-release.lock'));
+          priorBootLocks = [budget, active];
+        } catch (error) {
+          budget.release();
+          throw error;
+        }
+        const proof = lease.preparePriorBootExit();
+        const recovered = require(recoveryFile).recover({
+          root,
+          database,
+          gate: proof.gate,
+          sessions: priorBootLocks,
+          expected: {
+            executableHash: previousManifest.files['runtime/node.exe'],
+            commandHash: priorBoot.commandHash,
+            leaseSha256: priorBoot.writer.sha256,
+          },
+          probe: proof.probe,
+        });
+        assert.equal(recovered.status, 'preserved-abnormal-exit-lease');
+        assert.equal(recovered.reason, 'owner-from-prior-boot');
+        priorBootReceipt = {
+          path: recovered.receipt,
+          leaseSha256: fileHash(path.join(recovered.receipt, 'lease.json')),
+          intentSha256: fileHash(path.join(recovered.receipt, 'intent.json')),
+          completeSha256: fileHash(
+            path.join(recovered.receipt, 'complete.json'),
+          ),
+        };
+        assert.equal(priorBootReceipt.leaseSha256, priorBoot.writer.sha256);
+        priorBootArchived = true;
+      } else if (options.mode === 'restart') {
         if (options.rehearsal) {
           oldChild = start(previous, previousManifest, 'old-before');
           await waitReady(port, oldChild);
@@ -722,6 +840,8 @@ async function controlledRestartInner(options) {
         );
       // Advance the ignored local pointer only after the new production process is ready.
       // The logon task has a stable action and follows this pointer after future deployments.
+      verifyNewWriter(newIdentity, release, manifest);
+      releasePriorBootLocks();
       if (options.production)
         await writeActiveReleaseAsync(release, {
           reuseVerified: options.reuseVerified === true,
@@ -736,6 +856,9 @@ async function controlledRestartInner(options) {
         finalBackup: finalBackup?.backup ?? null,
         startupAudit: backgroundPreparation ? 'background' : 'completed',
         oldStopped: stopped,
+        ...(priorBoot
+          ? { oldExitReason: 'owner-from-prior-boot', priorBootReceipt }
+          : {}),
         newIdentity,
         rollbackUsed: false,
         rssReadinessItems: rssItems,
@@ -799,7 +922,7 @@ async function controlledRestartInner(options) {
           database,
           oldStopCheckpoint,
         );
-      if (stopped) {
+      if (stopped || (priorBootArchived && !priorBootReleaseFailed)) {
         try {
           fallbackChild = start(
             previous,
@@ -821,6 +944,8 @@ async function controlledRestartInner(options) {
               owned.commandLine,
             );
           }
+          verifyNewWriter(fallbackIdentity, previous, previousManifest);
+          releasePriorBootLocks();
           if (options.production)
             await writeActiveReleaseAsync(previous, { recovery: true });
           const summary = {
@@ -831,7 +956,10 @@ async function controlledRestartInner(options) {
             audit,
             database,
             finalBackup: finalBackup?.backup,
-            oldStopped: true,
+            oldStopped: stopped,
+            ...(priorBoot
+              ? { oldExitReason: 'owner-from-prior-boot', priorBootReceipt }
+              : {}),
             rollbackUsed: true,
             failure: error.message,
             fallbackIdentity,
@@ -858,6 +986,7 @@ async function controlledRestartInner(options) {
       });
       throw error;
     } finally {
+      releasePriorBootLocks();
       if (options.rehearsal)
         for (const child of [oldChild, newChild, fallbackChild])
           await stopOwned(child);

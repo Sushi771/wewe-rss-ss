@@ -6,6 +6,70 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+test('prior-boot scope validates cold eligibility, then binds the new family without reopening the archived lease', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      helper = require('./normal-start-claim-rebind.cjs');
+    const originalRead = helper.readPriorBootEvidence,
+      originalValidate = helper.validatePriorBootEmpty;
+    const oldFacts = structuredClone(f.facts);
+    let archived = false,
+      reads = 0;
+    f.policy.preservingUpdate.priorBootExit = {
+      helperSha256: fileHash(
+        path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+      ),
+    };
+    c.set([]);
+    f.save();
+    helper.readPriorBootEvidence = () => {
+      assert.equal(
+        archived,
+        false,
+        'archived original lease must not be reread after transition',
+      );
+      reads++;
+      return { oldFacts };
+    };
+    helper.validatePriorBootEmpty = ({ facts }) => {
+      assert.equal(
+        facts.records.filter((r) => r.kind === 'processes').length,
+        0,
+      );
+    };
+    try {
+      scope.within(
+        c.request,
+        (lease) => {
+          lease.preparePriorBootExit();
+          const before = reads;
+          archived = true;
+          lease.check(true);
+          const next = c.make('candidate', process.pid + 10000);
+          c.set(next.rows);
+          lease.bindPreservingChild(
+            next.snapshot,
+            'candidate',
+            next.snapshot.commandLine,
+          );
+          assert.equal(
+            lease.sealPreservingProcessFamily(
+              next.snapshot,
+              'candidate',
+              next.snapshot.commandLine,
+            ),
+            true,
+          );
+          lease.check(true);
+          assert.equal(reads, before);
+        },
+        f.options(),
+      );
+    } finally {
+      helper.readPriorBootEvidence = originalRead;
+      helper.validatePriorBootEmpty = originalValidate;
+    }
+  }));
 test('legacy boundary observes only twice and its repeated lease checks never query complete references', () =>
   fixture((f) => {
     const request = preservingRestart(f),
@@ -3126,7 +3190,7 @@ test('install caller repair: unknown reference remains refused after binding', (
     assert.deepEqual(state.outputs, []);
   }));
 
-function emptyInstallRecoveryFixture(run) {
+function emptyInstallRecoveryFixture(run, priorBoot = false) {
   return fixture((f) => {
     const e = effectInstallScope(f),
       tool = fs.realpathSync.native(path.join(__dirname, 'release-scope.cjs')),
@@ -3168,6 +3232,11 @@ function emptyInstallRecoveryFixture(run) {
       },
     ];
     const oldLauncher = f.policy.windowsReferences.launchers[0];
+    if (priorBoot)
+      oldLauncher.files.push({
+        path: path.join(__dirname, 'restart.cjs'),
+        sha256: 'c'.repeat(64),
+      });
     const probePath = path.join(__dirname, 'windows-release-references.cjs'),
       probeStat = fs.lstatSync(probePath, { bigint: true });
     f.policy.probe = {
@@ -3186,6 +3255,7 @@ function emptyInstallRecoveryFixture(run) {
       },
     });
     f.save();
+    const priorBootFacts = structuredClone(f.facts);
     const old = structuredClone(f.policy),
       oldFile = path.join(f.base, 'interrupted-policy.json');
     fs.copyFileSync(f.config, oldFile);
@@ -3250,6 +3320,26 @@ function emptyInstallRecoveryFixture(run) {
       durationMs: 300000,
     };
     next.windowsReferences.launchers[0].files[0].sha256 = fileHash(tool);
+    if (priorBoot) {
+      const restart = path.join(__dirname, 'restart.cjs');
+      next.windowsReferences.launchers[0].files[2].sha256 = fileHash(restart);
+      next.preservingUpdate.priorBootExit = {
+        helperSha256: fileHash(
+          path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+        ),
+        oldReferences: prior.payload.claim.refs,
+        restartBinding: {
+          path: restart,
+          oldSha256: 'c'.repeat(64),
+          newSha256: fileHash(restart),
+        },
+        launcherTransition: {
+          pointer: oldLauncher.pointerPath,
+          oldSha256: hash(oldLauncher.files),
+          newSha256: hash(next.windowsReferences.launchers[0].files),
+        },
+      };
+    }
     f.facts.records.at(-1).viaPointer.launcherSha256 = hash(
       next.windowsReferences.launchers[0].files,
     );
@@ -3284,6 +3374,12 @@ function emptyInstallRecoveryFixture(run) {
           'windowsReferences.launchers.0.files.0.sha256',
           'probe.sha256',
           'probe.identity',
+          ...(priorBoot
+            ? [
+                'windowsReferences.launchers.0.files.2.sha256',
+                'preservingUpdate.priorBootExit',
+              ]
+            : []),
         ],
         probeBinding: { old: old.probe, new: next.probe },
         toolBinding: {
@@ -3307,6 +3403,7 @@ function emptyInstallRecoveryFixture(run) {
       f,
       e,
       old,
+      priorBootFacts,
       next,
       oldFile,
       receipt,
@@ -3324,6 +3421,44 @@ function emptyInstallRecoveryFixture(run) {
     });
   });
 }
+for (const mutation of ['none', 'restart-pin', 'extra-leaf'])
+  test('prior-boot empty claim: exact six-leaf CAS ' + mutation, () =>
+    emptyInstallRecoveryFixture((x) => {
+      const helper = require('./normal-start-claim-rebind.cjs');
+      const originalRead = helper.readPriorBootEvidence,
+        originalValidate = helper.validatePriorBootEmpty;
+      assert.equal(
+        helper.referenceDigest(x.priorBootFacts),
+        x.prior.payload.claim.refs,
+      );
+      x.f.facts.records = x.f.facts.records.filter(
+        (r) => r.kind !== 'processes',
+      );
+      helper.readPriorBootEvidence = () => ({ oldFacts: x.priorBootFacts });
+      helper.validatePriorBootEmpty = ({ facts }) =>
+        assert(!facts.records.some((r) => r.kind === 'processes'));
+      if (mutation === 'restart-pin')
+        x.next.preservingUpdate.priorBootExit.restartBinding.oldSha256 =
+          'f'.repeat(64);
+      if (mutation === 'extra-leaf') x.next.maxGrowthBytes++;
+      x.save();
+      try {
+        if (mutation === 'none') {
+          x.open().close();
+          const result = JSON.parse(fs.readFileSync(x.ledger)).payload;
+          assert.equal(result.claim, null);
+          assert.equal(result.bindingRepair.claimSha256, x.receipt.claimSha256);
+          assert(fs.readFileSync(x.adopted).equals(x.origin));
+        } else {
+          assert.throws(() => x.open(), /BINDING_REPAIR/);
+          assert(fs.readFileSync(x.ledger).equals(x.original));
+        }
+      } finally {
+        helper.readPriorBootEvidence = originalRead;
+        helper.validatePriorBootEmpty = originalValidate;
+      }
+    }, true),
+  );
 test('empty install recovery: real timeout keeps original claim and reviewed recovery preserves evidence', () =>
   emptyInstallRecoveryFixture((x) => {
     assert.throws(() =>

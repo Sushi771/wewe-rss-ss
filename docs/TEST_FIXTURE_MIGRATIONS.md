@@ -24,3 +24,11 @@ Adjacent offline coverage also passed the scheduled raw-identity mismatch, remai
 The exact durable response-settlement failure case also passed in isolation (1 case). Six targeted cases passed in total; this remains offline evidence, not a demonstrated CI root-cause fix.
 
 The existing Windows CI failures on a2dde remain unresolved. Six passing local cases do not replace full cross-platform CI for this candidate.
+
+## Timed-out setup ownership
+
+The `xhs-p0-source-risk-full` spec now binds each setup and cleanup to its own client and directory. A timed-out Jest hook is not cancelled automatically. A controlled short-timeout reproduction showed that the previous setup could continue through the next case's mutable client slot and produce a nested SQLite transaction. This establishes the cross-case failure mechanism, not the cause of the original 40-second setup delay.
+
+The fixture marks itself closed before waiting for its own setup and cleanup to settle, then disconnects once. It checks closure before each migration statement and never publishes a late client into the suite. Successfully closed fixtures leave the pending set; all directories remain available for inspection. Network guards remain installed until pending fixtures settle, and final close failures are reported after restoring the guards. Existing migration SQL, cleanup SQL, business tests, assertions and timeouts are unchanged. No migration cache, retry or production-client change is introduced.
+
+Two controlled-Promise regressions cover a pending file read and an already-started SQL statement while a later fixture uses an independent client. The final isolated spec passed 76 tests, with TypeScript, ESLint and formatting checks. Full cross-platform CI remains required; these local results do not establish that the original setup-delay cause is resolved or that production collection has recovered.

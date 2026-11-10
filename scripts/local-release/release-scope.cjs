@@ -386,6 +386,22 @@ function validateReferences(value, policy, allowExits = false) {
     exitedProcesses: undefined,
   });
 }
+function priorBootEvidence(policy, facts) {
+  const spec = policy.preservingUpdate?.priorBootExit;
+  const file = path.join(__dirname, 'normal-start-claim-rebind.cjs');
+  if (!spec || fileHash(file) !== spec.helperSha256)
+    throw Error('RELEASE_PRIOR_BOOT_HELPER_CHANGED');
+  const helper = require(file),
+    evidence = helper.readPriorBootEvidence(policy);
+  validateReferences(evidence.oldFacts, policy);
+  helper.validatePriorBootEmpty({
+    policy,
+    facts,
+    ...evidence,
+    nowUtc: new Date().toISOString(),
+  });
+  return evidence;
+}
 function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
@@ -734,7 +750,11 @@ function open(request, options = {}, boundOperation) {
         const changes = differences(old, policy).sort(),
           oldLaunchers = old.windowsReferences?.launchers,
           newLaunchers = policy.windowsReferences?.launchers;
-        let recoveredClaim, failureBytes, changedLauncher, releasedLockBytes;
+        let recoveredClaim,
+          failureBytes,
+          changedLauncher,
+          releasedLockBytes,
+          restartDifference;
         const installWriter = path.join(__dirname, 'install-lifecycle.cjs');
         if (recoverEmpty) {
           // Only the omitted small-profile timeout and this module's existing
@@ -825,6 +845,43 @@ function open(request, options = {}, boundOperation) {
             reject();
           bytes(probePath, policy.probe.sha256);
           restored.probe = structuredClone(old.probe);
+          if (preserving.priorBootExit) {
+            const b = preserving.priorBootExit;
+            const rb = b.restartBinding,
+              at = path.join(__dirname, 'restart.cjs');
+            const indexes = oldLaunchers[i].files.flatMap((f, k) =>
+              f.path === at ? [k] : [],
+            );
+            if (!rb || rb.path !== canonical(at) || indexes.length !== 1)
+              reject();
+            const k = indexes[0];
+            if (
+              oldLaunchers[i].files[k].sha256 !== rb.oldSha256 ||
+              newLaunchers[i].files[k]?.path !== at ||
+              newLaunchers[i].files[k].sha256 !== rb.newSha256 ||
+              rb.oldSha256 === rb.newSha256
+            )
+              reject();
+            bytes(at, rb.newSha256);
+            bytes(
+              path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+              b.helperSha256,
+            );
+            restored.windowsReferences.launchers[i].files[k].sha256 =
+              rb.oldSha256;
+            restartDifference = `windowsReferences.launchers.${i}.files.${k}.sha256`;
+            if (
+              old.preservingUpdate.priorBootExit ||
+              hash(b.launcherTransition) !==
+                hash({
+                  pointer: oldLaunchers[i].pointerPath,
+                  oldSha256: hash(oldLaunchers[i].files),
+                  newSha256: hash(newLaunchers[i].files),
+                })
+            )
+              reject();
+            delete restored.preservingUpdate.priorBootExit;
+          }
           if (
             hash(restored) !== hash(old) ||
             hash(a.allowedDifferences) !==
@@ -833,6 +890,9 @@ function open(request, options = {}, boundOperation) {
                 `windowsReferences.launchers.${i}.files.${j}.sha256`,
                 'probe.sha256',
                 'probe.identity',
+                ...(preserving.priorBootExit
+                  ? [restartDifference, 'preservingUpdate.priorBootExit']
+                  : []),
               ])
           )
             reject();
@@ -956,6 +1016,11 @@ function open(request, options = {}, boundOperation) {
             recoveredClaim.outputs.length
           )
             reject();
+          if (
+            preserving.priorBootExit &&
+            preserving.priorBootExit.oldReferences !== recoveredClaim.refs
+          )
+            reject();
         }
         const approvalBytes = bytes(repairPath, repairSha, 65536);
         const snapshot = Buffer.from(
@@ -1057,14 +1122,15 @@ function open(request, options = {}, boundOperation) {
               );
               // Undo only the reviewed launcher-file hash when comparing the
               // fresh complete references to the interrupted claim's digest.
-              for (const r of facts.records) {
+              for (const r of preserving.priorBootExit ? [] : facts.records) {
                 if (
                   r.viaPointer?.path === changedLauncher.pointer &&
                   r.viaPointer.launcherSha256 === changedLauncher.newSha
                 )
                   r.viaPointer.launcherSha256 = changedLauncher.oldSha;
               }
-              if (validateReferences(facts, old) !== recoveredClaim.refs)
+              if (preserving.priorBootExit) priorBootEvidence(policy, facts);
+              else if (validateReferences(facts, old) !== recoveredClaim.refs)
                 reject();
               // References can be slow: recheck every local guard afterwards.
               validate(false);
@@ -1522,7 +1588,8 @@ function open(request, options = {}, boundOperation) {
     }
     if (preserving && preserving.operation !== 'build' && !refs) {
       const a = preserving.active;
-      if (processFamily)
+      if (preserving.priorBootExit) priorBootEvidence(policy, value);
+      else if (processFamily)
         families.family(
           expectedProcesses,
           a.oldProcess.pid,
@@ -1543,14 +1610,15 @@ function open(request, options = {}, boundOperation) {
             r.pointerPath === a.pointer &&
             r.packageId === a.currentId,
         ) ||
-        !value.records.some(
-          (r) =>
-            r.kind === 'processes' &&
-            r.packageId === a.currentId &&
-            r.pid === a.oldProcess.pid &&
-            r.startUtc === a.oldProcess.startUtc &&
-            r.executableSha256 === a.oldProcess.executableSha256,
-        )
+        (!preserving.priorBootExit &&
+          !value.records.some(
+            (r) =>
+              r.kind === 'processes' &&
+              r.packageId === a.currentId &&
+              r.pid === a.oldProcess.pid &&
+              r.startUtc === a.oldProcess.startUtc &&
+              r.executableSha256 === a.oldProcess.executableSha256,
+          ))
       )
         throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
     }
@@ -1958,6 +2026,17 @@ function open(request, options = {}, boundOperation) {
           true,
         );
         families.assertSnapshot(rows[0], snapshot);
+      },
+      preparePriorBootExit() {
+        if (!preserving?.priorBootExit || preserving.operation !== 'restart')
+          throw Error('RELEASE_PRIOR_BOOT_UNAPPROVED');
+        owner();
+        check(true);
+        const facts = references(true).value;
+        const proof = priorBootEvidence(policy, facts);
+        if (expectedProcesses.length)
+          throw Error('RELEASE_PRIOR_BOOT_WRITER_PRESENT');
+        return proof;
       },
       sealPreservingProcessFamily(snapshot, packageId, expectedCommand) {
         if (!processFamily) return;

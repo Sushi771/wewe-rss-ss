@@ -1422,6 +1422,43 @@ function probe(
       restored.windowsReferences.launchers[i].files[j].sha256 = pin.oldSha256;
       delete restored.scanBudget;
       restored.probe = structuredClone(old.probe);
+      const priorBoot = policy.preservingUpdate?.priorBootExit;
+      let restartDifference;
+      if (priorBoot) {
+        const rb = priorBoot.restartBinding,
+          at = path.join(__dirname, 'restart.cjs');
+        const indexes = previous.files.flatMap((f, k) =>
+          f.path === at ? [k] : [],
+        );
+        if (!rb || rb.path !== canonical(at) || indexes.length !== 1) refuse();
+        const k = indexes[0];
+        if (
+          previous.files[k].sha256 !== rb.oldSha256 ||
+          next.files[k]?.path !== at ||
+          next.files[k].sha256 !== rb.newSha256 ||
+          rb.oldSha256 === rb.newSha256
+        )
+          refuse();
+        checked(at, rb.newSha256);
+        checked(
+          path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+          priorBoot.helperSha256,
+        );
+        restored.windowsReferences.launchers[i].files[k].sha256 = rb.oldSha256;
+        restartDifference = `windowsReferences.launchers.${i}.files.${k}.sha256`;
+        if (
+          old.preservingUpdate.priorBootExit ||
+          priorBoot.oldReferences !== claim.refs ||
+          hash(priorBoot.launcherTransition) !==
+            hash({
+              pointer: previous.pointerPath,
+              oldSha256: hash(previous.files),
+              newSha256: hash(next.files),
+            })
+        )
+          refuse();
+        delete restored.preservingUpdate.priorBootExit;
+      }
       if (
         hash(restored) !== hash(old) ||
         hash(a.allowedDifferences) !==
@@ -1430,6 +1467,9 @@ function probe(
             `windowsReferences.launchers.${i}.files.${j}.sha256`,
             'probe.sha256',
             'probe.identity',
+            ...(priorBoot
+              ? [restartDifference, 'preservingUpdate.priorBootExit']
+              : []),
           ])
       )
         refuse();
@@ -1545,6 +1585,22 @@ function probe(
     );
     if (preserving) result.observationComplete = true;
     else result.complete = true;
+    if (recovery && policy.preservingUpdate?.priorBootExit) {
+      const helperFile = path.join(__dirname, 'normal-start-claim-rebind.cjs');
+      if (
+        digest(bytes(helperFile)) !==
+        policy.preservingUpdate.priorBootExit.helperSha256
+      )
+        fail('REFERENCE_PRIOR_BOOT_HELPER_CHANGED');
+      const helper = require(helperFile),
+        evidence = helper.readPriorBootEvidence(policy);
+      helper.validatePriorBootEmpty({
+        policy,
+        facts: result,
+        ...evidence,
+        nowUtc: new Date().toISOString(),
+      });
+    }
   } catch (error) {
     // Keep private paths/command lines out of errors. Full raw host evidence is
     // never printed. A failed category is not silently declared empty.
