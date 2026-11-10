@@ -13,9 +13,10 @@ function extractRestartCatch(value) {
   const caught = text.indexOf('} catch (error) {', baseline);
   const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
   const from = opening ? caught + opening.index : -1;
-  const ending = /\}\s*finally\s*\{\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
-    text.slice(from),
-  );
+  const ending =
+    /\}\s*finally\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+      text.slice(from),
+    );
   const to = ending ? from + ending.index : -1;
   assert(baseline > 0 && caught > baseline && from > caught && to > from);
   return text.slice(from, to);
@@ -286,6 +287,7 @@ async function isolated() {
         ['} catch (error) {', '} catch (changedError) {'],
         ['newChild', 'changedChild'],
         ['options.rehearsal', 'options.changedRehearsal'],
+        ['releasePriorBootLocks()', 'changedReleasePriorBootLocks()'],
       ])
         assert.throws(() =>
           extractRestartCatch(restartSource.replaceAll(anchor, replacement)),
@@ -295,6 +297,15 @@ async function isolated() {
         'return(async()=>{with(ctx){' + extracted + '}})()',
       );
       const ctx = {
+        priorBoot: false,
+        priorBootArchived: false,
+        priorBootReleaseFailed: false,
+        verifyNewWriter() {
+          assert.equal(ctx.priorBoot, false);
+        },
+        releasePriorBootLocks() {
+          assert.equal(ctx.priorBoot, false);
+        },
         confirmFamilyExit: require(path.join(control, 'restart.cjs'))
           .confirmFamilyExit,
         sealFamily: require(path.join(control, 'restart.cjs')).sealFamily,
