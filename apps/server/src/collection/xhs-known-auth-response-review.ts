@@ -4,6 +4,7 @@ import type { RoundTx } from './xhs-unbound-round';
 import { readScheduledKnownAuthProof } from './xhs-scheduled-review-scope';
 import { classifyReviewedRestrictions } from './xhs-reviewed-restrictions';
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
+import { projectKnownAuthHistoryJob } from './xhs-known-auth-history-projection';
 
 const KIND = 'known-auth-response-review-v1';
 const AUTH = 'XHS_SOURCE_AUTHENTICATION_BLOCKED';
@@ -289,6 +290,15 @@ async function build(
   const restrictionRows = (rs: any[]) =>
     rs.map((r) => {
       const live = JSON.parse(r.document);
+      if (jobs.includes(r) && live.fullHistoryReview)
+        return projectKnownAuthHistoryJob(
+          r,
+          tasks,
+          d.xhs_unbound_owner_reviews,
+          proof.scope,
+          String(proof.policy.approved_at),
+          riskAt,
+        );
       // Match historical SQL projection/property order. Job fingerprints never
       // included creator_id; raw document whitespace is also evidence.
       return {

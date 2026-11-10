@@ -20,6 +20,7 @@ import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { assertLegacyXhsSourceReady } from './xhs-legacy-source-fence';
 import { fullHistoryContext } from './xhs-full-history-scope';
+import { knownAuthLineageFixture } from '../../test/redbook-isolated/known-auth-lineage.fixture';
 import {
   admitUnboundRequest,
   settleUnboundRequest,
@@ -82,6 +83,31 @@ async function mutateDoc(update: (d: any) => void, id = target.taskId) {
     JSON.stringify(d),
     id,
   );
+}
+async function insertHistoryLineage() {
+  const f = knownAuthLineageFixture(true);
+  for (const [table, values] of [
+    ['xhs_whole_creator_jobs', f.jobs],
+    ['xhs_subscription_tasks', f.tasks],
+  ] as const)
+    for (const r of values)
+      await db.$executeRawUnsafe(
+        `INSERT INTO ${table} VALUES(?,?,?,?,?)`,
+        r.id,
+        r.creator_id,
+        r.state,
+        r.document,
+        BigInt(r.updated_at),
+      );
+  for (const r of f.reviews)
+    await db.$executeRawUnsafe(
+      `INSERT INTO xhs_unbound_owner_reviews(${Object.keys(r).join(',')}) VALUES(${Object.keys(
+        r,
+      )
+        .map(() => '?')
+        .join(',')})`,
+      ...Object.values(r),
+    );
 }
 beforeEach(async () => {
   fixtureEnvironment = { ...process.env };
@@ -158,6 +184,10 @@ beforeEach(async () => {
     maxRequests: 20,
     phaseLimits: { profile: 3, list: 3, detail: 10, media: 10 },
   };
+  if (
+    expect.getState().currentTestName?.includes('exactly retained full-history')
+  )
+    await insertHistoryLineage();
   await db.$transaction(async (tx) => {
     const p = await prepareScheduledPolicy(tx, input);
     await confirmScheduledPolicy(
@@ -1337,6 +1367,51 @@ it.each([false, true])(
     ).toEqual(before);
   },
 );
+it.each([
+  'valid',
+  'new-code',
+  'new-field',
+  'annotation-extra',
+  'sql-time',
+  'task-binding',
+  'nested-live-risk',
+])(
+  'recognizes only an exactly retained full-history annotation without changing any historical row: %s',
+  async (mode) => {
+    if (mode !== 'valid') {
+      const table = ['task-binding', 'nested-live-risk'].includes(mode)
+        ? 'xhs_subscription_tasks'
+        : 'xhs_whole_creator_jobs';
+      const id =
+        table === 'xhs_subscription_tasks' ? 'full-task' : 'historical-job';
+      const [r] = await db.$queryRawUnsafe<any[]>(
+        `SELECT * FROM ${table} WHERE id=?`,
+        id,
+      );
+      const doc = JSON.parse(r.document);
+      if (mode === 'new-code') doc.code = 'XHS_SOURCE_RATE_LIMIT_BLOCKED';
+      if (mode === 'new-field') doc.unknownField = 'not-reviewed';
+      if (mode === 'annotation-extra') doc.fullHistoryReview.extra = false;
+      if (mode === 'task-binding') doc.creatorId = 'c';
+      if (mode === 'nested-live-risk')
+        doc.unrecognized = { nested: { httpStatus: 429 } };
+      await db.$executeRawUnsafe(
+        `UPDATE ${table} SET document=?,updated_at=? WHERE id=?`,
+        JSON.stringify(doc),
+        mode === 'sql-time' ? 8n : r.updated_at,
+        id,
+      );
+    }
+    const before = await snapshot();
+    if (mode === 'valid')
+      expect((await prep()).authenticationVerified).toBe(false);
+    else await expect(prep()).rejects.toThrow('OTHER_PLATFORM_RESTRICTION');
+    expect(await snapshot()).toBe(before);
+    expect(network).not.toHaveBeenCalled();
+    expect(api).not.toHaveBeenCalled();
+  },
+);
+
 jest.mock('./sqlite-backup', () => ({
   ...jest.requireActual('./sqlite-backup'),
   createVerifiedSqliteBackup: jest.fn(),

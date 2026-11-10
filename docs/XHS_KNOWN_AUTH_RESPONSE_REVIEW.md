@@ -38,6 +38,8 @@ The unpublished intermediate `prepareKnownResponseAuthReview` / `confirmKnownRes
 
 Long-standing unknown-response, generic-risk and full-history manual review APIs keep their original exact evidence and confirmation requirements. None accepts a known response relabelled as unknown, and none is presented as this automatic authentication recovery.
 
+A formally retained full-history annotation does not by itself make an old restriction new. The known-response preflight can reverse only that exact annotation and its SQL timestamp in memory, after verifying the complete retained review lineage, bindings, digests and time order. The resulting row must still match the original generic-risk review fingerprint; the unchanged current document is independently scanned for live restrictions. Missing evidence, changed fields, new restrictions and unknown outcomes remain blocked. This recognition neither changes historical rows nor proves platform authentication. Only one real profile response successfully persisted through the normal explicit connection/restore path can clear its corresponding original AUTH pause.
+
 ## Storage, audit and session proof
 
 No schema migration or new persistent generation is introduced. The finite request-review row follows the established scheduled-review inheritance convention: its `original_outcome=unknown`, root risk and backup SHA refer explicitly to the unchanged historical root policy evidence. They do not describe this known authentication failure or claim a newly created backup. Its separate scope identifies the current known response, exact event/session and one-profile authorization.
