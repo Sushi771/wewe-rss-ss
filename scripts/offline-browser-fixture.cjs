@@ -6,6 +6,7 @@ const http = require('node:http');
 const { spawn } = require('node:child_process');
 const { pathToFileURL } = require('node:url');
 const assert = require('node:assert/strict');
+const { waitForBrowser } = require('./browser-readiness.cjs');
 const web = path.resolve('apps/web');
 const browser =
   process.env.LAYOUT_TEST_BROWSER ||
@@ -155,10 +156,12 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
   );
   let stderr = '',
+    spawnErrorCode = null,
     ws,
     phase = 'startup',
     lastMethod;
   const started = performance.now();
+  const startupDeadline = started + 30000;
   let exited = false;
   const exit = new Promise((resolve) => {
     child.once('exit', () => {
@@ -190,27 +193,46 @@ async function withFixture(source, run, aliases = {}, options = {}) {
     stderr = (stderr + chunk).slice(-4000);
   });
   child.on('error', (error) => {
+    spawnErrorCode = error.code || 'UNKNOWN';
     stderr += error.message;
   });
   try {
-    const portFile = path.join(temp, 'profile/DevToolsActivePort');
-    for (let i = 0; i < 100 && !exited && !fs.existsSync(portFile); i++)
-      await pause(100);
-    assert(
-      fs.existsSync(portFile),
-      `isolated browser unavailable: ${stderr.slice(-1000)}`,
-    );
+    const remaining = Math.floor(startupDeadline - performance.now());
+    assert(remaining > 0, 'BROWSER_READINESS_DEADLINE');
+    const ready = await waitForBrowser({
+      child,
+      profile: path.join(temp, 'profile'),
+      stderr: () => stderr,
+      spawnError: () => spawnErrorCode,
+      timeoutMs: remaining,
+    });
     phase = 'connect';
-    const port = fs.readFileSync(portFile, 'utf8').split('\n')[0];
-    const tabs = await (
-      await fetch(`http://127.0.0.1:${port}/json/list`)
-    ).json();
-    ws = new WebSocket(
-      tabs.find((tab) => tab.type === 'page').webSocketDebuggerUrl,
-    );
+    ws = new WebSocket(ready.page.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
-      ws.addEventListener('open', resolve, { once: true });
-      ws.addEventListener('error', reject, { once: true });
+      // Discovery and socket opening share one deadline; never relaunch.
+      const finish = (error) => {
+        clearTimeout(timer);
+        ws.removeEventListener('open', onOpen);
+        ws.removeEventListener('error', onError);
+        child.removeListener('exit', onExit);
+        error ? reject(error) : resolve();
+      };
+      const onOpen = () =>
+        finish(
+          performance.now() >= startupDeadline
+            ? Error('BROWSER_READINESS_DEADLINE')
+            : null,
+        );
+      const onError = () => finish(Error('BROWSER_DEBUG_SOCKET_FAILED'));
+      const onExit = () => finish(Error('BROWSER_EXITED_BEFORE_READY'));
+      const timer = setTimeout(
+        () => finish(Error('BROWSER_READINESS_DEADLINE')),
+        Math.max(0, startupDeadline - performance.now()),
+      );
+      ws.addEventListener('open', onOpen, { once: true });
+      ws.addEventListener('error', onError, { once: true });
+      child.once('exit', onExit);
+      if (exited) onExit();
     });
     let serial = 0;
     const pending = new Map();
