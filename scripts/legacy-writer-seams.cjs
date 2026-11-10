@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const seams = require('./fixtures/legacy-writer-seams.json');
 const installed = require('./fixtures/installed-writer-compat.json');
 const runtimeFamilies = require('./fixtures/runtime-family-compat.json');
+const priorBootRestarts = require('./fixtures/prior-boot-restart-compat.json');
 const sha = (source) =>
   crypto.createHash('sha256').update(source).digest('hex');
 function restoreCompatible(file, source) {
@@ -10,6 +11,11 @@ function restoreCompatible(file, source) {
   if (!reviewed) return source;
   if (sha(source) === reviewed.beforeSha256) return source;
   const family = runtimeFamilies[file];
+  const priorBoot = priorBootRestarts[file];
+  if (priorBoot && sha(source) !== reviewed.afterSha256) {
+    assert.equal(priorBoot.beforeSha256, family.afterSha256);
+    source = restorePriorBootRestart(file, source);
+  }
   if (family && sha(source) !== reviewed.afterSha256) {
     // Invert only the reviewed 52a34b1 installer-family delta. Both complete
     // sources stay pinned; all earlier compatibility and admission pins remain.
@@ -92,6 +98,31 @@ function restoreCompatible(file, source) {
     sha(source),
     reviewed.beforeSha256,
     'exact candidate legacy writer seam: restored precursor',
+  );
+  return source;
+}
+function restorePriorBootRestart(file, source) {
+  const reviewed = priorBootRestarts[file];
+  if (!reviewed || sha(source) === reviewed.beforeSha256) return source;
+  // Invert only the approved prior-boot branch before the unchanged historical
+  // family/installed/writer layers. Never repin an old artifact to new source.
+  assert.equal(
+    sha(source),
+    reviewed.afterSha256,
+    'exact candidate legacy writer seam: reviewed prior-boot source',
+  );
+  for (const hunk of reviewed.hunks) {
+    assert.equal(
+      source.split(hunk.after).length,
+      2,
+      'exact candidate legacy writer seam: prior-boot hunk',
+    );
+    source = source.replace(hunk.after, hunk.before);
+  }
+  assert.equal(
+    sha(source),
+    reviewed.beforeSha256,
+    'exact candidate legacy writer seam: unchanged pre-boot source',
   );
   return source;
 }
@@ -183,3 +214,4 @@ module.exports = function restoreLegacyWriter(file, source) {
   return source;
 };
 module.exports.restoreCompatible = restoreCompatible;
+module.exports.restorePriorBootRestart = restorePriorBootRestart;

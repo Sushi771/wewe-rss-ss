@@ -14,9 +14,10 @@ function extractRestartCatch(value) {
   const caught = text.indexOf('} catch (error) {', baseline);
   const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
   const from = opening ? caught + opening.index : -1;
-  const ending = /\}\s*finally\s*\{\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
-    text.slice(from),
-  );
+  const ending =
+    /\}\s*finally\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+      text.slice(from),
+    );
   const to = ending ? from + ending.index : -1;
   assert(baseline > 0 && caught > baseline && from > caught && to > from);
   return text.slice(from, to);
@@ -40,6 +41,11 @@ test('restart catch extraction tolerates formatting but requires exact orchestra
   assert.throws(() =>
     extractRestartCatch(
       source.replaceAll('options.rehearsal', 'options.changedRehearsal'),
+    ),
+  );
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replaceAll('releasePriorBootLocks()', 'changedReleaseLocks()'),
     ),
   );
 });
@@ -131,6 +137,17 @@ for (const kind of [
       },
       error: Error(kind),
       stopped: true,
+      // This fixture exercises the original live-stop branch. The new typed
+      // branch is covered by prior-boot-restart.test.cjs, not enabled here.
+      priorBoot: false,
+      priorBootArchived: false,
+      priorBootReleaseFailed: false,
+      verifyNewWriter() {
+        assert.equal(ctx.priorBoot, false);
+      },
+      releasePriorBootLocks() {
+        assert.equal(ctx.priorBoot, false);
+      },
       preserving: true,
       stopOwned: async (child) => {
         if (child) child.exitCode = 1;

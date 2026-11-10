@@ -50,7 +50,8 @@ test('reviewed runtime family inverse preserves every historical pin and rejects
     file = 'scripts/local-release/restart.cjs';
   assert.deepEqual(Object.keys(fixtures), [file]);
   const reviewed = fixtures[file],
-    source = read(file);
+    candidateSource = read(file),
+    source = restoreLegacyWriter.restorePriorBootRestart(file, candidateSource);
   assert.equal(
     reviewed.reviewedFromCommit,
     '8fb806a54d415fc779881cee93fe7f3035dec385',
@@ -102,16 +103,70 @@ test('reviewed runtime family inverse preserves every historical pin and rejects
     ["'PROJECT_WRITER_BOUNDARY_UNPROVEN'", "'BYPASSED_WRITER_BOUNDARY'"],
     ['timeoutMs = 15000,', 'timeoutMs = Infinity,'],
   ]) {
-    assert(source.includes(before));
+    assert(candidateSource.includes(before));
     assert.throws(
       () =>
         restoreLegacyWriter.restoreCompatible(
           file,
-          source.replace(before, after),
+          candidateSource.replace(before, after),
         ),
       /exact candidate legacy writer seam/,
     );
   }
+});
+
+test('reviewed prior-boot inverse preserves the original family pins and rejects all changed source', () => {
+  const file = 'scripts/local-release/restart.cjs';
+  const fixtures = require('./fixtures/prior-boot-restart-compat.json');
+  assert.deepEqual(Object.keys(fixtures), [file]);
+  const reviewed = fixtures[file],
+    source = read(file);
+  assert.equal(
+    reviewed.reviewedFromCommit,
+    'fc58fd79f17620bcc429925da9890cb10f785868',
+  );
+  assert.equal(
+    reviewed.reviewedThroughCommit,
+    'cba0c3531325fb10e0b9cb11538d65ddda5af3e8',
+  );
+  assert.equal(hash(source), reviewed.afterSha256);
+  assert.equal(
+    reviewed.beforeSha256,
+    require('./fixtures/runtime-family-compat.json')[file].afterSha256,
+  );
+  const restored = restoreLegacyWriter.restorePriorBootRestart(file, source);
+  assert.equal(hash(restored), reviewed.beforeSha256);
+  assert.equal(
+    restoreLegacyWriter.restoreCompatible(file, source),
+    restoreLegacyWriter.restoreCompatible(file, restored),
+  );
+  for (const hunk of reviewed.hunks) {
+    assert.equal(source.split(hunk.after).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restorePriorBootRestart(
+          file,
+          source.replace(hunk.after, '/* changed reviewed prior-boot hunk */'),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+  assert.throws(
+    () =>
+      restoreLegacyWriter.restorePriorBootRestart(
+        file,
+        source + '\n// unrelated change\n',
+      ),
+    /exact candidate legacy writer seam/,
+  );
+  assert.throws(
+    () =>
+      restoreLegacyWriter.restorePriorBootRestart(
+        file,
+        restored + '\n// changed historical source\n',
+      ),
+    /exact candidate legacy writer seam/,
+  );
 });
 
 test('metadata-only exclusion inverse cannot hide changed new or historical writer gates', () => {
