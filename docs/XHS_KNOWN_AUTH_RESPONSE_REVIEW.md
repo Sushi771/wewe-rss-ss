@@ -61,3 +61,9 @@ Control-state proofs inspect admission/recovery controls and creator identity/en
 ## Offline validation
 
 Tests use existing migrations, synthetic identities, genuine isolated SQLite transactions and injected synthetic HTTP only. External fetch is forbidden. Coverage includes original AUTH remaining intact during transport, success checkpoint ordering, wrong identity/session/policy, new unknowns, HTTP failures, parse/storage/CAS rollback, lost acknowledgement, exact receipt proof, duplicate actions, independent concurrent writers, saved restore versus startup, future natural admission and old-round closure. Tests also assert zero backup calls. Final counts and exact commands accompany the reviewed change set; local synthetic results do not imply production acceptance.
+
+## 本地检查点失败后的单次恢复
+
+正常连接验证使用独立的 30 秒数据库事务预算，保留全部会话、来源风险和原子提交检查；其他写入仍使用默认预算。Windows 安全会话状态查询的启动耗时不会再被错误地当作 5 秒内必须完成的本地保存。
+
+仅当上一验证已收到 HTTP 200、到达检查点、明确因本地存储失败回滚，而且原认证暂停、任务、完整控制状态和已用预算均可精确核对时，下一次明确的“恢复本机会话”允许一个固定的后继资料验证。旧请求和回执永久保留，已用预算不退回，不自动重试；后继再次失败后不继续。未知结果、认证/验证码/限流限制、解析失败、已提交结果或状态变化均不适用。收到 HTTP 200 不等于认证恢复，只有资料保存和对应认证审计原子提交后才解除暂停。

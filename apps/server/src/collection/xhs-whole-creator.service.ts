@@ -245,14 +245,20 @@ export class XhsWholeCreatorService implements OnModuleInit {
   private write<T>(
     fn: (tx: Prisma.TransactionClient) => Promise<T>,
     expectedBytes = 2_000_000,
+    transactionTimeout?: number,
   ) {
     return incrementalWrite(this.db, expectedBytes, () =>
       sqliteWrites.write(async () => {
         await assertIncrementalWriteAdmission();
-        return this.db.$transaction(async (tx) => {
-          await assertIncrementalTransaction(tx);
-          return fn(tx);
-        });
+        return this.db.$transaction(
+          async (tx) => {
+            await assertIncrementalTransaction(tx);
+            return fn(tx);
+          },
+          transactionTimeout === undefined
+            ? undefined
+            : { timeout: transactionTimeout },
+        );
       }),
     );
   }
@@ -1851,7 +1857,10 @@ export class XhsWholeCreatorService implements OnModuleInit {
           );
           this.runtime.holdKnownAuthPause(binding);
           const result = await runKnownAuthProfile(
-            (work) => this.write((tx) => work(tx)),
+            // Native vault checks start Windows helpers inside the atomic
+            // checkpoint. Keep every check, with a bounded budget for this path
+            // only; ordinary writes retain Prisma's default transaction timeout.
+            (work) => this.write((tx) => work(tx), 2_000_000, 30000),
             this.runtime,
             input,
             plan.digest,
@@ -1913,7 +1922,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
     this.starting.add('known-auth-profile-probe');
     try {
       return await runKnownAuthProfile(
-        (work) => this.write((tx) => work(tx)),
+        (work) => this.write((tx) => work(tx), 2_000_000, 30000),
         this.runtime,
         input,
         input.digest,

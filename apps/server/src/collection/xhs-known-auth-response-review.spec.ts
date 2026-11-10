@@ -1,3 +1,4 @@
+import { knownAuthCheckpointPredecessor } from './xhs-known-auth-checkpoint-successor';
 import { ConfigService } from '@nestjs/config';
 import { TrpcRouter } from '../trpc/trpc.router';
 import { TrpcService } from '../trpc/trpc.service';
@@ -5,7 +6,7 @@ import {
   prepareKnownAuthProfile,
   runKnownAuthProfile,
 } from './xhs-known-auth-profile-probe';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { mkdtemp, readdir } from 'node:fs/promises';
 import { prepareWriterSelf } from '../../../../scripts/local-release/writer-self.fixture.test.cjs';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
@@ -35,6 +36,7 @@ import {
 } from './xhs-scheduled-review-scope';
 import {
   prepareKnownAuthResponseReview,
+  readKnownAuthControlState,
   confirmKnownAuthResponseReview,
   assertKnownAuthCommittedSession,
   refreshKnownAuthAfterCommit,
@@ -2124,6 +2126,262 @@ describe('connection verification before AUTH clear', () => {
     );
     return service;
   }
+  it('gives only known-auth verification writes a bounded native-vault transaction budget', async () => {
+    const service = await fixture();
+    api.mockImplementation(async (request: any) => ({
+      status: 200,
+      url: request.url,
+      body: { success: true, code: 0, data: { synthetic: true } },
+    }));
+    const transactions = jest.spyOn(db, '$transaction');
+    await service.write(async (tx: any) => tx.$queryRawUnsafe('SELECT 1'));
+    expect(transactions.mock.calls).toHaveLength(1);
+    expect(transactions.mock.calls[0][1]).toBeUndefined();
+    transactions.mockClear();
+    try {
+      const result = await service.verifyKnownAuthenticationAfterConnection();
+      expect(result.authenticationRecovery.state).toBe('profile-verified');
+      expect(api).toHaveBeenCalledTimes(1);
+      const options = transactions.mock.calls
+        .map((call) => call[1])
+        .filter((value) => value !== undefined);
+      expect(options.length).toBeGreaterThan(0);
+      expect(
+        options.every(
+          (value) =>
+            JSON.stringify(value) === JSON.stringify({ timeout: 30000 }),
+        ),
+      ).toBe(true);
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    } finally {
+      transactions.mockRestore();
+    }
+  });
+  it.each([
+    'success',
+    'second-local-failure',
+    'unknown',
+    'auth',
+    'control-drift',
+    'receipt-drift',
+    'budget-drift',
+    'predecessor-digest',
+    'predecessor-root',
+    'predecessor-extra',
+    'predecessor-author',
+  ])(
+    'permits only one explicit successor of an exact local checkpoint failure: %s',
+    async (mode) => {
+      const service = await fixture();
+      api.mockImplementation(async (request: any) => ({
+        status: 200,
+        url: request.url,
+        body: { success: true, code: 0, data: { synthetic: true } },
+      }));
+      const originalTask = (await taskRows()).find(
+        (r) => r.id === target.taskId,
+      );
+      const beforeRisk = await db.$queryRawUnsafe(
+        'SELECT * FROM xhs_source_risk',
+      );
+      const beforeBudget = await db.$queryRawUnsafe<any[]>(
+        "SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'",
+      );
+      const realWrite = service.write.bind(service);
+      let failed = false;
+      service.write = async (work: any, ...options: any[]) =>
+        realWrite(
+          (tx: any) =>
+            work(
+              new Proxy(tx, {
+                get(t, k) {
+                  if (k === '$executeRawUnsafe')
+                    return async (sql: string, ...args: any[]) => {
+                      if (
+                        sql.startsWith(
+                          'UPDATE xhs_subscription_tasks SET document',
+                        ) &&
+                        (!failed || mode === 'second-local-failure')
+                      ) {
+                        failed = true;
+                        throw new Prisma.PrismaClientKnownRequestError(
+                          'synthetic checkpoint transaction timeout',
+                          { code: 'P2028', clientVersion: 'test' },
+                        );
+                      }
+                      return t.$executeRawUnsafe(sql, ...args);
+                    };
+                  return t[k];
+                },
+              }),
+            ),
+          ...options,
+        );
+      expect(
+        (await service.verifyKnownAuthenticationAfterConnection())
+          .authenticationRecovery.state,
+      ).toBe('paused');
+      expect(api).toHaveBeenCalledTimes(1);
+      expect((await taskRows()).find((r) => r.id === target.taskId)).toEqual(
+        originalTask,
+      );
+      expect(await db.$queryRawUnsafe('SELECT * FROM xhs_source_risk')).toEqual(
+        beforeRisk,
+      );
+      const oldRequests = await db.$queryRawUnsafe<any[]>(
+        "SELECT * FROM xhs_unbound_owner_requests WHERE logical_target='profile'",
+      );
+      expect(oldRequests).toHaveLength(1);
+      const oldReceipt = (
+        await db.$queryRawUnsafe<any[]>(
+          'SELECT * FROM xhs_unbound_source_receipts WHERE operation_id=?',
+          oldRequests[0].operation_id,
+        )
+      )[0];
+      expect(JSON.parse(oldReceipt.document)).toMatchObject({
+        stage: 'checkpoint',
+        outcome: 'local-failure',
+        terminal: true,
+        status: 200,
+        code: 'XHS_STORAGE_FAILED',
+      });
+      if (mode === 'unknown')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_unbound_owner_requests SET outcome='unknown' WHERE operation_id=?",
+          oldRequests[0].operation_id,
+        );
+      if (mode === 'auth' || mode === 'receipt-drift') {
+        const receipt = JSON.parse(oldReceipt.document);
+        if (mode === 'auth') {
+          receipt.code = AUTH;
+          receipt.status = 401;
+        } else receipt.unrecognized = true;
+        await db.$executeRawUnsafe(
+          'UPDATE xhs_unbound_source_receipts SET document=? WHERE operation_id=?',
+          JSON.stringify(receipt),
+          oldReceipt.operation_id,
+        );
+      }
+      if (mode === 'control-drift')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_creators SET enabled=0 WHERE id='b'",
+        );
+      if (mode === 'budget-drift')
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_request_budgets SET used=used+1 WHERE id='xhs:source-total'",
+        );
+      if (mode.startsWith('predecessor-')) {
+        const review = (
+          await db.$queryRawUnsafe<any[]>(
+            'SELECT id,scope_json FROM xhs_unbound_owner_reviews WHERE id=?',
+            oldRequests[0].review_id,
+          )
+        )[0];
+        const scope = JSON.parse(review.scope_json);
+        if (mode === 'predecessor-digest')
+          scope.knownAuthentication.authDigest = 'f'.repeat(64);
+        if (mode === 'predecessor-root')
+          scope.rootHistoricalEvidence.inherited = false;
+        if (mode === 'predecessor-extra')
+          scope.unrecognizedRestriction = {
+            code: 'XHS_SOURCE_VERIFICATION_BLOCKED',
+          };
+        if (mode === 'predecessor-author')
+          scope.creatorBindings = { a: 'different-author' };
+        const digest = createHash('sha256').update(pack(scope)).digest('hex');
+        await expect(
+          db.$executeRawUnsafe(
+            'UPDATE xhs_unbound_owner_reviews SET scope_json=?,plan_digest=? WHERE id=?',
+            pack(scope),
+            digest,
+            review.id,
+          ),
+        ).rejects.toThrow('UNBOUND_REVIEW_IMMUTABLE');
+        // The immutable DB rejects tampering first. Independently exercise the
+        // pure proof against a forged in-memory projection, without dropping it.
+        const state = await readKnownAuthControlState(db);
+        const forged = state.data.xhs_unbound_owner_reviews.find(
+          (r) => r.id === review.id,
+        );
+        forged.scope_json = pack(scope);
+        forged.plan_digest = digest;
+        const plan = await prepareKnownAuthResponseReview(db, target, runtime);
+        const policy = state.data.xhs_unbound_owner_reviews.find(
+          (r) => r.id === scope.rootHistoricalEvidence.policyId,
+        );
+        expect(() =>
+          knownAuthCheckpointPredecessor(
+            state,
+            scope.knownAuthentication.authReviewId,
+            target.taskId,
+            target.creatorId,
+            policy,
+            state.data.xhs_source_risk[0],
+            plan,
+          ),
+        ).toThrow('KNOWN_PROFILE_ALREADY_CONSUMED');
+        expect(api).toHaveBeenCalledTimes(1);
+        expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+        return;
+      }
+      // Let the unchanged real budget cooldown pass without modifying its rows.
+      jest.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+      const admitted = ['success', 'second-local-failure'].includes(mode);
+      if (admitted)
+        await prepareKnownAuthProfile(
+          db,
+          { ...target, authReviewId: '', authDigest: '' },
+          runtime,
+          false,
+          true,
+        );
+      const second = await service.verifyKnownAuthenticationAfterConnection();
+      expect(second.authenticationRecovery.state).toBe(
+        mode === 'success' ? 'profile-verified' : 'paused',
+      );
+      expect(api).toHaveBeenCalledTimes(admitted ? 2 : 1);
+      if (admitted) {
+        expect(
+          await db.$queryRawUnsafe(
+            'SELECT * FROM xhs_unbound_owner_requests WHERE operation_id=?',
+            oldRequests[0].operation_id,
+          ),
+        ).toEqual(oldRequests);
+        expect(
+          await db.$queryRawUnsafe(
+            'SELECT * FROM xhs_unbound_source_receipts WHERE operation_id=?',
+            oldReceipt.operation_id,
+          ),
+        ).toEqual([oldReceipt]);
+        const used = await db.$queryRawUnsafe<any[]>(
+          "SELECT used FROM xhs_request_budgets WHERE id='xhs:source-total'",
+        );
+        expect(Number(used[0].used)).toBe(Number(beforeBudget[0].used) + 2);
+        const attempts = await db.$queryRawUnsafe<any[]>(
+          "SELECT review_id FROM xhs_unbound_owner_requests WHERE logical_target='profile'",
+        );
+        expect(attempts).toHaveLength(2);
+        expect(
+          attempts.some((r) => r.review_id.endsWith('-local-checkpoint-1')),
+        ).toBe(true);
+      }
+      if (mode === 'success') {
+        const doc = JSON.parse(
+          (await taskRows()).find((r) => r.id === target.taskId).document,
+        );
+        expect(
+          doc.knownResponseAuthReviews[0].localCheckpointRecovery,
+        ).toMatchObject({
+          attempt: 1,
+          operationId: oldRequests[0].operation_id,
+          automaticRetry: false,
+        });
+      }
+      await service.verifyKnownAuthenticationAfterConnection();
+      expect(api).toHaveBeenCalledTimes(admitted ? 2 : 1);
+      expect(createVerifiedSqliteBackup).not.toHaveBeenCalled();
+    },
+  );
   it('keeps exact AUTH through real profile transport, atomically saves then clears, never retries', async () => {
     const service = await fixture();
     const beforeRisk = await db.$queryRawUnsafe<any[]>(

@@ -1,3 +1,7 @@
+import {
+  knownAuthCheckpointPredecessor,
+  knownProfileAttemptIds,
+} from './xhs-known-auth-checkpoint-successor';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -174,12 +178,25 @@ export async function prepareKnownAuthProfile(
       /^[a-f0-9]{64}$/.test(policy.backup_sha256),
     'PROFILE_ROOT_PROVENANCE_REQUIRED',
   );
-  const reviewId = 'unbound-known-profile-' + hash(audit.id);
+  const localCheckpointRecovery = recoverBeforeClear
+    ? knownAuthCheckpointPredecessor(
+        state,
+        audit.id,
+        input.taskId,
+        input.creatorId,
+        policy,
+        state.data.xhs_source_risk[0],
+        recoveryPlan,
+      )
+    : undefined;
+  const attempt = knownProfileAttemptIds(audit.id, !!localCheckpointRecovery);
+  const reviewId = attempt.reviewId;
   check(
     !state.data.xhs_unbound_owner_reviews.some(
       (r) =>
         r.id === reviewId ||
-        (JSON.parse(r.scope_json).reviewKind === KNOWN_AUTH_PROFILE_KIND &&
+        (r.id !== localCheckpointRecovery?.reviewId &&
+          JSON.parse(r.scope_json).reviewKind === KNOWN_AUTH_PROFILE_KIND &&
           JSON.parse(r.scope_json).knownAuthentication?.authReviewId ===
             audit.id),
     ),
@@ -215,11 +232,12 @@ export async function prepareKnownAuthProfile(
       ...(recoverBeforeClear ? { committed: false } : {}),
     },
     session: audit.session,
+    ...(localCheckpointRecovery ? { localCheckpointRecovery } : {}),
     transportBinding,
     creatorIds: [input.creatorId],
     creatorBindings: { [input.creatorId]: authorId },
     requestScope: {
-      taskId: 'known-profile:' + hash(audit.id),
+      taskId: attempt.taskId,
       target: 'profile',
       maxRequests: 1,
       phaseLimits: { profile: 1, list: 0, detail: 0, media: 0 },
@@ -268,10 +286,16 @@ async function checkedRow(
   await c.ready();
   check(
     reviewId ===
-      'unbound-known-profile-' + hash(s.knownAuthentication.authReviewId) &&
+      knownProfileAttemptIds(
+        s.knownAuthentication.authReviewId,
+        !!s.localCheckpointRecovery,
+      ).reviewId &&
       request.taskId === s.requestScope.taskId &&
       request.taskId ===
-        'known-profile:' + hash(s.knownAuthentication.authReviewId) &&
+        knownProfileAttemptIds(
+          s.knownAuthentication.authReviewId,
+          !!s.localCheckpointRecovery,
+        ).taskId &&
       s.creatorIds.length === 1 &&
       request.creatorId === s.creatorIds[0] &&
       request.phase === 'profile' &&
@@ -839,6 +863,9 @@ async function commitVerifiedAuthentication(
     authenticationVerified: true,
     sourceRequestsSent: 1,
     newGrant: true,
+    ...(plan.scope.localCheckpointRecovery
+      ? { localCheckpointRecovery: plan.scope.localCheckpointRecovery }
+      : {}),
     verification: {
       order: 'profile-checkpoint-before-auth-clear',
       reviewId: plan.reviewId,
