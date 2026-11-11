@@ -25,6 +25,16 @@ known article-local failure must leave other eligible notes in the same
 creator available. A new unknown request outcome or current source-wide
 authentication, verification, or throttling restriction still stops work.
 
+Scheduled clock observations may also read an exactly bound, settled basic
+task marked `XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED`: its row and document must
+both be partial, failed and remaining must both be zero, and historical
+exclusions must be present. This observation creates no task, session binding,
+review or request budget. It lets the runner proceed to the existing media and
+later-creator checks without reopening basic collection or retrying excluded
+notes. Active or new unknown source work and other failure protections remain
+unchanged. The round remains incomplete, and synthetic observation regressions
+do not establish complete live collection or cross-session continuation.
+
 Cancellation acceptance must exercise the subscription task's `cancelTask`
 entry point. A test of the legacy whole-job cancellation method alone does
 not establish cancellation safety for the full-history child task. Interrupted

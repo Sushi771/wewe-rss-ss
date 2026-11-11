@@ -476,14 +476,27 @@ export async function prepareScheduledTaskReview(
         Number.isSafeInteger(doc.failed) &&
         doc.failed > 0 &&
         doc.remaining === 0;
+      const historyPartial =
+        input.phase === 'basic' &&
+        task[0].state === 'partial' &&
+        doc.state === 'partial' &&
+        doc.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' &&
+        doc.failed === 0 &&
+        doc.remaining === 0 &&
+        Array.isArray(doc.historyExcludedIds) &&
+        doc.historyExcludedIds.length > 0 &&
+        doc.historyExcludedIds.every(
+          (id: unknown) => typeof id === 'string' && id.length > 0,
+        );
       check(
-        (completed || localPartial) &&
+        (completed || localPartial || historyPartial) &&
           !doc.sourceActive &&
           !doc.sourceUnknowns?.length,
         'SCHEDULED_TASK_BINDING_CHANGED',
       );
       // A clock observation of this exact settled task grants no new work,
-      // session binding, review or request budget. Failed/unknown tasks stay closed.
+      // session binding, review or request budget. Historical exclusions remain
+      // excluded; other failed/unknown tasks stay closed.
       return undefined;
     }
   }

@@ -13,6 +13,7 @@ import {
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import { fullHistoryContext } from './xhs-full-history-scope';
 import { admitUnboundRequest } from './xhs-unbound-round';
+import { XhsScheduledRunner } from './xhs-scheduled-runner';
 
 it('reads real millisecond INTEGER approvals and orders 9/10 numerically through the actual recurring review path', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'xhs-policy-clock-'));
@@ -144,6 +145,146 @@ it('reads real millisecond INTEGER approvals and orders 9/10 numerically through
             prepareScheduledTaskReview(tx, observedInput, approvalTime + 2n),
           ),
         ).resolves.toBeUndefined();
+        const historyPartial = {
+          ...terminal,
+          state: 'partial',
+          code: 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED',
+          remaining: 0,
+          completed: 2,
+          total: 2,
+          historyExcludedIds: [JSON.stringify(['xiaohongshu', 'note', 'old'])],
+          sourceActive: false,
+          sourceUnknowns: [],
+        };
+        const replaceTask = async (doc: any) =>
+          db.$executeRawUnsafe(
+            'UPDATE xhs_subscription_tasks SET state=?,document=? WHERE id=?',
+            doc.state,
+            JSON.stringify(doc),
+            review!.jobId,
+          );
+        await replaceTask(historyPartial);
+        const savedHistory = await db.$queryRawUnsafe(
+          'SELECT * FROM xhs_subscription_tasks ORDER BY id',
+        );
+        const observedPhases: string[] = [];
+        const runner = new XhsScheduledRunner(
+          {
+            xhsCreator: {
+              findMany: async () => creatorIds.map((id) => ({ id })),
+            },
+          },
+          {
+            scheduleCreatorPhase: async ({ creatorId, phase }) => {
+              observedPhases.push(creatorId + ':' + phase);
+              if (creatorId === creatorIds[0] && phase === 'basic') {
+                await expect(
+                  db.$transaction((tx) =>
+                    prepareScheduledTaskReview(
+                      tx,
+                      observedInput,
+                      approvalTime + 2n,
+                    ),
+                  ),
+                ).resolves.toBeUndefined();
+                return { taskId: review!.jobId };
+              }
+              return phase === 'basic'
+                ? { taskId: creatorId }
+                : { state: 'nothing-to-archive' };
+            },
+            task: async ({ taskId }) =>
+              taskId === review!.jobId
+                ? historyPartial
+                : { state: 'completed', failed: 0, remaining: 0 },
+          },
+        );
+        // Repeated clock observations reach media and every later creator, while
+        // retaining the excluded task and incomplete result without new grants.
+        for (let tick = 0; tick < 2; tick++) {
+          await expect(runner.run(round)).rejects.toThrow(
+            'XHS_SCHEDULE_ROUND_INCOMPLETE',
+          );
+          expect(observedPhases.splice(0)).toEqual(
+            creatorIds.flatMap((id) => [id + ':basic', id + ':media']),
+          );
+          expect(await beforeObservation()).toEqual(baselineObservation);
+          expect(
+            await db.$queryRawUnsafe(
+              'SELECT * FROM xhs_subscription_tasks ORDER BY id',
+            ),
+          ).toEqual(savedHistory);
+        }
+        const mediaId = scheduledTaskId(round, creatorIds[0], 'media');
+        await db.$executeRawUnsafe(
+          "INSERT INTO xhs_subscription_tasks VALUES(?,?,'partial',?,1)",
+          mediaId,
+          creatorIds[0],
+          JSON.stringify({
+            ...historyPartial,
+            taskId: mediaId,
+            schedule: { round, phase: 'media' },
+          }),
+        );
+        await expect(
+          db.$transaction((tx) =>
+            prepareScheduledTaskReview(
+              tx,
+              {
+                ...observedInput,
+                phase: 'media',
+                taskId: mediaId,
+              },
+              approvalTime + 2n,
+            ),
+          ),
+        ).rejects.toThrow('SCHEDULED_TASK_BINDING_CHANGED');
+        await db.$executeRawUnsafe(
+          'DELETE FROM xhs_subscription_tasks WHERE id=?',
+          mediaId,
+        );
+        for (const [changed, code] of [
+          [
+            { ...historyPartial, remaining: 1 },
+            'SCHEDULED_TASK_BINDING_CHANGED',
+          ],
+          [{ ...historyPartial, failed: 1 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+          [
+            { ...historyPartial, historyExcludedIds: [] },
+            'SCHEDULED_TASK_BINDING_CHANGED',
+          ],
+          [
+            { ...historyPartial, historyExcludedIds: [null] },
+            'SCHEDULED_TASK_BINDING_CHANGED',
+          ],
+          [
+            { ...historyPartial, code: 'XHS_DETAIL_OUTCOME_UNKNOWN' },
+            'SCHEDULED_TASK_BINDING_CHANGED',
+          ],
+          [
+            { ...historyPartial, schedule: { round, phase: 'media' } },
+            'SCHEDULED_TASK_BINDING_CHANGED',
+          ],
+          [
+            {
+              ...historyPartial,
+              sourceActive: { phase: 'detail', noteId: 'new' },
+            },
+            'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+          ],
+          [
+            { ...historyPartial, sourceUnknowns: [{ operationId: 'new' }] },
+            'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+          ],
+        ] as const) {
+          await replaceTask(changed);
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(tx, observedInput, approvalTime + 2n),
+            ),
+          ).rejects.toThrow(code);
+          expect(await beforeObservation()).toEqual(baselineObservation);
+        }
         for (const [caseIndex, changed] of [
           {
             ...terminal,
