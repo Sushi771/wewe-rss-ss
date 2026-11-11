@@ -226,3 +226,33 @@ legacy schemas retain their original conditional subscription-table access.
 Successful single-request checkpointing preserves any longer existing cooldown
 and applies at least a full interval after the received response. Unknown or
 failed requests retain their consumed permit, charge and unresolved marker.
+
+### Settled scheduled media observations
+
+Scheduled media can settle with `needs-review` when existing local images have
+no matching durable saved receipts. This is not a completed download and must
+not be silently retried, assigned fabricated receipts or treated as verified.
+The existing adoption, media dispatch, unknown-outcome and source-risk gates
+remain unchanged.
+
+The review reader now permits read-only observation of an exactly bound,
+exhausted media partial task. It requires unique nonempty note IDs, matching
+per-note results and item states, consistent totals, zero failed/remaining
+items and an allowed code matching the results. Empty or malformed results,
+unknown/failed states, wrong bindings and new unresolved evidence stay closed.
+Observation creates no review, source request, budget or session binding; new
+work still passes the existing round-session and authorization checks.
+
+Synthetic migrated SQLite regression coverage includes both allowed partial
+codes, repeated runner observations reaching later creators while retaining
+an incomplete round, unchanged persisted tasks and unchanged
+review/request/budget rows. Negative cases cover malformed results, inconsistent
+counts and codes, wrong task/creator/round/batch, source fences/unknowns and
+cross-session new-work rejection. This is offline control-flow verification,
+not evidence of live media recovery or later creators completing collection.
+
+The runner still stops when the comments or local-archive stage reports an
+incomplete outcome. The recurring policy currently grants profile, list,
+detail and media phases only; a comment capability flag is not an approved
+comment/reply request budget. This observation fix does not extend that policy
+or claim end-to-end continuation through those later stages.

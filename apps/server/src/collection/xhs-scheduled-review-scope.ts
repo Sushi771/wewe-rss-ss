@@ -408,6 +408,55 @@ export type ScheduledTaskReviewInput = {
   sessionBinding: string;
   authorId: string;
 };
+/** A settled media lane may be observed without replaying its reviewed items.
+ * Require per-note terminal evidence, not only aggregate zero counters. */
+function settledMediaPartial(doc: any): boolean {
+  const ids = doc.noteIds;
+  const results = doc.scheduledMediaResults;
+  const items = doc.items;
+  if (
+    doc.state !== 'partial' ||
+    doc.failed !== 0 ||
+    doc.remaining !== 0 ||
+    !Array.isArray(ids) ||
+    !ids.length ||
+    ids.length > 1000 ||
+    ids.some((id: unknown) => typeof id !== 'string' || !id.length) ||
+    new Set(ids).size !== ids.length ||
+    doc.total !== ids.length ||
+    !results ||
+    typeof results !== 'object' ||
+    Array.isArray(results) ||
+    !items ||
+    typeof items !== 'object' ||
+    Array.isArray(items) ||
+    Object.keys(results).length !== ids.length ||
+    Object.keys(items).length !== ids.length
+  )
+    return false;
+  let completed = 0,
+    skipped = 0,
+    review = false;
+  for (const id of ids) {
+    const result = results[id];
+    if (result === 'complete' && items[id] === 'completed') completed++;
+    else if (
+      ['needs-review', 'needs-detail-refresh'].includes(result) &&
+      items[id] === 'skipped'
+    ) {
+      skipped++;
+      if (result === 'needs-review') review = true;
+    } else return false;
+  }
+  return (
+    skipped > 0 &&
+    doc.completed === completed &&
+    doc.skipped === skipped &&
+    doc.code ===
+      (review ? 'XHS_MEDIA_REVIEW_REQUIRED' : 'XHS_MEDIA_NEEDS_DETAIL_REFRESH')
+  );
+}
+
 export async function prepareScheduledTaskReview(
   tx: RoundTx,
   input: ScheduledTaskReviewInput,
@@ -489,7 +538,12 @@ export async function prepareScheduledTaskReview(
           (id: unknown) => typeof id === 'string' && id.length > 0,
         );
       check(
-        (completed || localPartial || historyPartial) &&
+        (completed ||
+          localPartial ||
+          historyPartial ||
+          (input.phase === 'media' &&
+            task[0].state === 'partial' &&
+            settledMediaPartial(doc))) &&
           !doc.sourceActive &&
           !doc.sourceUnknowns?.length,
         'SCHEDULED_TASK_BINDING_CHANGED',

@@ -239,6 +239,273 @@ it('reads real millisecond INTEGER approvals and orders 9/10 numerically through
             ),
           ),
         ).rejects.toThrow('SCHEDULED_TASK_BINDING_CHANGED');
+        const mediaInput = {
+          ...observedInput,
+          phase: 'media' as const,
+          taskId: mediaId,
+          // Match the existing round session; observation must not mint a grant.
+          sessionBinding: 'a'.repeat(64),
+        };
+        const replaceMedia = async (doc: any) =>
+          db.$executeRawUnsafe(
+            'UPDATE xhs_subscription_tasks SET state=?,document=? WHERE id=?',
+            doc.state,
+            JSON.stringify(doc),
+            mediaId,
+          );
+        for (const code of [
+          'XHS_MEDIA_REVIEW_REQUIRED',
+          'XHS_MEDIA_NEEDS_DETAIL_REFRESH',
+        ]) {
+          const mediaIds = Array.from({ length: 131 }, (_, i) =>
+            JSON.stringify(['xiaohongshu', 'note', 'synthetic-' + i]),
+          );
+          const mediaPartial = {
+            taskId: mediaId,
+            creatorId: creatorIds[0],
+            schedule: { round, phase: 'media', batch: 0 },
+            state: 'partial',
+            code,
+            total: 131,
+            completed: 0,
+            skipped: 131,
+            failed: 0,
+            remaining: 0,
+            noteIds: mediaIds,
+            items: Object.fromEntries(mediaIds.map((id) => [id, 'skipped'])),
+            scheduledMediaResults: Object.fromEntries(
+              mediaIds.map((id) => [
+                id,
+                code === 'XHS_MEDIA_REVIEW_REQUIRED'
+                  ? 'needs-review'
+                  : 'needs-detail-refresh',
+              ]),
+            ),
+          };
+          await replaceMedia(mediaPartial);
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(tx, mediaInput, approvalTime + 2n),
+            ),
+          ).resolves.toBeUndefined();
+          // A settled observation from another instance is read-only; it does
+          // not rebind the round or authorize the next creator's source work.
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(
+                tx,
+                { ...mediaInput, sessionBinding: 'b'.repeat(64) },
+                approvalTime + 2n,
+              ),
+            ),
+          ).resolves.toBeUndefined();
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(
+                tx,
+                {
+                  ...observedInput,
+                  creatorId: creatorIds[1],
+                  authorId: 'author-' + creatorIds[1],
+                  taskId: scheduledTaskId(round, creatorIds[1], 'basic'),
+                },
+                approvalTime + 2n,
+              ),
+            ),
+          ).rejects.toThrow('SCHEDULED_ROUND_SESSION_CHANGED');
+          await db.$executeRawUnsafe(
+            "UPDATE xhs_subscription_tasks SET state='completed' WHERE id=?",
+            mediaId,
+          );
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(tx, mediaInput, approvalTime + 2n),
+            ),
+          ).rejects.toThrow('SCHEDULED_TASK_BINDING_CHANGED');
+          await replaceMedia(mediaPartial);
+          const mixed = {
+            ...mediaPartial,
+            completed: 1,
+            skipped: 130,
+            items: { ...mediaPartial.items, [mediaIds[0]]: 'completed' },
+            scheduledMediaResults: {
+              ...mediaPartial.scheduledMediaResults,
+              [mediaIds[0]]: 'complete',
+              [mediaIds[1]]: 'needs-detail-refresh',
+            },
+          };
+          await replaceMedia(mixed);
+          await expect(
+            db.$transaction((tx) =>
+              prepareScheduledTaskReview(tx, mediaInput, approvalTime + 2n),
+            ),
+          ).resolves.toBeUndefined();
+          await replaceMedia(mediaPartial);
+          for (const outcome of ['started', 'unknown']) {
+            const operationId = randomUUID();
+            await db.$executeRawUnsafe(
+              'INSERT INTO xhs_unbound_owner_requests VALUES(?,?,?,?,?,?,?,NULL)',
+              operationId,
+              review!.reviewId,
+              mediaId,
+              creatorIds[0],
+              'media',
+              'synthetic:' + 'c'.repeat(64),
+              outcome,
+            );
+            await expect(
+              db.$transaction((tx) =>
+                prepareScheduledTaskReview(tx, mediaInput, approvalTime + 2n),
+              ),
+            ).rejects.toThrow('SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED');
+            await db.$executeRawUnsafe(
+              'DELETE FROM xhs_unbound_owner_requests WHERE operation_id=?',
+              operationId,
+            );
+          }
+          const unchangedTasks = await db.$queryRawUnsafe(
+            'SELECT * FROM xhs_subscription_tasks ORDER BY id',
+          );
+          const phases: string[] = [];
+          const mediaRunner = new XhsScheduledRunner(
+            {
+              xhsCreator: {
+                findMany: async () => creatorIds.map((id) => ({ id })),
+              },
+            },
+            {
+              scheduleCreatorPhase: async ({ creatorId, phase, batch }) => {
+                phases.push(creatorId + ':' + phase + ':' + (batch ?? 0));
+                if (
+                  creatorId === creatorIds[0] &&
+                  (phase === 'basic' || batch === 0)
+                ) {
+                  await db.$transaction((tx) =>
+                    prepareScheduledTaskReview(
+                      tx,
+                      phase === 'basic' ? observedInput : mediaInput,
+                      approvalTime + 2n,
+                    ),
+                  );
+                  return {
+                    taskId: phase === 'basic' ? review!.jobId : mediaId,
+                  };
+                }
+                return phase === 'basic'
+                  ? { taskId: creatorId }
+                  : { state: 'nothing-to-archive' };
+              },
+              task: async ({ taskId }) =>
+                taskId === review!.jobId
+                  ? historyPartial
+                  : taskId === mediaId
+                    ? mediaPartial
+                    : { state: 'completed', failed: 0, remaining: 0 },
+            },
+          );
+          for (let tick = 0; tick < 2; tick++) {
+            await expect(mediaRunner.run(round)).rejects.toThrow(
+              'XHS_SCHEDULE_ROUND_INCOMPLETE',
+            );
+            expect(phases.splice(0)).toEqual([
+              creatorIds[0] + ':basic:0',
+              creatorIds[0] + ':media:0',
+              creatorIds[0] + ':media:1',
+              ...creatorIds
+                .slice(1)
+                .flatMap((id) => [id + ':basic:0', id + ':media:0']),
+            ]);
+            expect(await beforeObservation()).toEqual(baselineObservation);
+            expect(
+              await db.$queryRawUnsafe(
+                'SELECT * FROM xhs_subscription_tasks ORDER BY id',
+              ),
+            ).toEqual(unchangedTasks);
+          }
+          for (const [change, expected] of [
+            [{ scheduledMediaResults: {} }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ scheduledMediaResults: [] }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [
+              {
+                scheduledMediaResults: {
+                  ...mediaPartial.scheduledMediaResults,
+                  [mediaIds[0]]: 'unknown',
+                },
+              },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              {
+                scheduledMediaResults: {
+                  ...mediaPartial.scheduledMediaResults,
+                  [mediaIds[0]]: 'failed',
+                },
+              },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              { items: { ...mediaPartial.items, [mediaIds[0]]: 'pending' } },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [{ total: 132 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ completed: 1 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ skipped: 130 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ noteIds: [] }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [
+              { noteIds: [...mediaIds.slice(0, 130), mediaIds[0]] },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              {
+                code:
+                  code === 'XHS_MEDIA_REVIEW_REQUIRED'
+                    ? 'XHS_MEDIA_NEEDS_DETAIL_REFRESH'
+                    : 'XHS_MEDIA_REVIEW_REQUIRED',
+              },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [{ taskId: 'wrong-task' }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ creatorId: creatorIds[1] }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [
+              { schedule: { round: 'wrong-round', phase: 'media' } },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              { sourceFence: { operationId: 'new' } },
+              'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+            ],
+            [{ remaining: 1 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [{ failed: 1 }, 'SCHEDULED_TASK_BINDING_CHANGED'],
+            [
+              { code: 'XHS_MEDIA_OUTCOME_UNKNOWN' },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              { schedule: { round, phase: 'basic' } },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              { schedule: { round, phase: 'media', batch: 1 } },
+              'SCHEDULED_TASK_BINDING_CHANGED',
+            ],
+            [
+              { sourceActive: { phase: 'media', noteId: 'new' } },
+              'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+            ],
+            [
+              { sourceUnknowns: [{ operationId: 'new' }] },
+              'SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED',
+            ],
+          ] as const) {
+            await replaceMedia({ ...mediaPartial, ...change });
+            await expect(
+              db.$transaction((tx) =>
+                prepareScheduledTaskReview(tx, mediaInput, approvalTime + 2n),
+              ),
+            ).rejects.toThrow(expected);
+            expect(await beforeObservation()).toEqual(baselineObservation);
+          }
+        }
         await db.$executeRawUnsafe(
           'DELETE FROM xhs_subscription_tasks WHERE id=?',
           mediaId,
