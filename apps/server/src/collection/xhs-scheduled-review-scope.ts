@@ -245,6 +245,85 @@ export async function readScheduledKnownAuthProof(
   );
   return { policy, review, scope, baseline: approved.baseline };
 }
+/** Prove an omission, never grant comment requests or extend a phase budget. */
+export async function readScheduledCommentOmission(
+  tx: RoundTx,
+  input: { round: string; creatorId: string; sessionBinding: string },
+): Promise<'not-authorized' | undefined> {
+  const policy = await activePolicy(tx);
+  if (!policy) {
+    check(
+      !(await reviews(tx)).some((row) =>
+        [
+          SCHEDULED_POLICY_KIND,
+          SCHEDULED_REVIEW_KIND,
+          SCHEDULED_REVOKE_KIND,
+        ].includes(JSON.parse(row.scope_json).reviewKind),
+      ),
+      'SCHEDULED_POLICY_UNAVAILABLE',
+    );
+    return undefined;
+  }
+  const taskId = scheduledTaskId(input.round, input.creatorId, 'basic');
+  const reviewId = 'scheduled-task-' + hash([policy.id, input.round, taskId]);
+  const { scope } = await readScheduledKnownAuthProof(
+    tx,
+    taskId,
+    reviewId,
+    policy.id,
+  );
+  check(
+    scope.round === input.round &&
+      scope.taskBinding.creatorId === input.creatorId &&
+      scope.sessionBinding === input.sessionBinding,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  check(
+    Object.keys(scope.phaseLimits ?? {})
+      .sort()
+      .join(',') === 'detail,list,media,profile' &&
+      scope.comments === false &&
+      scope.replies === false,
+    'SCHEDULED_POLICY_LIMIT_INVALID',
+  );
+  const risk = await rows(
+    tx,
+    "SELECT * FROM xhs_source_risk WHERE id='source'",
+  );
+  check(
+    risk.length === 1 &&
+      risk[0].state === 'clear' &&
+      ['code', 'owner', 'http_status', 'endpoint'].every(
+        (key) => risk[0][key] === null,
+      ),
+    'SCHEDULED_SOURCE_RISK_CHANGED',
+  );
+  const tasks = await rows(
+    tx,
+    'SELECT creator_id,state,document FROM xhs_subscription_tasks WHERE id=?',
+    taskId,
+  );
+  check(
+    tasks.length === 1 && tasks[0].creator_id === input.creatorId,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  const doc = JSON.parse(tasks[0].document);
+  check(
+    ['completed', 'partial'].includes(tasks[0].state) &&
+      doc.state === tasks[0].state &&
+      doc.taskId === taskId &&
+      doc.creatorId === input.creatorId &&
+      doc.schedule?.round === input.round &&
+      doc.schedule?.phase === 'basic' &&
+      (doc.schedule?.batch ?? 0) === 0 &&
+      doc.remaining === 0 &&
+      !doc.sourceActive &&
+      !doc.sourceUnknowns?.length,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  return 'not-authorized';
+}
+
 export async function prepareScheduledPolicy(
   tx: RoundTx,
   input: ScheduledPolicyInput,

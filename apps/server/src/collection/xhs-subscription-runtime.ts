@@ -5,11 +5,15 @@ import {
   fullHistoryNextDelay,
   type FullHistoryWriter,
 } from './xhs-full-history-scope';
-import { prepareScheduledTaskReview } from './xhs-scheduled-review-scope';
+import {
+  prepareScheduledTaskReview,
+  readScheduledCommentOmission,
+} from './xhs-scheduled-review-scope';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import {
   unboundRoundContext,
   type Phase as RoundPhase,
+  type RoundTx,
 } from './xhs-unbound-round';
 import { roundSourceReceiptContext } from './round-source-receipt';
 import { projectWriterGate } from './project-writer-boundary';
@@ -733,6 +737,19 @@ export class XhsSubscriptionRuntime
     if (!context) return work();
     this.assertFullScopeSession(sessionBinding);
     return fullHistoryContext.run(context, work);
+  }
+  async scheduledCommentAuthorization(
+    input: { round: string; creatorId: string },
+    tx?: Prisma.TransactionClient,
+  ): Promise<'not-authorized' | undefined> {
+    const sessionBinding = this.fullScopeSessionBinding();
+    if (!tx && !this.fullHistoryReader)
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    const read = (reader: RoundTx) =>
+      readScheduledCommentOmission(reader, { ...input, sessionBinding });
+    const result = tx ? await read(tx) : await this.fullHistoryReader!(read);
+    this.assertFullScopeSession(sessionBinding);
+    return result;
   }
   private cookies?: XhsSessionCookies;
   private generation = 0;

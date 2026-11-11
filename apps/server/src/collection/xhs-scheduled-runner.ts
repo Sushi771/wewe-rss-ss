@@ -29,7 +29,11 @@ export class XhsScheduledRunner {
       collectScheduled(
         round: string,
         creatorId: string,
-      ): Promise<{ pending: boolean; incomplete: boolean }>;
+      ): Promise<{
+        pending: boolean;
+        incomplete: boolean;
+        skipped?: 'not-authorized';
+      }>;
     },
   ) {}
   async run(round: string) {
@@ -40,7 +44,9 @@ export class XhsScheduledRunner {
     });
     let pending = false,
       incomplete = false,
-      blocked = false;
+      blocked = false,
+      visited = 0,
+      commentOmissions = 0;
     for (const author of authors) {
       try {
         const basic = await this.service.scheduleCreatorPhase({
@@ -138,7 +144,8 @@ export class XhsScheduledRunner {
           }
           if (comments.incomplete) {
             incomplete = true;
-            break;
+            if (comments.skipped !== 'not-authorized') break;
+            commentOmissions++;
           }
         }
         if (this.service.archiveScheduled) {
@@ -148,6 +155,7 @@ export class XhsScheduledRunner {
             break;
           }
         }
+        visited++;
       } catch {
         incomplete = true;
         break;
@@ -155,6 +163,10 @@ export class XhsScheduledRunner {
     }
     if (blocked) throw Error('XHS_SCHEDULE_SOURCE_BLOCKED');
     if (pending) throw Error('XHS_SCHEDULE_TASK_PENDING');
-    if (incomplete) throw Error('XHS_SCHEDULE_ROUND_INCOMPLETE');
+    if (incomplete) {
+      if (commentOmissions > 0 && visited === authors.length)
+        return { outcome: 'settled-incomplete' as const };
+      throw Error('XHS_SCHEDULE_ROUND_INCOMPLETE');
+    }
   }
 }

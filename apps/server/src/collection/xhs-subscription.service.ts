@@ -85,6 +85,11 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  scheduledCommentAuthorization?(
+    input: { round: string; creatorId: string },
+    tx?: Prisma.TransactionClient,
+  ): Promise<'not-authorized' | undefined>;
+
   withScheduledReview?<T>(
     input: {
       round: string;
@@ -1762,6 +1767,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       snapshotsSaved: t.snapshotsSaved,
       mediaSummary,
       commentSummary: t.commentSummary,
+      commentCollection: t.commentCollection,
       archiveConflicts: (t as any).scheduledArchive
         ? Object.values((t as any).scheduledArchive).filter(
             (entry: any) => entry?.state === 'conflict',

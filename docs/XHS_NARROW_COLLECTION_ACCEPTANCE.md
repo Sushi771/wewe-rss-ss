@@ -256,3 +256,35 @@ incomplete outcome. The recurring policy currently grants profile, list,
 detail and media phases only; a comment capability flag is not an approved
 comment/reply request budget. This observation fix does not extend that policy
 or claim end-to-end continuation through those later stages.
+
+### Comments omitted by the approved recurring scope
+
+The recurring scope explicitly excludes comments and replies. Before any
+comment context restoration or source request, the runtime can prove that
+omission using the active policy, exact round/basic-task review, current
+session, creator bindings, retained baseline and clear risk state. Missing or
+changed evidence is not an omission grant. The policy and its budgets remain
+unchanged.
+
+For that proved case only, the task records a separate `commentCollection`
+status of `not-authorized` and the number of notes not collected. Existing
+comment summaries, windows and saved content are not converted into success.
+Pending dispatches and any existing current-round window or summary still
+stop the lane; an omission must not relabel an earlier collection receipt.
+Prior-round summaries remain visible as historical information. The interface states that comments/replies were not authorized or
+collected and retains archive conflict information.
+
+The runner can continue the other authorized creators and perform the existing
+local archive step. Only a full safe traversal with this explicit omission can
+return `settled-incomplete`; the clock records that outcome and advances the
+round once. Pending work, archive failures, changed authorization and unknown
+source outcomes still retain the pending round. A settled-incomplete round is
+not full comment, media or archive acceptance. Synthetic integration tests
+cover repeat ticks, restart observation, the next scheduled slot, unchanged
+review/request/budget evidence and refusal cases with no source traffic.
+
+Component rendering checks cover the omission alone, archive conflicts,
+historical summaries, unknown state, explicit zero and partial results.
+These checks are not desktop or narrow-screen visual acceptance; that visual
+verification remains pending. No live comment collection or production
+installation is established by the offline checks.
