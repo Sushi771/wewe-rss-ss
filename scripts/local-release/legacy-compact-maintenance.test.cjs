@@ -10,16 +10,28 @@ const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
 function extractRestartCatch(value) {
   const text = value.replace(/\r\n/g, '\n');
   const baseline = text.indexOf('const baseline =');
-  const caught = text.indexOf('} catch (error) {', baseline);
-  const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
-  const from = opening ? caught + opening.index : -1;
+  const catching =
+    /\}\s*catch\s*\(\s*error\s*\)\s*\{(?=\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\))/.exec(
+      text.slice(baseline),
+    );
+  const caught = catching ? baseline + catching.index : -1;
+  const from = catching ? caught + catching[0].length : -1;
   const ending =
-    /\}\s*finally\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+    /\}\s*finally\s*\{\s*try\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
       text.slice(from),
     );
   const to = ending ? from + ending.index : -1;
   assert(baseline > 0 && caught > baseline && from > caught && to > from);
-  return text.slice(from, to);
+  const body = text.slice(from, to);
+  assert.match(
+    body,
+    /^\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\)/,
+  );
+  assert.match(
+    body,
+    /\}\s*catch\s*\(\s*cleanupError\s*\)\s*\{\s*lifecycleError\s*=\s*failureChain\s*\(\s*error\s*,\s*cleanupError\s*\)\s*;\s*throw\s+lifecycleError\s*;\s*\}\s*$/,
+  );
+  return body;
 }
 
 async function isolated() {
@@ -117,12 +129,23 @@ async function isolated() {
       ...extra,
     ]);
   let observations = 0,
-    queries = 0;
+    queries = 0,
+    port,
+    failure,
+    failed = false;
+  // Current trees of these fixture PIDs only, not a historic admitted-family
+  // receipt and not retrospective proof of an earlier CI failure's cleanup.
+  const cleanupProof = {
+    kind: 'checked-pid-current-tree',
+    verified: false,
+    remaining: null,
+    checkedPids: [],
+  };
   const durations = [];
   try {
     old = startBackend();
-    const ready = await started.get(old.pid),
-      port = ready.port;
+    const ready = await started.get(old.pid);
+    port = ready.port;
     const identity = effects.processIdentity('OwnedSnapshot', old.pid, port, {
       executable: process.execPath,
       commandLine: command(0),
@@ -274,6 +297,11 @@ async function isolated() {
         'utf8',
       );
       const extracted = extractRestartCatch(restartSource);
+      const helper = /^function failureChain\([^]*?^\}/m.exec(
+        restartSource.replace(/\r\n/g, '\n'),
+      );
+      assert(helper);
+      const failureChain = new Function('return (' + helper[0] + ')')();
       for (const value of [
         restartSource.replace(/\r?\n/g, '\r\n'),
         restartSource.replace(/if\s*\(newChild\)\s*\{/, 'if(newChild){'),
@@ -288,6 +316,11 @@ async function isolated() {
         ['newChild', 'changedChild'],
         ['options.rehearsal', 'options.changedRehearsal'],
         ['releasePriorBootLocks()', 'changedReleasePriorBootLocks()'],
+        ['lifecycleError = error;', 'lifecycleError = undefined;'],
+        [
+          'failureChain(error, cleanupError)',
+          'failureChain(cleanupError, error)',
+        ],
       ])
         assert.throws(() =>
           extractRestartCatch(restartSource.replaceAll(anchor, replacement)),
@@ -297,6 +330,8 @@ async function isolated() {
         'return(async()=>{with(ctx){' + extracted + '}})()',
       );
       const ctx = {
+        failureChain,
+        lifecycleError: undefined,
         priorBoot: false,
         priorBootArchived: false,
         priorBootReleaseFailed: false,
@@ -379,33 +414,77 @@ async function isolated() {
       originalUnknownRetained: true,
       budgets: [6, 8],
       rollbackUsed: mode !== 'live-child',
+      cleanupProof,
     };
+  } catch (error) {
+    failed = true;
+    failure = error;
+    throw error;
   } finally {
-    for (const child of [old, candidate, fallback])
-      if (child && child.exitCode === null && child.signalCode === null) {
-        try {
-          const port = (await started.get(child.pid)).port;
-          const i = effects.processIdentity('OwnedSnapshot', child.pid, port, {
-            executable: process.execPath,
-            commandLine: controller.launchCommandLine(
-              process.execPath,
-              child.spawnargs.slice(1),
-            ),
-          });
-          const r = await effects.stopOwned(child, i);
-          gate.retireStoppedWriter(database, {
-            identity: i,
-            stopReceipt: r,
-            scopeLease: { check, assertWritable: () => check() },
-          });
-        } catch (error) {
-          const closed = once(child, 'close');
-          child.kill();
-          await closed;
-          throw error;
+    try {
+      for (const child of [old, candidate, fallback])
+        if (child && child.exitCode === null && child.signalCode === null) {
+          try {
+            const port = (await started.get(child.pid)).port;
+            const i = effects.processIdentity(
+              'OwnedSnapshot',
+              child.pid,
+              port,
+              {
+                executable: process.execPath,
+                commandLine: controller.launchCommandLine(
+                  process.execPath,
+                  child.spawnargs.slice(1),
+                ),
+              },
+            );
+            const r = await effects.stopOwned(child, i);
+            gate.retireStoppedWriter(database, {
+              identity: i,
+              stopReceipt: r,
+              scopeLease: { check, assertWritable: () => check() },
+            });
+          } catch (error) {
+            const closed = once(child, 'close');
+            child.kill();
+            await closed;
+            throw error;
+          }
         }
+      if (helperChild) await effects.stopOwned(helperChild, helper);
+      const children = [old, candidate, fallback, helperChild].filter(Boolean);
+      cleanupProof.checkedPids = [
+        ...new Set(children.map((child) => child.pid)),
+      ];
+      if (port) {
+        const deadline = Date.now() + 15000;
+        for (;;) {
+          const active = cleanupProof.checkedPids.flatMap((pid) => {
+            const tree = effects.processIdentity('Tree', pid, port);
+            assert.equal(tree.complete, true);
+            return tree.active;
+          });
+          cleanupProof.remaining = active.length;
+          if (!active.length) break;
+          assert(Date.now() < deadline, 'COMPACT_FIXTURE_FAMILY_EXIT_UNPROVEN');
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      } else {
+        assert.equal(children.length, 0, 'COMPACT_FIXTURE_READINESS_UNPROVEN');
+        cleanupProof.remaining = 0;
       }
-    if (helperChild) await effects.stopOwned(helperChild, helper);
+      cleanupProof.verified = true;
+    } catch (cleanupError) {
+      if (failed)
+        throw new AggregateError(
+          [failure, cleanupError],
+          'COMPACT_EXERCISE_AND_CLEANUP_FAILED',
+          { cause: failure },
+        );
+      throw cleanupError;
+    } finally {
+      console.error('LEGACY_COMPACT_CLEANUP ' + JSON.stringify(cleanupProof));
+    }
   }
 }
 
@@ -543,6 +622,8 @@ else {
           assert.equal(row.sourceUnavailable, true);
           assert.equal(row.compactEntry, true);
           assert.equal(row.completeReferenceQueries, 0);
+          assert.equal(row.cleanupProof.verified, true);
+          assert.equal(row.cleanupProof.remaining, 0);
         });
       console.log('LEGACY_COMPACT_EVIDENCE ' + JSON.stringify(evidence));
     } finally {
