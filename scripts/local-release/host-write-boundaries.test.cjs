@@ -85,6 +85,13 @@ const catalog = {
     'updater/update-entry',
     'updater/maintenance-entry',
   ],
+  // Reviewed TEMP-only native regression tools, never production entrypoints.
+  // Keep exact names: a new fixture still requires explicit effect review.
+  syntheticOnly: [
+    'local-cache-full-bootstrap.fixture',
+    'local-cache-preserving-scope.fixture',
+    'local-cache-preserving-supervisor',
+  ],
   gateway: ['lib', 'updater/install-binding/role-aware/lib'],
 };
 
@@ -117,6 +124,7 @@ test('host effects use the common gateway; native imports are limited to named r
     ...catalog.registry,
     ...catalog.writerCoordination,
     ...catalog.nativeControl,
+    ...catalog.syntheticOnly,
     ...catalog.gateway,
   ]);
   for (const name of Object.values(catalog).flat()) {
@@ -128,6 +136,21 @@ test('host effects use the common gateway; native imports are limited to named r
     if (!nativeExceptions.has(name)) assert.deepEqual(rawImports, [], name);
     if (catalog.guarded.includes(name))
       assert.match(source, /hostEffects\.(?:fs|processes)/, name);
+  }
+});
+
+test('native synthetic tools are not imported by production host modules', () => {
+  const fixtureNames = new Set(
+    catalog.syntheticOnly.map((name) => name + '.cjs'),
+  );
+  for (const name of Object.values(catalog).flat()) {
+    if (catalog.syntheticOnly.includes(name)) continue;
+    const source = fs.readFileSync(path.join(__dirname, name + '.cjs'), 'utf8');
+    for (const match of source.matchAll(/require\(['"]([^'"]+)['"]\)/g))
+      assert(
+        !fixtureNames.has(path.basename(match[1])),
+        name + ': synthetic tool import',
+      );
   }
 });
 

@@ -11,17 +11,35 @@ const source = fs.readFileSync(path.join(__dirname, 'restart.cjs'), 'utf8');
 function extractRestartCatch(value) {
   const text = value.replace(/\r\n/g, '\n');
   const baseline = text.indexOf('const baseline =');
-  const caught = text.indexOf('} catch (error) {', baseline);
-  const opening = /\bif\s*\(\s*newChild\s*\)\s*\{/.exec(text.slice(caught));
-  const from = opening ? caught + opening.index : -1;
+  const catching =
+    /\}\s*catch\s*\(\s*error\s*\)\s*\{(?=\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\))/.exec(
+      text.slice(baseline),
+    );
+  const caught = catching ? baseline + catching.index : -1;
+  const from = catching ? caught + catching[0].length : -1;
   const ending =
-    /\}\s*finally\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+    /\}\s*finally\s*\{\s*try\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
       text.slice(from),
     );
   const to = ending ? from + ending.index : -1;
   assert(baseline > 0 && caught > baseline && from > caught && to > from);
-  return text.slice(from, to);
+  const body = text.slice(from, to);
+  assert.match(
+    body,
+    /^\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\)/,
+  );
+  assert.match(
+    body,
+    /\}\s*catch\s*\(\s*cleanupError\s*\)\s*\{\s*lifecycleError\s*=\s*failureChain\s*\(\s*error\s*,\s*cleanupError\s*\)\s*;\s*throw\s+lifecycleError\s*;\s*\}\s*$/,
+  );
+  return body;
 }
+// Execute the current pure helper too, not a reimplementation or historical catch.
+const helper = /^function failureChain\([^]*?^\}/m.exec(
+  source.replace(/\r\n/g, '\n'),
+);
+assert(helper);
+const failureChain = new Function('return (' + helper[0] + ')')();
 const runCatch = new Function(
   'ctx',
   'return(async()=>{with(ctx){' + extractRestartCatch(source) + '}})()',
@@ -38,6 +56,11 @@ test('restart catch extraction tolerates formatting but requires exact orchestra
       source.replace('const baseline =', 'const changedBaseline ='),
     ),
   );
+  for (const [before, after] of [
+    ['lifecycleError = error;', 'lifecycleError = undefined;'],
+    ['failureChain(error, cleanupError)', 'failureChain(cleanupError, error)'],
+  ])
+    assert.throws(() => extractRestartCatch(source.replace(before, after)));
   assert.throws(() =>
     extractRestartCatch(
       source.replaceAll('options.rehearsal', 'options.changedRehearsal'),
@@ -126,6 +149,8 @@ for (const kind of [
           ],
     );
     const ctx = {
+      failureChain,
+      lifecycleError: undefined,
       confirmFamilyExit: require('./restart.cjs').confirmFamilyExit,
       sealFamily: require('./restart.cjs').sealFamily,
       newChild,
