@@ -288,3 +288,12 @@ historical summaries, unknown state, explicit zero and partial results.
 These checks are not desktop or narrow-screen visual acceptance; that visual
 verification remains pending. No live comment collection or production
 installation is established by the offline checks.
+
+### History review count display
+
+History-review task messages show the actual number of excluded notes. A read-only
+view corrects the exact legacy placeholder message when the task remains a
+history-review partial and has a valid nonempty exclusion list. Stored task
+records, counters, review status and source permissions are unchanged. Synthetic
+checks cover new messages, legacy task projection, visible recovery-card text and
+unrelated or malformed states; this does not establish production deployment.

@@ -1,3 +1,4 @@
+import { historyReviewMessage } from './xhs-task-message';
 import {
   fullHistoryContext,
   fullHistoryExcludedNoteIds,
@@ -1786,7 +1787,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
         : reconciledComplete
           ? '处理完成'
-          : t.message,
+          : historyReviewMessage(t),
       resumedFromTaskId: t.resumedFromTaskId,
       supersededByTaskId: t.supersededByTaskId,
       settling: this.pending.has(t.taskId),
@@ -3004,8 +3005,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
         if (t.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED')
-          t.message =
-            '历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。';
+          t.message = `历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。`;
         if (t.basicOnly && t.state === 'completed')
           t.message = '基础信息处理完成；缺失字段仍为未知，媒体待补。';
         if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))
