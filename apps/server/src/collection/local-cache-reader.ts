@@ -88,11 +88,19 @@ function snapshot<T>(read: (database: Database) => T): T {
   try {
     database.close();
   } catch (closeError) {
-    if (failed)
-      throw new AggregateError(
+    if (failed) {
+      // This server module is also traversed through AppRouter's browser types
+      // (ES2020). Keep the real Node 24 builtin without widening global libs.
+      const Aggregate = (
+        globalThis as unknown as {
+          AggregateError: new (errors: unknown[], message: string) => Error;
+        }
+      ).AggregateError;
+      throw new Aggregate(
         [primary, closeError],
         'CACHE_LOCAL_READ_AND_CLOSE_FAILED',
       );
+    }
     throw closeError;
   }
   if (failed) throw primary;

@@ -143,6 +143,54 @@ describeNative(
       expect(() => created[0].prepare('SELECT 1')).toThrow();
     });
 
+    it.each(['none', 'error', 'undefined'])(
+      'preserves the original read/close failures with read failure=%s',
+      async (mode) => {
+        const primary =
+          mode === 'undefined' ? undefined : new Error('synthetic read');
+        const cleanup = new Error('synthetic close');
+        let closed = 0;
+        jest
+          .spyOn(sqlite, 'DatabaseSync')
+          .mockImplementation((...args: unknown[]) => {
+            const db = new DatabaseSync(...args);
+            return {
+              exec: db.exec.bind(db),
+              prepare(sql: string) {
+                if (mode !== 'none') throw primary;
+                return db.prepare(sql);
+              },
+              close() {
+                closed++;
+                db.close();
+                throw cleanup;
+              },
+            };
+          });
+        try {
+          await listLocalWechat2RssCache();
+          throw new Error('EXPECTED_READ_OR_CLOSE_FAILURE');
+        } catch (error) {
+          if (mode === 'none') expect(error).toBe(cleanup);
+          else {
+            // Still the real builtin, not a replacement Error with only a message.
+            expect(error).toBeInstanceOf(AggregateError);
+            expect(Object.getPrototypeOf(error).constructor.name).toBe(
+              'AggregateError',
+            );
+            expect((error as Error).message).toBe(
+              'CACHE_LOCAL_READ_AND_CLOSE_FAILED',
+            );
+            const errors = (error as Error & { errors: unknown[] }).errors;
+            expect(errors).toHaveLength(2);
+            expect(errors[0]).toBe(primary);
+            expect(errors[1]).toBe(cleanup);
+          }
+        }
+        expect(closed).toBe(1);
+      },
+    );
+
     it('rejects wrong names, invalid IDs and a conflicting canonical publisher without external fallback', async () => {
       const checkIo = forbidIo();
       await expect(readLocalWechat2RssCache(id, '其他号')).rejects.toThrow(
