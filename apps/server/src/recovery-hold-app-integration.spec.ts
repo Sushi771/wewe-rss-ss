@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../test/fixture-migration-connection';
 import { Test } from '@nestjs/testing';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Observe the real test process for the unchanged writer boundary.
@@ -68,13 +69,23 @@ describe('AppModule startup with recovery hold (isolated fixture)', () => {
     // work is changed while keeping the real startup and writer guards.
     const migrations = resolve(__dirname, '../prisma/migrations');
     const entries = await readdir(migrations, { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isDirectory()) continue;
-      for (const statement of splitSqliteStatements(
-        await readFile(join(migrations, entry.name, 'migration.sql'), 'utf8'),
-      ))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + database,
+      async (migrationClient) => {
+        for (const entry of entries.sort((a, b) =>
+          a.name.localeCompare(b.name),
+        )) {
+          if (!entry.isDirectory()) continue;
+          for (const statement of splitSqliteStatements(
+            await readFile(
+              join(migrations, entry.name, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await mkdir(join(root, '.cache-incremental'));
     initialFiles = (await readdir(root)).sort();
     databaseBytes = await readFile(database);

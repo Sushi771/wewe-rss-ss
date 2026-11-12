@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -29,18 +30,23 @@ describe('full filter export scope on an isolated SQLite database; no external r
       },
     });
     const migrations = resolve(__dirname, '../prisma/migrations');
-    for (const entry of (await readdir(migrations, { withFileTypes: true }))
-      .filter((e) => e.isDirectory())
-      .sort((a, b) => a.name.localeCompare(b.name))) {
-      const sql = await readFile(
-        join(migrations, entry.name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((x) => x.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + join(root, 'fixture.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const entry of (await readdir(migrations, { withFileTypes: true }))
+          .filter((e) => e.isDirectory())
+          .sort((a, b) => a.name.localeCompare(b.name))) {
+          const sql = await readFile(
+            join(migrations, entry.name, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((x) => x.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await prisma.managementGroup.create({
       data: { id: 'g', name: 'Fixture', platform: 'wechat' },
     });

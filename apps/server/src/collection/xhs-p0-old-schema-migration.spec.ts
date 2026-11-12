@@ -16,7 +16,9 @@ it('upgrades a synthetic older schema while preserving existing publisher, artic
   });
   try {
     const cutoff = '20261009050000_add_xhs_local_archive';
-    await applyFixtureMigrations(db, { through: cutoff });
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'), {
+      through: cutoff,
+    });
     for (const sql of splitSqliteStatements(
       "INSERT INTO feeds(id,mp_name,mp_cover,mp_intro,update_time) VALUES('old-feed','old name','cover','intro',123); INSERT INTO articles(id,mp_id,title,pic_url,publish_time,content_html) VALUES('old-article','old-feed','old title','pic',456,'old body'); INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id,enabled) VALUES('old-creator','https://example.invalid/old','old creator','old-author',1); INSERT INTO xhs_notes(id,creator_id,title,publish_time,status,content_html) VALUES('old-note','old-creator','old note',789,'complete','old note body');",
     ))
@@ -39,7 +41,9 @@ it('upgrades a synthetic older schema while preserving existing publisher, artic
     const before = await Promise.all(
       tables.map((t, i) => snapshot(t, columns[i])),
     );
-    await applyFixtureMigrations(db, { after: cutoff });
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'), {
+      after: cutoff,
+    });
     expect(
       await Promise.all(tables.map((t, i) => snapshot(t, columns[i]))),
     ).toEqual(before);

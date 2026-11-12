@@ -1,7 +1,10 @@
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
 import { createHash } from 'node:crypto';
-import { readHistoryHandoffs } from './xhs-history-handoff';
-import { scheduledReviewedMarkers } from './xhs-scheduled-review-scope';
+import {
+  readHistoryHandoffs,
+  restrictionEvidence,
+} from './xhs-history-handoff';
+import { scheduledReviewedEvidence } from './xhs-scheduled-review-scope';
 
 type Phase = 'basic' | 'media';
 type Task = {
@@ -148,7 +151,7 @@ export async function admitScheduledXhs(
     return { kind: 'blocked', taskId, reason };
   }
   const history = await readHistoryHandoffs(tx as any);
-  const reviewedMarkers = await scheduledReviewedMarkers(tx as any, {
+  const reviewed = await scheduledReviewedEvidence(tx as any, {
     round,
     creatorId,
     phase,
@@ -157,13 +160,39 @@ export async function admitScheduledXhs(
   });
   const interrupted = await tx.$queryRaw<
     Array<{ id: string }>
-  >`SELECT id FROM xhs_subscription_tasks WHERE CASE WHEN creator_id='__batch__' AND substr(id,1,6)='batch:' AND state IN ('batch_queued','batch_running','batch_paused','batch_cancelled','batch_completed') AND json_valid(document) THEN CASE WHEN json_extract(document,'$.batchId')=substr(id,7) AND 'batch_'||json_extract(document,'$.state')=state AND (json_type(document,'$.sourceActive') IS NULL OR json_type(document,'$.sourceActive')='null') THEN 0 ELSE 1 END WHEN NOT json_valid(document) THEN 1 WHEN json_type(document)<>'object' THEN 1 WHEN state NOT IN ('running','queued','blocked','failed','partial','cancelled','paused','completed') THEN 1 WHEN json_type(document,'$.sourceActive') IS NOT NULL AND json_type(document,'$.sourceActive')<>'null' THEN 1 WHEN COALESCE(json_extract(document,'$.state'),'')<>state THEN 1 ELSE 0 END=1 LIMIT 1`;
+  >`SELECT id FROM xhs_subscription_tasks WHERE CASE WHEN creator_id='__batch__' AND substr(id,1,6)='batch:' AND state IN ('batch_queued','batch_running','batch_paused','batch_cancelled','batch_completed') AND json_valid(document) THEN CASE WHEN json_extract(document,'$.batchId')=substr(id,7) AND 'batch_'||json_extract(document,'$.state')=state AND (json_type(document,'$.sourceActive') IS NULL OR json_type(document,'$.sourceActive')='null') THEN 0 ELSE 1 END WHEN NOT json_valid(document) THEN 1 WHEN json_type(document)<>'object' THEN 1 WHEN state NOT IN ('running','queued','blocked','failed','partial','cancelled','paused','completed') THEN 1 WHEN COALESCE(json_extract(document,'$.state'),'')<>state THEN 1 ELSE 0 END=1 LIMIT 1`;
+  const activeSources = await tx.$queryRaw<
+    Array<{ id: string; creator_id: string; state: string; document: string }>
+  >`SELECT id,creator_id,state,document FROM xhs_subscription_tasks WHERE json_type(document,'$.sourceActive') IS NOT NULL AND json_type(document,'$.sourceActive')<>'null'`;
+  const unreviewedSources = activeSources.filter((row) => {
+    const doc = JSON.parse(row.document);
+    return !(
+      [
+        'blocked',
+        'failed',
+        'partial',
+        'cancelled',
+        'paused',
+        'completed',
+      ].includes(row.state) &&
+      doc.state === row.state &&
+      doc.taskId === row.id &&
+      doc.creatorId === row.creator_id &&
+      !restrictionEvidence(doc) &&
+      reviewed?.sourceActives.some(
+        (old) =>
+          old.id === row.id &&
+          old.creatorId === row.creator_id &&
+          JSON.stringify(old.sourceActive) === JSON.stringify(doc.sourceActive),
+      )
+    );
+  });
   const fences = (
     await tx.$queryRaw<
       Array<{ id: string; used: number; request_limit: number }>
     >`SELECT id,used,request_limit FROM xhs_request_budgets WHERE id LIKE 'xhs:dispatch-pending:%'`
   ).filter(
-    (f) => !history.markers.includes(f.id) && !reviewedMarkers?.includes(f.id),
+    (f) => !history.markers.includes(f.id) && !reviewed?.markers.includes(f.id),
   );
   // Any unresolved source outcome closes the scheduled lane across creators
   // and rounds. Proven not-dispatched local review remains item-scoped.
@@ -236,14 +265,12 @@ export async function admitScheduledXhs(
     risk.length !== 1 ||
     risk[0].state !== 'clear' ||
     interrupted.length ||
+    unreviewedSources.length ||
     unverifiedFences.length ||
     fences.some((f) => unresolved.has(f.id))
   )
     reason = 'XHS_SCHEDULE_SOURCE_BLOCKED';
-  else if (
-    !reviewedMarkers &&
-    history.profilePendingCreators.includes(creatorId)
-  )
+  else if (!reviewed && history.profilePendingCreators.includes(creatorId))
     reason = 'XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED';
   else if (jobs.length || tasks.length)
     return { kind: 'deferred', taskId, reason: 'XHS_SCHEDULE_TASK_ACTIVE' };

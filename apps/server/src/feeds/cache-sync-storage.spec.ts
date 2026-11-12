@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -64,14 +65,19 @@ describe('cache delta through original SQLite merge', () => {
       return next(params);
     });
     const directory = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(directory)).sort()) {
-      const file = path.join(directory, name, 'migration.sql');
-      const sql = await fs.readFile(file, 'utf8').catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((row) => row.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(root, 'test.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(directory)).sort()) {
+          const file = path.join(directory, name, 'migration.sql');
+          const sql = await fs.readFile(file, 'utf8').catch(() => '');
+          for (const statement of splitSqliteStatements(sql)
+            .map((row) => row.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     // Use the real persistent gate on this fixture's owned SQLite connection.
     sourceGateSpy = jest
       .spyOn(sourceGateModule, 'defaultWechat2RssSourceGate')

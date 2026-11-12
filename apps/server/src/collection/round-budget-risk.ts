@@ -20,6 +20,25 @@ export async function reserveRoundBudgetRisk(
   );
   if (risk.length !== 1 || risk[0].state !== 'clear')
     throw Error('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+  await reserveRoundBudgets(tx, request, now);
+  const owner = randomUUID();
+  if (
+    (await tx.$executeRawUnsafe(
+      "UPDATE xhs_source_risk SET state='pending',owner=?,updated_at=? WHERE id='source' AND state='clear'",
+      owner,
+      BigInt(now),
+    )) !== 1
+  )
+    throw Error('XHS_SOURCE_RISK_UNAVAILABLE');
+  return owner;
+}
+
+/** Uses existing limits only; caller must prove its own exact risk admission. */
+export async function reserveRoundBudgets(
+  tx: RoundTx,
+  request: RoundRequest,
+  now: number,
+) {
   const ids = ['xhs:source-total', 'xhs:original-link:' + request.creatorId];
   for (const id of ids) {
     const found = await tx.$queryRawUnsafe<any[]>(
@@ -50,16 +69,6 @@ export async function reserveRoundBudgetRisk(
     )
       throw Error('XHS_REQUEST_BUDGET_UNAVAILABLE');
   }
-  const owner = randomUUID();
-  if (
-    (await tx.$executeRawUnsafe(
-      "UPDATE xhs_source_risk SET state='pending',owner=?,updated_at=? WHERE id='source' AND state='clear'",
-      owner,
-      BigInt(now),
-    )) !== 1
-  )
-    throw Error('XHS_SOURCE_RISK_UNAVAILABLE');
-  return owner;
 }
 
 /** Unknown keeps source pending. Only proven response completion can clear owner. */

@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { PrismaClient } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -28,34 +29,39 @@ it('reviews unbound owner explicitly, excludes incomplete note, preserves unknow
     },
   });
   try {
-    for (const name of (
-      await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
-    ).sort()) {
-      if (
-        !(
-          await fs.stat(
-            path.resolve(__dirname, '../../prisma/migrations', name),
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'fixture.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (
+          await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
+        ).sort()) {
+          if (
+            !(
+              await fs.stat(
+                path.resolve(__dirname, '../../prisma/migrations', name),
+              )
+            ).isDirectory()
           )
-        ).isDirectory()
-      )
-        continue;
-      try {
-        for (const sql of splitSqliteStatements(
-          await fs.readFile(
-            path.resolve(
-              __dirname,
-              '../../prisma/migrations',
-              name,
-              'migration.sql',
-            ),
-            'utf8',
-          ),
-        ))
-          await db.$executeRawUnsafe(sql);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      }
-    }
+            continue;
+          try {
+            for (const sql of splitSqliteStatements(
+              await fs.readFile(
+                path.resolve(
+                  __dirname,
+                  '../../prisma/migrations',
+                  name,
+                  'migration.sql',
+                ),
+                'utf8',
+              ),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+          }
+        }
+      },
+    );
     const bindings = ['a', 'b', 'c'].map((creatorId) => ({
       creatorId,
       jobId: randomUUID(),

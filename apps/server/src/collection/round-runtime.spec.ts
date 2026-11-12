@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Existing native identity fixture.
   require('../../../../scripts/local-release/writer-self.fixture.test.cjs')
@@ -35,28 +36,37 @@ it.each(['transport', 'parse', 'storage', 'success'] as const)(
     const targets: string[] = [];
     let continueSuccessfully = false;
     try {
-      for (const n of (
-        await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
-      ).sort()) {
-        if (
-          !(
-            await fs.stat(path.resolve(__dirname, '../../prisma/migrations', n))
-          ).isDirectory()
-        )
-          continue;
-        const f = path.resolve(
-          __dirname,
-          '../../prisma/migrations',
-          n,
-          'migration.sql',
-        );
-        try {
-          for (const sql of splitSqliteStatements(await fs.readFile(f, 'utf8')))
-            await db.$executeRawUnsafe(sql);
-        } catch (e) {
-          if ((e as any).code !== 'ENOENT') throw e;
-        }
-      }
+      await withFixtureMigrationConnection(
+        'file:' + path.join(root, 'fixture.db').replace(/\\/g, '/'),
+        async (migrationClient) => {
+          for (const n of (
+            await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
+          ).sort()) {
+            if (
+              !(
+                await fs.stat(
+                  path.resolve(__dirname, '../../prisma/migrations', n),
+                )
+              ).isDirectory()
+            )
+              continue;
+            const f = path.resolve(
+              __dirname,
+              '../../prisma/migrations',
+              n,
+              'migration.sql',
+            );
+            try {
+              for (const sql of splitSqliteStatements(
+                await fs.readFile(f, 'utf8'),
+              ))
+                await migrationClient.$executeRawUnsafe(sql);
+            } catch (e) {
+              if ((e as any).code !== 'ENOENT') throw e;
+            }
+          }
+        },
+      );
       for (const id of ['a', 'b', 'c'])
         await db.xhsCreator.create({
           data: {

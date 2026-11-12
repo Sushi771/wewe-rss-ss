@@ -214,14 +214,21 @@ function fixture(run) {
       policy.windowsReferences.compatibilityProof = pin(compatibility);
     },
   };
-  try {
-    run(f);
-  } finally {
+  function clean() {
     assert(
       path.dirname(base) === fs.realpathSync.native(os.tmpdir()) &&
         path.basename(base).startsWith('wewe-reference-adapter-'),
     );
     fs.rmSync(base, { recursive: true, force: true });
+  }
+  try {
+    const result = run(f);
+    if (result?.then) return result.finally(clean);
+    clean();
+    return result;
+  } catch (error) {
+    clean();
+    throw error;
   }
 }
 function reject(f, expected) {
@@ -229,6 +236,293 @@ function reject(f, expected) {
   assert.equal(r.complete, false);
   assert(r.errors.includes(expected), JSON.stringify(r));
 }
+
+test(
+  'native Windows synthetic family uses original identity tools and probe across old new fallback',
+  { skip: process.platform !== 'win32', timeout: 180000 },
+  () =>
+    fixture(async (f) => {
+      const { spawn } = require('node:child_process');
+      const { once } = require('node:events');
+      const { createInterface } = require('node:readline');
+      const {
+        processIdentity,
+        unusedPort,
+        stopOwned,
+      } = require('./switch.cjs');
+      const { launchCommandLine, confirmFamilyExit } = require('./restart.cjs');
+      const families = require('./preserving-process-family.cjs');
+      const c = fixedFamilyFixture(f),
+        port = await unusedPort();
+      const python = fs.realpathSync.native(
+        execFileSync('python', ['-c', 'import sys;print(sys.executable)'], {
+          encoding: 'utf8',
+          windowsHide: true,
+        }).trim(),
+      );
+      const controls = f.native.processesBefore.filter((p) => p.pid >= 99);
+      const oldForce = process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+      process.env.LOCAL_RELEASE_FORCE_POWERSHELL = '1';
+      // Do not compile/cache an identity executable or enumerate unrelated process
+      // argv. Tree reads only the PIDs of these disposable synthetic subprocesses.
+      let child,
+        owned,
+        observedFamily = [],
+        phase = 'prepare',
+        failure;
+      try {
+        for (const id of ['current', 'candidate']) {
+          const launchers = c.launchers.filter((l) => l.packageId === id);
+          for (const l of launchers.slice(1)) {
+            f.write(
+              l.entry,
+              'import os, sys\nprint(os.getpid(), flush=True)\nfor line in sys.stdin:\n    pass\n',
+            );
+            l.executable = f.pin(python);
+            l.files = [f.pin(l.entry)];
+          }
+          const root = launchers[0];
+          f.write(
+            root.entry,
+            [
+              "const {spawn}=require('node:child_process');",
+              "const {once}=require('node:events');",
+              "const {createInterface}=require('node:readline');",
+              `const children=${JSON.stringify(launchers.slice(1).map((l) => l.argv))}.map(a=>spawn(a[0],a.slice(1),{windowsHide:true,stdio:['pipe','pipe','pipe']}));`,
+              'Promise.all(children.map(async c=>{',
+              '  const input=createInterface({input:c.stdout});',
+              '  const [line]=await Promise.race([',
+              "    once(input,'line'),",
+              "    once(c,'exit').then(()=>{throw Error('synthetic helper exited before ready')})",
+              '  ]);',
+              '  input.close();',
+              "  if(line!==String(c.pid))throw Error('synthetic helper readiness PID mismatch');",
+              '  return c.pid;',
+              '})).then(pids=>console.log(JSON.stringify(pids)))',
+              '  .catch(error=>{console.error(error);process.exit(1)});',
+              'setInterval(()=>{},1000);',
+              '',
+            ].join('\n'),
+          );
+          root.argv[0] = process.execPath;
+          root.executable = f.pin(process.execPath);
+          root.files = [f.pin(root.entry)];
+        }
+        for (const [pointerId, runtimeId] of [
+          ['current', 'current'],
+          ['current', 'candidate'],
+          ['candidate', 'current'],
+        ]) {
+          f.write(f.pointer, { format: 1, id: pointerId });
+          const root = c.launchers.find(
+            (l) => l.packageId === runtimeId && !l.parentEntry,
+          );
+          phase = `${pointerId}/${runtimeId}:ready`;
+          child = spawn(root.argv[0], root.argv.slice(1), {
+            cwd: f.project,
+            windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          // A spawn PID is not a readiness receipt. Both helpers must execute.
+          const readyAbort = new AbortController(),
+            readyLines = createInterface({ input: child.stdout }),
+            readyTimer = setTimeout(() => readyAbort.abort(), 15000);
+          let pids;
+          try {
+            const [ready] = await Promise.race([
+              once(readyLines, 'line', { signal: readyAbort.signal }),
+              once(child, 'exit', { signal: readyAbort.signal }).then(() => {
+                throw Error('synthetic root exited before family ready');
+              }),
+            ]);
+            pids = JSON.parse(ready);
+          } finally {
+            clearTimeout(readyTimer);
+            readyAbort.abort();
+            readyLines.close();
+          }
+          assert(Array.isArray(pids));
+          assert.equal(pids.length, 2);
+          phase = `${pointerId}/${runtimeId}:owned-snapshot`;
+          owned = processIdentity('OwnedSnapshot', child.pid, port, {
+            executable: process.execPath,
+            commandLine: launchCommandLine(root.argv[0], root.argv.slice(1)),
+          });
+          const observe = (expected = []) => {
+            const stage = `${pointerId}/${runtimeId}:${
+              expected.length ? 'exit' : 'initial'
+            }`;
+            const sample = (frame) => {
+              const rows = new Map();
+              for (const pid of new Set(
+                expected.length ? expected.map((r) => r.pid) : [child.pid],
+              )) {
+                phase = `${stage}:${frame}:tree:${pid}`;
+                const fact = processIdentity('Tree', pid, port);
+                assert.equal(fact.complete, true);
+                for (const row of fact.active) {
+                  if (rows.has(row.pid))
+                    assert.deepEqual(rows.get(row.pid), row);
+                  rows.set(row.pid, row);
+                }
+              }
+              return { complete: true, active: [...rows.values()] };
+            };
+            const before = sample('before');
+            const after = sample('after');
+            assert.equal(before.complete, true);
+            assert.equal(after.complete, true);
+            if (!f.policy.preservingUpdate.processFamily.consoleHost) {
+              const host = before.active.find(
+                (p) =>
+                  path.basename(p.executable).toLowerCase() === 'conhost.exe',
+              );
+              assert(
+                host,
+                'real Windows fixture must exercise system console descendants',
+              );
+              const at = fs.realpathSync.native(host.executable),
+                stat = fs.lstatSync(at, { bigint: true });
+              f.policy.preservingUpdate.processFamily.consoleHost = {
+                ...f.pin(at),
+                argv: argv(host.commandLine),
+                identity: [
+                  stat.dev,
+                  stat.ino,
+                  stat.size,
+                  stat.birthtimeNs,
+                  stat.mtimeNs,
+                  stat.ctimeNs,
+                ].map(String),
+              };
+            }
+            f.native.processesBefore = [
+              ...before.active,
+              ...structuredClone(controls),
+            ];
+            f.native.processesAfter = [
+              ...after.active,
+              ...structuredClone(controls),
+            ];
+            phase = `${stage}:probe`;
+            return families.includeConsoles(f.run(), expected, f.policy);
+          };
+          const initial = observe();
+          assert.deepEqual(
+            initial.errors,
+            [],
+            JSON.stringify(
+              f.native.processesBefore.map((p) => ({
+                pid: p.pid,
+                parent: p.parentPid,
+                exe: path.basename(p.executable),
+                tokens: argv(p.commandLine).map((t) =>
+                  path.isAbsolute(t) ? path.basename(t) : t,
+                ),
+                matches: c.launchers.some(
+                  (l) => hash(l.argv) === hash(argv(p.commandLine)),
+                ),
+              })),
+            ),
+          );
+          const rows = initial.records.filter((r) => r.kind === 'processes');
+          observedFamily = rows;
+          assert.equal(rows.filter((r) => !r.consoleHost).length, 3);
+          assert(rows.some((r) => r.consoleHost));
+          assert.deepEqual(
+            rows
+              .filter((r) => !r.consoleHost)
+              .map((r) => r.pid)
+              .sort(),
+            [child.pid, ...pids].sort(),
+          );
+          families.family(rows, child.pid, runtimeId, f.policy, true);
+          families.admit([], rows, owned, runtimeId, f.policy, false);
+          phase = `${pointerId}/${runtimeId}:owned-stop`;
+          // Exercise action-time identity refusal on a real owned root before stop.
+          assert.throws(() =>
+            processIdentity('OwnedStop', child.pid, port, {
+              ...owned,
+              startUtc: '2000-01-01T00:00:00Z',
+            }),
+          );
+          assert.equal(
+            processIdentity('OwnedSnapshot', child.pid, port, owned).startUtc,
+            owned.startUtc,
+          );
+          const receipt = processIdentity('OwnedStop', child.pid, port, owned);
+          assert.equal(receipt.stopped, true);
+          const exited = new Set();
+          await confirmFamilyExit(
+            {
+              confirmPreservingProcessExit() {
+                const fact = observe(rows);
+                assert.deepEqual(fact.errors, []);
+                return (
+                  families.remaining(
+                    rows,
+                    fact.records.filter((r) => r.kind === 'processes'),
+                    exited,
+                    fact.processTopology,
+                    fact.exitedProcesses,
+                  ) === 0
+                );
+              },
+            },
+            child.pid,
+            receipt,
+          );
+          assert.equal(exited.size, rows.length);
+          child = undefined;
+          owned = undefined;
+          observedFamily = [];
+        }
+      } catch (error) {
+        failure = new Error(`synthetic family failed at ${phase}`, {
+          cause: error,
+        });
+        throw failure;
+      } finally {
+        let cleanupPhase = 'stop';
+        try {
+          if (child) {
+            await stopOwned(child, owned);
+            const deadline = Date.now() + 15000;
+            for (;;) {
+              const active = [
+                ...new Set([child.pid, ...observedFamily.map((r) => r.pid)]),
+              ].flatMap((pid) => {
+                cleanupPhase = `tree:${pid}`;
+                return processIdentity('Tree', pid, port).active;
+              });
+              if (!active.length) break;
+              assert(
+                Date.now() < deadline,
+                'synthetic family cleanup exit timeout',
+              );
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+        } catch (cleanupError) {
+          const cleanupFailure = new Error(
+            `synthetic family cleanup failed at ${cleanupPhase}`,
+            { cause: cleanupError },
+          );
+          if (failure)
+            throw new AggregateError(
+              [failure, cleanupFailure],
+              'synthetic family and cleanup both failed',
+              { cause: failure },
+            );
+          throw cleanupFailure;
+        } finally {
+          if (oldForce === undefined)
+            delete process.env.LOCAL_RELEASE_FORCE_POWERSHELL;
+          else process.env.LOCAL_RELEASE_FORCE_POWERSHELL = oldForce;
+        }
+      }
+    }),
+);
 
 function sameSchemaPair(f) {
   const manifests = f.packages.slice(0, 2).map((pkg, index) => {
@@ -369,6 +663,285 @@ function projectEffectFixture(f) {
   f.run = () => probe(f.policy, f.native, { callerPid: 99, self });
   return self;
 }
+function fixedFamilyFixture(f) {
+  projectEffectFixture(f);
+  f.policy.preservingUpdate.processFamily = { format: 1 };
+  const data = path.join(f.project, 'data.db');
+  f.write(data, 'inert data outside package roots');
+  const launchers = [];
+  for (const pkg of f.packages.slice(0, 2)) {
+    const entry = path.join(pkg.path, 'entry.cjs');
+    for (const [name, executable, args] of [
+      [
+        'entry.cjs',
+        path.join(pkg.path, 'runtime.exe'),
+        ['start', '--database', data],
+      ],
+      ['watch.py', f.worker, ['--database', data, '--event-hints']],
+      [
+        'guard.py',
+        f.worker,
+        [
+          '--database',
+          data,
+          '--backup-root',
+          f.project,
+          '--interval-seconds',
+          '86400',
+        ],
+      ],
+    ]) {
+      const file = path.join(pkg.path, name);
+      if (name !== 'entry.cjs') f.write(file, '# inert synthetic child');
+      launchers.push({
+        packageId: pkg.id,
+        entry: file,
+        ...(name === 'entry.cjs' ? {} : { parentEntry: entry }),
+        argv: [name === 'entry.cjs' ? executable : 'python', file, ...args],
+        executable: f.pin(executable),
+        files: [f.pin(file)],
+        workingDirectory: f.project,
+        cwdIndependent: true,
+      });
+    }
+  }
+  f.policy.windowsReferences.launchers.push(...launchers);
+  const controls = f.native.processesBefore.filter((p) => p.pid >= 99);
+  const set = (id, count = 3) => {
+    const rows = launchers
+      .filter((l) => l.packageId === id)
+      .slice(0, count)
+      .map((l, i) =>
+        f.process(
+          10 + i,
+          i ? 10 : 1,
+          l.executable.path,
+          l.argv.map(quote).join(' '),
+        ),
+      );
+    f.native.processesBefore = [...rows, ...structuredClone(controls)];
+    f.native.processesAfter = structuredClone(f.native.processesBefore);
+    return rows;
+  };
+  set('current');
+  return { set, launchers, data };
+}
+function familyConsoles(f) {
+  const at = fs.realpathSync.native(
+    path.join(process.env.SystemRoot, 'System32/conhost.exe'),
+  );
+  const stat = fs.lstatSync(at, { bigint: true });
+  const spec = {
+    ...f.pin(at),
+    argv: ['\\??\\' + at, '0x4'],
+    identity: [
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.birthtimeNs,
+      stat.mtimeNs,
+      stat.ctimeNs,
+    ].map(String),
+  };
+  f.policy.preservingUpdate.processFamily.consoleHost = spec;
+  const host = (pid, parentPid) =>
+    f.process(pid, parentPid, at, spec.argv.map(quote).join(' '));
+  f.native.processesBefore.push(host(13, 11), host(14, 12));
+  f.native.processesAfter = structuredClone(f.native.processesBefore);
+  return { spec, host };
+}
+for (const rootHost of [false, true])
+  test(
+    'family console exact proof permits zero or one root host and retains helper hosts root=' +
+      rootHost,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        const c = familyConsoles(f),
+          families = require('./preserving-process-family.cjs');
+        if (rootHost) f.native.processesBefore.push(c.host(15, 10));
+        f.native.processesAfter = structuredClone(f.native.processesBefore);
+        const fact = families.includeConsoles(f.run(), [], f.policy);
+        assert.deepEqual(fact.errors, []);
+        const rows = fact.records.filter((r) => r.kind === 'processes');
+        families.family(rows, 10, 'current', f.policy, true);
+        assert.equal(rows.length, rootHost ? 6 : 5);
+      }),
+  );
+for (const mutation of [
+  'argument',
+  'executable',
+  'pin',
+  'identity',
+  'duplicate-host',
+  'descendant',
+])
+  test(
+    'family console refuses ' + mutation,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        const c = familyConsoles(f),
+          families = require('./preserving-process-family.cjs');
+        const p = f.native.processesBefore.find((p) => p.pid === 13);
+        if (mutation === 'argument')
+          p.commandLine = p.commandLine.replace('0x4', '0x8');
+        if (mutation === 'executable') p.executable = f.controller;
+        if (mutation === 'pin') c.spec.sha256 = 'a'.repeat(64);
+        if (mutation === 'identity') c.spec.identity[0] = '-1';
+        if (mutation === 'duplicate-host')
+          f.native.processesBefore.push(c.host(15, 11));
+        if (mutation === 'descendant')
+          f.native.processesBefore.push(
+            f.process(15, 13, f.worker, quote(f.worker)),
+          );
+        f.native.processesAfter = structuredClone(f.native.processesBefore);
+        const fact = f.run();
+        if (mutation === 'duplicate-host') {
+          assert.deepEqual(fact.errors, []);
+          const rows = families
+            .includeConsoles(fact, [], f.policy)
+            .records.filter((r) => r.kind === 'processes');
+          assert.throws(() =>
+            families.family(rows, 10, 'current', f.policy, true),
+          );
+        } else assert(fact.errors.length, mutation);
+      }),
+  );
+for (const mutation of ['none', 'reused-exiting-pid', 'late-unknown'])
+  test(
+    'family cross-frame child exit retains full identity and both topologies ' +
+      mutation,
+    { skip: process.platform !== 'win32' },
+    () =>
+      fixture((f) => {
+        fixedFamilyFixture(f);
+        familyConsoles(f);
+        const families = require('./preserving-process-family.cjs');
+        const initial = families.includeConsoles(f.run(), [], f.policy);
+        assert.deepEqual(initial.errors, []);
+        const rows = initial.records.filter((r) => r.kind === 'processes');
+        f.native.processesBefore = f.native.processesBefore.filter(
+          (p) => p.pid !== 10,
+        );
+        if (mutation === 'reused-exiting-pid')
+          f.native.processesBefore.find((p) => p.pid === 11).startUtc =
+            '2026-02-02T00:00:00Z';
+        f.native.processesAfter = structuredClone(
+          f.native.processesBefore.filter((p) => p.pid !== 11),
+        );
+        if (mutation === 'late-unknown')
+          f.native.processesAfter.push(
+            f.process(15, 11, f.controller, quote(f.controller)),
+          );
+        const fact = families.includeConsoles(f.run(), rows, f.policy);
+        if (mutation === 'late-unknown') {
+          assert.deepEqual(fact.errors, ['REFERENCE_PROCESS_APPEARED']);
+          return;
+        }
+        assert.deepEqual(fact.errors, []);
+        assert.equal(fact.exitedProcesses.length, 1);
+        const check = () =>
+          families.remaining(
+            rows,
+            fact.records.filter((r) => r.kind === 'processes'),
+            new Set(),
+            fact.processTopology,
+            fact.exitedProcesses,
+          );
+        if (mutation === 'none') assert.equal(check(), 3);
+        else assert.throws(check, /FAMILY_CHANGED/);
+      }),
+  );
+test('fixed runtime families retain one package per PID before pointer change and during fallback', () =>
+  fixture((f) => {
+    const c = fixedFamilyFixture(f);
+    for (const [pointerId, runtimeId] of [
+      ['current', 'current'],
+      ['current', 'candidate'],
+      ['candidate', 'candidate'],
+      ['candidate', 'current'],
+    ]) {
+      f.write(f.pointer, { format: 1, id: pointerId });
+      c.set(runtimeId);
+      const r = f.run();
+      assert.deepEqual(r.errors, []);
+      const rows = r.records.filter((r) => r.kind === 'processes');
+      assert.equal(rows.length, 3);
+      assert(rows.every((r) => r.packageId === runtimeId));
+      assert.equal(new Set(rows.map((r) => r.pid)).size, 3);
+      require('./preserving-process-family.cjs').family(
+        rows,
+        10,
+        runtimeId,
+        f.policy,
+        true,
+      );
+      assert(r.records.find((r) => r.kind === 'tasks').viaPointer);
+    }
+  }));
+for (const mutation of [
+  'argv',
+  'data',
+  'entry-pin',
+  'executable-pin',
+  'actual-executable',
+  'unknown-child',
+  'late-child',
+  'pid-reuse',
+  'parent',
+  'dual-binding',
+  'duplicate-entry',
+])
+  test('fixed runtime family refuses ' + mutation, () =>
+    fixture((f) => {
+      const c = fixedFamilyFixture(f);
+      if (mutation === 'argv')
+        f.native.processesBefore[1].commandLine += ' --unknown';
+      if (mutation === 'data')
+        f.native.processesBefore[1].commandLine =
+          f.native.processesBefore[1].commandLine.replace(
+            c.data,
+            c.data + '-other',
+          );
+      if (mutation === 'entry-pin') f.write(c.launchers[1].entry, '# changed');
+      if (mutation === 'executable-pin') f.write(f.worker, 'changed');
+      if (mutation === 'actual-executable')
+        f.native.processesBefore[1].executable = f.controller;
+      if (mutation === 'unknown-child')
+        f.native.processesBefore.push(
+          f.process(15, 10, f.controller, quote(f.controller)),
+        );
+      if (mutation === 'parent') f.native.processesBefore[1].parentPid = 98;
+      if (mutation === 'dual-binding') c.launchers[0].pointerPath = f.pointer;
+      if (mutation === 'duplicate-entry')
+        f.policy.windowsReferences.launchers.push(
+          structuredClone(c.launchers[0]),
+        );
+      f.native.processesAfter = structuredClone(f.native.processesBefore);
+      if (mutation === 'late-child')
+        f.native.processesAfter.push(
+          f.process(15, 10, f.controller, quote(f.controller)),
+        );
+      if (mutation === 'pid-reuse')
+        f.native.processesAfter[1].startUtc = '2026-02-02T00:00:00Z';
+      const r = f.run();
+      if (mutation === 'parent') {
+        assert.deepEqual(r.errors, []);
+        assert.throws(() =>
+          require('./preserving-process-family.cjs').family(
+            r.records.filter((r) => r.kind === 'processes'),
+            10,
+            'current',
+            f.policy,
+            true,
+          ),
+        );
+      } else assert(r.errors.length, mutation);
+    }),
+  );
 function installCallerFixture(f) {
   projectEffectFixture(f);
   f.policy.preservingUpdate.operation = 'install';
@@ -973,6 +1546,738 @@ test('adapter facts are accepted by the actual scope guard across own intent cha
     lease.close(undefined, { transition: true });
     assert(!fs.existsSync(f.lock));
   }));
+
+// Both scope and the original resolver run here. Only the native OS observation
+// is synthetic; the registry/lock/envelope rejection layer is never stubbed.
+function emptyRecoveryProbeFixture(run, priorBoot = false) {
+  return fixture((f) => {
+    const self = projectEffectFixture(f);
+    const tooling = path.join(f.base, 'tooling');
+    fs.mkdirSync(tooling);
+    for (const name of fs
+      .readdirSync(__dirname)
+      .filter((n) => n.endsWith('.cjs') && !n.endsWith('.test.cjs')))
+      fs.copyFileSync(path.join(__dirname, name), path.join(tooling, name));
+    for (const name of [
+      'windows-release-reference-collector.ps1',
+      'windows-reference-directory-identity.cs',
+    ])
+      fs.copyFileSync(path.join(__dirname, name), path.join(tooling, name));
+    const scopePath = path.join(tooling, 'release-scope.cjs'),
+      probePath = path.join(tooling, 'windows-release-references.cjs');
+    fs.appendFileSync(scopePath, '\n// synthetic old source\n');
+    fs.appendFileSync(probePath, '\n// synthetic old observer\n');
+    let transport;
+    const cp = require('node:child_process'),
+      execute = cp.execFileSync;
+    const capture = test.mock.method(cp, 'execFileSync', (...args) =>
+      transport ? transport(...args) : execute(...args),
+    );
+    let scope;
+    try {
+      scope = require(scopePath);
+    } finally {
+      capture.mock.restore();
+    }
+    const resolver = require(probePath);
+    const identity5 = (at) => {
+      const s = fs.lstatSync(at, { bigint: true });
+      return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].map(String);
+    };
+    // Give the protected package verifier complete, real synthetic manifests.
+    for (const p of f.packages) {
+      const file = path.join(p.path, 'release.json'),
+        manifest = JSON.parse(fs.readFileSync(file));
+      Object.assign(manifest, require('./lib.cjs').fingerprint(p.path));
+      f.write(file, manifest);
+      f.policy.packageProofs[p.id] = f.pin(file).sha256;
+    }
+    f.policy.preservingUpdate.active.currentManifestSha256 =
+      f.policy.packageProofs.current;
+    f.policy.preservingUpdate.active.candidateManifestSha256 =
+      f.policy.packageProofs.candidate;
+    f.proof.rollback.manifestSha256 = f.policy.packageProofs.current;
+    f.proof.candidate.manifestSha256 = f.policy.packageProofs.candidate;
+    f.proof.schemaProofSha256 = hash(
+      require('./preserving-contract.cjs').validateSameSchema(
+        ...f.packages
+          .slice(0, 2)
+          .map((p) =>
+            JSON.parse(fs.readFileSync(path.join(p.path, 'release.json'))),
+          ),
+        {
+          oldRoot: f.packages[0].path,
+          candidateRoot: f.packages[1].path,
+          oldManifestSha256: f.policy.packageProofs.current,
+          candidateManifestSha256: f.policy.packageProofs.candidate,
+        },
+      ),
+    );
+    f.repinProof();
+    const target = f.packages[1].path,
+      source = path.join(f.base, 'audit', 'candidate');
+    fs.renameSync(target, source);
+    f.packages[1].path = source;
+    Object.assign(f.policy.preservingUpdate, {
+      operation: 'install',
+      effects: ['new-output-only'],
+    });
+    f.policy.preservingUpdate.effectScope.allocations = [
+      { path: target, mode: 'exclusive-package' },
+    ];
+    f.policy.windowsReferences.launchers[0].files.push(f.pin(scopePath));
+    const restartPath = path.join(tooling, 'restart.cjs');
+    if (priorBoot)
+      f.policy.windowsReferences.launchers[0].files.push(f.pin(restartPath));
+    f.policy.windowsReferences.collectorSha256 = f.pin(
+      path.join(tooling, 'windows-release-reference-collector.ps1'),
+    ).sha256;
+    f.policy.windowsReferences.collectorIdentitySha256 = f.pin(
+      path.join(tooling, 'windows-reference-directory-identity.cs'),
+    ).sha256;
+    f.policy.probe = { ...f.pin(probePath), identity: identity5(probePath) };
+    Object.assign(
+      f.policy,
+      scope.inspect(
+        f.policy.roots.map((r) => r.path),
+        {
+          preservingUpdate: f.policy.preservingUpdate,
+          privateAccounting: 'private-names-v1',
+        },
+      ),
+      {
+        registryIdentity: directoryIdentity(f.registry),
+        inventoryClassification: 'private-names-v1',
+        maxBytes: scope.DEFAULT_BYTES,
+        maxGrowthBytes: 1024 * 1024,
+        maxNewRuntimeCopies: 1,
+      },
+    );
+    const oldFile = path.join(f.registry, 'old-policy.json');
+    f.write(oldFile, f.policy);
+    const old = structuredClone(f.policy),
+      oldSha = f.pin(oldFile).sha256;
+    f.native.policySha256 = oldSha;
+    for (const rows of [f.native.processesBefore, f.native.processesAfter])
+      for (const p of rows) {
+        if (p.pid === 99) p.pid = process.pid;
+        if (p.parentPid === 99) p.parentPid = process.pid;
+      }
+    fs.unlinkSync(f.lock);
+    fs.unlinkSync(f.ledger);
+    const request = {
+      kind: 'install',
+      root: f.installed,
+      reserveBytes: 65536,
+      runtimeCopies: 1,
+    };
+    const query = (recovery) =>
+      resolver.probe(f.policy, f.native, {
+        callerPid: process.pid,
+        self,
+        recovery,
+      });
+    let now = 0,
+      priorBootFacts;
+    const clock = test.mock.method(performance, 'now', () => now);
+    const buildLock = path.join(f.installed, '.build-budget.lock');
+    f.write(buildLock, { pid: process.pid, token: crypto.randomUUID() });
+    try {
+      const lease = scope.open(request, {
+        configPath: oldFile,
+        configSha256: oldSha,
+        query,
+      });
+      if (priorBoot) priorBootFacts = query();
+      now = 31000;
+      assert.throws(() => lease.close(Error('timeout')), /SCAN_TIME_BUDGET/);
+    } finally {
+      clock.mock.restore();
+      fs.unlinkSync(buildLock);
+    }
+    const original = fs.readFileSync(f.ledger),
+      doc = JSON.parse(original),
+      adopted = f.ledger + '.adopted';
+    fs.appendFileSync(scopePath, '// synthetic reviewed new source\n');
+    fs.appendFileSync(probePath, '// synthetic reviewed new observer\n');
+    // Match staged installation metadata, rather than assuming all timestamps
+    // coincide. The established policy pin uses mtime/ctime, not birthtime.
+    const stagedProbe = probePath + '.staged';
+    fs.renameSync(probePath, stagedProbe);
+    fs.utimesSync(stagedProbe, new Date('2025-01-01'), new Date('2025-01-01'));
+    fs.renameSync(stagedProbe, probePath);
+    f.policy.scanBudget = {
+      profile: 'legacy-stream-v1',
+      checkpointMode: 'full',
+      scanEntries: 100000,
+      operationEntries: 1000000,
+      scanReadBytes: 1073741824,
+      operationReadBytes: 2147483648,
+      durationMs: 300000,
+    };
+    f.policy.windowsReferences.launchers[0].files[1] = f.pin(scopePath);
+    if (priorBoot) {
+      fs.appendFileSync(
+        restartPath,
+        '\n// reviewed synthetic prior-boot restart\n',
+      );
+      f.policy.windowsReferences.launchers[0].files[2] = f.pin(restartPath);
+      f.policy.preservingUpdate.priorBootExit = {
+        helperSha256: f.pin(path.join(tooling, 'normal-start-claim-rebind.cjs'))
+          .sha256,
+        oldReferences: doc.payload.claim.refs,
+        restartBinding: {
+          path: restartPath,
+          oldSha256: old.windowsReferences.launchers[0].files[2].sha256,
+          newSha256: f.pin(restartPath).sha256,
+        },
+        launcherTransition: {
+          pointer: old.preservingUpdate.active.pointer,
+          oldSha256: hash(old.windowsReferences.launchers[0].files),
+          newSha256: hash(f.policy.windowsReferences.launchers[0].files),
+        },
+      };
+      for (const key of ['processesBefore', 'processesAfter'])
+        f.native[key] = f.native[key].filter(
+          (p) => p.pid !== old.preservingUpdate.active.oldProcess.pid,
+        );
+    }
+    f.policy.probe = { ...f.pin(probePath), identity: identity5(probePath) };
+    const nextFile = path.join(f.registry, 'next-policy.json');
+    f.write(nextFile, f.policy);
+    f.native.policySha256 = f.pin(nextFile).sha256;
+    const evidence = path.join(f.registry, 'failure.json');
+    f.write(evidence, { error: 'RELEASE_SCOPE_SCAN_TIME_BUDGET' });
+    const s = fs.lstatSync(f.ledger, { bigint: true });
+    const receipt = {
+      format: 1,
+      kind: 'interrupted-empty-install-claim-recovery',
+      scopeId: f.policy.scopeId,
+      registryDirectory: f.registry,
+      registryIdentity: f.policy.registryIdentity,
+      oldPolicyPath: oldFile,
+      oldPolicySha256: oldSha,
+      newPolicySha256: f.native.policySha256,
+      priorLedgerSha256: sha(original),
+      priorPayloadDigest: doc.digest,
+      priorLedgerIdentity: [s.dev, s.ino, s.birthtimeNs].map(String),
+      adoptionSha256: f.pin(adopted).sha256,
+      auditedSourceIdentity: f.pin(scopePath).sha256,
+      reviewEvidence: 'synthetic original resolver integration',
+      claimId: doc.payload.claim.id,
+      claimSha256: hash(doc.payload.claim),
+      failureCode: 'RELEASE_SCOPE_SCAN_TIME_BUDGET',
+      failureEvidencePath: evidence,
+      failureEvidenceSha256: f.pin(evidence).sha256,
+      releasedBuildLock: {
+        ownerPidDigits: String(process.pid).length,
+        writerSha256: f.pin(path.join(tooling, 'install-lifecycle.cjs')).sha256,
+      },
+      toolBinding: {
+        path: scopePath,
+        oldSha256: old.windowsReferences.launchers[0].files[1].sha256,
+        newSha256: f.pin(scopePath).sha256,
+      },
+      probeBinding: { old: old.probe, new: f.policy.probe },
+      allowedDifferences: [
+        'scanBudget',
+        'windowsReferences.launchers.0.files.1.sha256',
+        'probe.sha256',
+        'probe.identity',
+        ...(priorBoot
+          ? [
+              'windowsReferences.launchers.0.files.2.sha256',
+              'preservingUpdate.priorBootExit',
+            ]
+          : []),
+      ],
+    };
+    const approval = path.join(f.registry, 'recovery.json');
+    f.write(approval, receipt);
+    const options = {
+      configPath: nextFile,
+      configSha256: f.native.policySha256,
+      bindingRepairFile: approval,
+      bindingRepairSha256: f.pin(approval).sha256,
+      query,
+    };
+    run({
+      f,
+      priorBootFacts,
+      scope,
+      resolver,
+      request,
+      options,
+      query,
+      original,
+      doc,
+      receipt,
+      approval,
+      adopted,
+      oldFile,
+      nextFile,
+      scopePath,
+      probePath,
+      target,
+      useTransport: (run) => {
+        transport = run;
+      },
+      open: (extra) => scope.open(request, { ...options, ...extra }),
+    });
+  });
+}
+for (const mutation of ['none', 'restart-pin', 'extra-leaf'])
+  test(
+    'empty recovery original probe: prior-boot six-leaf bridge ' + mutation,
+    () =>
+      emptyRecoveryProbeFixture((x) => {
+        const helper = require(
+          path.join(path.dirname(x.probePath), 'normal-start-claim-rebind.cjs'),
+        );
+        const originalRead = helper.readPriorBootEvidence,
+          originalValidate = helper.validatePriorBootEmpty;
+        assert.equal(
+          helper.referenceDigest(x.priorBootFacts),
+          x.doc.payload.claim.refs,
+        );
+        helper.readPriorBootEvidence = () => ({ oldFacts: x.priorBootFacts });
+        helper.validatePriorBootEmpty = ({ facts }) =>
+          assert(!facts.records.some((r) => r.kind === 'processes'));
+        if (mutation === 'restart-pin')
+          x.f.policy.preservingUpdate.priorBootExit.restartBinding.oldSha256 =
+            'f'.repeat(64);
+        if (mutation === 'extra-leaf') x.f.policy.maxGrowthBytes++;
+        x.f.write(x.nextFile, x.f.policy);
+        x.f.native.policySha256 = x.f.pin(x.nextFile).sha256;
+        x.receipt.newPolicySha256 = x.f.native.policySha256;
+        x.f.write(x.approval, x.receipt);
+        x.options.configSha256 = x.f.native.policySha256;
+        x.options.bindingRepairSha256 = x.f.pin(x.approval).sha256;
+        try {
+          if (mutation === 'none') {
+            const lease = x.open();
+            lease.close();
+            assert.equal(
+              JSON.parse(fs.readFileSync(x.f.ledger)).payload.claim,
+              null,
+            );
+            assert(
+              fs
+                .readFileSync(x.adopted)
+                .equals(Buffer.from(x.receipt.oldPolicySha256)),
+            );
+          } else assert.throws(() => x.open(), /BINDING_REPAIR/);
+        } finally {
+          helper.readPriorBootEvidence = originalRead;
+          helper.validatePriorBootEmpty = originalValidate;
+        }
+      }, true),
+  );
+test('empty recovery original probe: old ledger/new lock fails without proof, reviewed bridge passes before CAS only', () =>
+  emptyRecoveryProbeFixture((x) => {
+    let observations = 0,
+      red,
+      context;
+    const lease = x.open({
+      query: (r) => {
+        if (r) {
+          observations++;
+          context = r;
+          red = x.query(undefined);
+          assert.deepEqual(red.errors, ['REFERENCE_INFLIGHT_STATE_INVALID']);
+        }
+        const result = x.query(r);
+        assert.deepEqual(result.errors, []);
+        return result;
+      },
+    });
+    assert.equal(observations, 2);
+    assert.deepEqual(x.query(undefined).errors, []);
+    assert.deepEqual(x.query(context).errors, [
+      'REFERENCE_INFLIGHT_STATE_INVALID',
+    ]);
+    lease.close();
+    assert.equal(JSON.parse(fs.readFileSync(x.f.ledger)).payload.claim, null);
+    const snapshot = JSON.parse(
+      fs.readFileSync(
+        x.f.ledger +
+          '.binding-repair-' +
+          x.options.bindingRepairSha256 +
+          '.json',
+      ),
+    );
+    assert(Buffer.from(snapshot.ledgerBase64, 'base64').equals(x.original));
+  }));
+for (const mutation of [
+  'proof hash',
+  'proof bytes',
+  'proof scope',
+  'proof claim',
+  'extra proof',
+  'claim',
+  'ledger digest',
+  'ledger identity',
+  'nonempty outputs',
+  'adoption',
+  'old policy',
+  'new policy',
+  'source',
+  'observer',
+  'token',
+  'foreign owner',
+  'wrong policy argument',
+  'extra context',
+  'allocation',
+  'build lock',
+  'active lock',
+])
+  test('empty recovery original probe: rejects ' + mutation, () =>
+    emptyRecoveryProbeFixture((x) => {
+      let observed;
+      assert.throws(() =>
+        x.open({
+          query: (r) => {
+            assert(r);
+            const context = structuredClone(r);
+            if (mutation === 'proof hash')
+              context.approvalSha256 = '0'.repeat(64);
+            if (mutation === 'proof bytes') fs.appendFileSync(x.approval, ' ');
+            if (
+              ['proof scope', 'proof claim', 'extra proof'].includes(mutation)
+            ) {
+              const proof = JSON.parse(fs.readFileSync(x.approval));
+              if (mutation === 'proof scope')
+                proof.scopeId = crypto.randomUUID();
+              if (mutation === 'proof claim')
+                proof.claimId = crypto.randomUUID();
+              if (mutation === 'extra proof') proof.allow = true;
+              x.f.write(x.approval, proof);
+              context.approvalSha256 = x.f.pin(x.approval).sha256;
+            }
+            if (
+              ['claim', 'ledger digest', 'nonempty outputs'].includes(mutation)
+            ) {
+              const d = JSON.parse(fs.readFileSync(x.f.ledger));
+              if (mutation === 'claim')
+                d.payload.claim.id = crypto.randomUUID();
+              if (mutation === 'nonempty outputs')
+                d.payload.outputs.push({
+                  path: x.target,
+                  complete: false,
+                  claim: d.payload.claim.id,
+                });
+              d.digest =
+                mutation === 'ledger digest' ? '0'.repeat(64) : hash(d.payload);
+              x.f.write(x.f.ledger, d);
+            }
+            if (mutation === 'ledger identity') {
+              fs.renameSync(x.f.ledger, x.f.ledger + '.held');
+              fs.writeFileSync(x.f.ledger, x.original);
+            }
+            if (mutation === 'adoption')
+              fs.writeFileSync(x.adopted, '0'.repeat(64));
+            if (mutation === 'old policy') fs.appendFileSync(x.oldFile, ' ');
+            if (mutation === 'new policy') fs.appendFileSync(x.nextFile, ' ');
+            if (mutation === 'source')
+              fs.appendFileSync(x.scopePath, '// changed\n');
+            if (mutation === 'observer')
+              fs.appendFileSync(x.probePath, '// changed\n');
+            if (mutation === 'token' || mutation === 'foreign owner') {
+              const lock = JSON.parse(fs.readFileSync(x.f.lock));
+              if (mutation === 'token') lock.nonce = crypto.randomUUID();
+              else lock.pid = 999999;
+              x.f.write(x.f.lock, lock);
+            }
+            if (mutation === 'wrong policy argument')
+              context.policyPath = x.oldFile;
+            if (mutation === 'extra context') context.allow = true;
+            if (mutation === 'allocation') fs.mkdirSync(x.target);
+            if (mutation === 'build lock')
+              x.f.write(path.join(x.f.installed, '.build-budget.lock'), {
+                pid: process.pid,
+                token: 'other',
+              });
+            if (mutation === 'active lock')
+              x.f.write(
+                path.join(path.dirname(x.f.installed), '.active-release.lock'),
+                'other',
+              );
+            observed = x.query(context);
+            assert(observed.errors.length);
+            return observed;
+          },
+        }),
+      );
+      assert(observed?.errors.length);
+      if (!['claim', 'ledger digest', 'nonempty outputs'].includes(mutation))
+        assert(fs.readFileSync(x.f.ledger).equals(x.original));
+      assert(
+        !fs.existsSync(
+          x.f.ledger +
+            '.binding-repair-' +
+            x.options.bindingRepairSha256 +
+            '.json',
+        ),
+      );
+    }),
+  );
+for (const mutation of [
+  'approval',
+  'ledger',
+  'adoption',
+  'old policy',
+  'new policy',
+  'token',
+  'allocation',
+])
+  test(
+    'empty recovery original probe: refuses watched ' +
+      mutation +
+      ' drift before commit',
+    () =>
+      emptyRecoveryProbeFixture((x) => {
+        let queries = 0,
+          changed = false;
+        assert.throws(() =>
+          x.open({
+            query: (r) => {
+              if (++queries !== 2) return x.query(r);
+              const read = fs.readFileSync;
+              const instrument = test.mock.method(
+                fs,
+                'readFileSync',
+                function (at, ...args) {
+                  const data = read.call(this, at, ...args);
+                  if (
+                    !changed &&
+                    at ===
+                      path.join(
+                        path.dirname(x.scopePath),
+                        'install-lifecycle.cjs',
+                      )
+                  ) {
+                    changed = true;
+                    const file = {
+                      approval: x.approval,
+                      ledger: x.f.ledger,
+                      adoption: x.adopted,
+                      'old policy': x.oldFile,
+                      'new policy': x.nextFile,
+                      token: x.f.lock,
+                    }[mutation];
+                    if (file) fs.appendFileSync(file, ' ');
+                    else fs.mkdirSync(x.target);
+                  }
+                  return data;
+                },
+              );
+              try {
+                const result = x.query(r);
+                assert(result.errors.length);
+                return result;
+              } finally {
+                instrument.mock.restore();
+              }
+            },
+          }),
+        );
+        assert(changed);
+        assert.equal(queries, 2);
+        if (mutation !== 'ledger')
+          assert(fs.readFileSync(x.f.ledger).equals(x.original));
+        assert(
+          fs.existsSync(
+            x.f.ledger +
+              '.binding-repair-' +
+              x.options.bindingRepairSha256 +
+              '.json',
+          ),
+        );
+      }),
+  );
+test('empty recovery original probe: old proof cannot authorize a new owner lock', () =>
+  emptyRecoveryProbeFixture((x) => {
+    let captured;
+    assert.throws(() =>
+      x.open({
+        query: (r) => {
+          captured = r;
+          return x.query({ ...r, lockSha256: '0'.repeat(64) });
+        },
+      }),
+    );
+    assert.throws(() => x.open({ query: () => x.query(captured) }));
+    assert(fs.readFileSync(x.f.ledger).equals(x.original));
+  }));
+test('empty recovery original probe: CLI rejects incomplete or unknown recovery arguments', () => {
+  for (const extra of [
+    ['--empty-install-recovery'],
+    ['--unknown', 'a', '0'.repeat(64), '1'.repeat(64)],
+    ['--empty-install-recovery', 'a', 'not-a-pin', '1'.repeat(64)],
+  ]) {
+    const value = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          require.resolve('./windows-release-references.cjs'),
+          'synthetic-policy',
+          ...extra,
+        ],
+        { encoding: 'utf8', windowsHide: true },
+      ),
+    );
+    assert.deepEqual(value.errors, ['REFERENCE_POLICY_ARGUMENT_REQUIRED']);
+  }
+});
+test('empty recovery original probe: staged probe retains established mtime/ctime policy identity', () =>
+  emptyRecoveryProbeFixture((x) => {
+    const s = fs.lstatSync(x.probePath, { bigint: true });
+    assert.notEqual(s.mtimeNs, s.ctimeNs);
+    assert.deepEqual(
+      x.f.policy.probe.identity,
+      [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].map(String),
+    );
+    assert.notDeepEqual(
+      x.f.policy.probe.identity,
+      [s.dev, s.ino, s.size, s.birthtimeNs, s.mtimeNs].map(String),
+    );
+    x.open().close();
+  }));
+test('empty recovery original probe: rejects substituted birthtime/mtime policy identity', () =>
+  emptyRecoveryProbeFixture((x) => {
+    const s = fs.lstatSync(x.probePath, { bigint: true });
+    x.f.policy.probe.identity = [
+      s.dev,
+      s.ino,
+      s.size,
+      s.birthtimeNs,
+      s.mtimeNs,
+    ].map(String);
+    x.f.write(x.nextFile, x.f.policy);
+    x.options.configSha256 = x.f.native.policySha256 = x.f.pin(
+      x.nextFile,
+    ).sha256;
+    x.receipt.newPolicySha256 = x.options.configSha256;
+    x.receipt.probeBinding.new = x.f.policy.probe;
+    x.f.write(x.approval, x.receipt);
+    x.options.bindingRepairSha256 = x.f.pin(x.approval).sha256;
+    assert.throws(() => x.open(), /BINDING_REPAIR_REVIEW_REQUIRED/);
+    assert(fs.readFileSync(x.f.ledger).equals(x.original));
+  }));
+test(
+  'empty recovery original probe: scope subprocess reaches actual CLI main and self argv with only native collector isolated',
+  { skip: process.platform !== 'win32' },
+  () =>
+    emptyRecoveryProbeFixture((x) => {
+      const nativeFile = path.join(x.f.base, 'synthetic-native.json'),
+        preload = path.join(x.f.base, 'isolate-collector.cjs');
+      x.f.write(nativeFile, x.f.native);
+      // The child executes the real CLI and main. Only its native OS collector
+      // is replaced: do not construct main's self object or call probe directly.
+      fs.writeFileSync(
+        preload,
+        '(' +
+          function isolateCollector() {
+            const fs = require('node:fs'),
+              path = require('node:path'),
+              assert = require('node:assert/strict'),
+              cp = require('node:child_process');
+            cp.execFileSync = (exe, args, options) => {
+              assert.equal(
+                exe,
+                path.join(
+                  process.env.SystemRoot,
+                  'System32/WindowsPowerShell/v1.0/powershell.exe',
+                ),
+              );
+              assert.equal(options.timeout, 20000);
+              assert.equal(args[2], '-File');
+              assert.equal(args[4], '-PolicyFile');
+              assert.equal(args[5], process.argv[2]);
+              const native = JSON.parse(
+                fs.readFileSync(process.env.WEWE_SYNTHETIC_NATIVE),
+              );
+              const quote = (value) => '"' + value + '"';
+              for (const frame of [
+                native.processesBefore,
+                native.processesAfter,
+              ]) {
+                Object.assign(
+                  frame.find((p) => p.pid === 200),
+                  {
+                    pid: process.pid,
+                    parentPid: process.ppid,
+                    executable: process.execPath,
+                    commandLine: (process.env.WEWE_TRUNCATE_NATIVE_ARGV
+                      ? process.argv.slice(0, 3)
+                      : process.argv
+                    )
+                      .map(quote)
+                      .join(' '),
+                  },
+                );
+                Object.assign(
+                  frame.find((p) => p.pid === 201),
+                  {
+                    parentPid: process.pid,
+                    executable: exe,
+                    commandLine: [exe, ...args].map(quote).join(' '),
+                  },
+                );
+              }
+              return JSON.stringify(native);
+            };
+          }.toString() +
+          ')();\n',
+      );
+      const invoke = (exe, args, options, truncate = false) =>
+        JSON.parse(
+          execFileSync(exe, args, {
+            ...options,
+            env: {
+              ...process.env,
+              NODE_OPTIONS: '--require ' + JSON.stringify(preload),
+              WEWE_SYNTHETIC_NATIVE: nativeFile,
+              WEWE_TRUNCATE_NATIVE_ARGV: truncate ? '1' : '',
+            },
+          }),
+        );
+      let precommit = 0,
+        ordinary = 0,
+        captured;
+      x.useTransport((exe, args, options) => {
+        assert.equal(exe, process.execPath);
+        assert.equal(options.timeout, 30000);
+        assert.equal(args[1], x.nextFile);
+        if (args.length === 6) {
+          precommit++;
+          assert.equal(args[2], '--empty-install-recovery');
+          captured = [exe, args, options];
+          // A missing native recovery suffix must still be rejected by main's
+          // original full-argv identity comparison, not bypassed by the bridge.
+          assert.deepEqual(invoke(exe, args, options, true).errors, [
+            'REFERENCE_PROBE_IDENTITY_UNCERTAIN',
+          ]);
+        } else {
+          assert.equal(args.length, 2);
+          ordinary++;
+        }
+        const result = invoke(exe, args, options);
+        assert.deepEqual(result.errors, []);
+        return JSON.stringify(result);
+      });
+      const lease = x.open({ query: undefined });
+      assert.deepEqual(invoke(...captured).errors, [
+        'REFERENCE_INFLIGHT_STATE_INVALID',
+      ]);
+      lease.close();
+      assert.deepEqual(invoke(...captured).errors, [
+        'REFERENCE_SOURCE_MISSING',
+      ]);
+      assert.equal(precommit, 2);
+      assert.equal(ordinary, 3);
+    }),
+);
 test('encoded shell actions are unresolved even if they hide the root text', () =>
   fixture((f) => {
     const action = {

@@ -106,7 +106,19 @@ function argv(command) {
   }
   return out;
 }
-function probe(policy, native, { callerPid = process.ppid, self } = {}) {
+function consoleInvocation(tokens, executable) {
+  return (
+    tokens.length === 2 &&
+    tokens[0].startsWith('\\??\\') &&
+    same(tokens[0].slice(4), executable) &&
+    /^0x[0-9a-f]{1,16}$/i.test(tokens[1])
+  );
+}
+function probe(
+  policy,
+  native,
+  { callerPid = process.ppid, self, recovery } = {},
+) {
   const result = {
     complete: false,
     categories: Object.fromEntries(kinds.map((k) => [k, false])),
@@ -125,6 +137,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     const controlOnly = buildOnly && !!rootRoles;
     const projectOnly = applicability.projectOnly,
       narrowControl = controlOnly || projectOnly;
+    const processFamily = policy.preservingUpdate?.processFamily?.format === 1;
     const effectScope =
       projectOnly &&
       require('./preserving-contract.cjs').preservingEffectScope(policy);
@@ -241,6 +254,25 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       if (digest(value) !== spec.sha256) fail('REFERENCE_PIN_CHANGED');
       return value;
     }
+    const consoleSpec =
+      processFamily && policy.preservingUpdate.processFamily.consoleHost;
+    let consolePath;
+    if (consoleSpec) {
+      consolePath = canonical(consoleSpec.path);
+      if (
+        process.platform !== 'win32' ||
+        !same(
+          consolePath,
+          path.join(process.env.SystemRoot, 'System32/conhost.exe'),
+        ) ||
+        !Array.isArray(consoleSpec.argv) ||
+        !consoleInvocation(consoleSpec.argv, consolePath) ||
+        hash(identity(fs.lstatSync(consolePath, { bigint: true }))) !==
+          hash(consoleSpec.identity)
+      )
+        fail('REFERENCE_PROBE_CHILD_UNCERTAIN');
+      watchPinned(consoleSpec, 256 * 1024 ** 2);
+    }
     if (rootRoles) {
       for (const root of rootRoles.readOnlyRoots)
         if (
@@ -353,16 +385,68 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         watchPinned(f);
       }
       watchPinned(l.executable, 256 * 1024 ** 2);
-      if (!same(canonical(l.argv[0]), canonical(l.executable.path)))
+      const fixed = l.packageId !== undefined;
+      if (
+        (!fixed || path.isAbsolute(l.argv[0])) &&
+        !same(canonical(l.argv[0]), canonical(l.executable.path))
+      )
         fail('REFERENCE_LAUNCHER_EXECUTABLE_CHANGED');
-      const ptr = canonical(l.pointerPath);
-      if (!pointers.has(ptr)) fail('REFERENCE_LAUNCHER_POINTER_UNRESOLVED');
+      let ref;
+      if (fixed) {
+        // Runtime invocations bind to immutable packages, not the active pointer.
+        // A bare interpreter name is accepted only as an exact reviewed argv;
+        // the actual process executable must still match its pinned path.
+        if (l.pointerPath !== undefined) fail('REFERENCE_LAUNCHER_INVALID');
+        ref = packages.find((p) => p.packageId === l.packageId);
+        if (!ref || !same(packageAt(l.entry).packagePath, ref.packagePath))
+          fail('REFERENCE_LAUNCHER_INVALID');
+        if (
+          l.parentEntry !== undefined &&
+          !same(packageAt(l.parentEntry).packagePath, ref.packagePath)
+        )
+          fail('REFERENCE_LAUNCHER_INVALID');
+      } else {
+        if (l.parentEntry !== undefined) fail('REFERENCE_LAUNCHER_INVALID');
+        const ptr = canonical(l.pointerPath);
+        if (!pointers.has(ptr)) fail('REFERENCE_LAUNCHER_POINTER_UNRESOLVED');
+        ref = pointers.get(ptr);
+      }
       return {
         ...l,
-        ref: pointers.get(ptr),
+        ref,
+        invocationSha256: fixed ? hash(l) : undefined,
         cwd: canonical(l.workingDirectory),
       };
     });
+    for (const l of launchers.filter((l) => l.packageId !== undefined)) {
+      if (
+        launchers.filter(
+          (p) => p.packageId === l.packageId && same(p.entry, l.entry),
+        ).length !== 1
+      )
+        fail('REFERENCE_LAUNCHER_INVALID');
+      if (l.parentEntry !== undefined) {
+        const parent = launchers.find(
+          (p) => p.packageId === l.packageId && same(p.entry, l.parentEntry),
+        );
+        if (!parent || parent.parentEntry !== undefined)
+          fail('REFERENCE_LAUNCHER_INVALID');
+        l.parentInvocationSha256 = parent.invocationSha256;
+      }
+    }
+    if (processFamily) {
+      for (const id of [
+        policy.preservingUpdate.active.currentId,
+        policy.preservingUpdate.active.candidateId,
+      ]) {
+        if (
+          launchers.filter(
+            (l) => l.packageId === id && l.parentEntry === undefined,
+          ).length !== 1
+        )
+          fail('REFERENCE_LAUNCHER_INVALID');
+      }
+    }
     const harmlessActions = buildOnly ? [] : cfg.harmlessActions || [];
     if (!Array.isArray(harmlessActions) || harmlessActions.length > 64)
       fail('REFERENCE_HARMLESS_ACTION_POLICY_INVALID');
@@ -415,6 +499,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     ) {
       const launch = launchers.find(
         (l) =>
+          (l.packageId === undefined || isProcess) &&
           hash(tokens) === hash(l.argv) &&
           (cwd
             ? same(canonical(cwd), l.cwd)
@@ -434,6 +519,12 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         return [
           {
             ...launch.ref,
+            ...(launch.packageId === undefined
+              ? {}
+              : {
+                  invocationSha256: launch.invocationSha256,
+                  parentInvocationSha256: launch.parentInvocationSha256 || null,
+                }),
             ...(isProcess
               ? {}
               : {
@@ -736,10 +827,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
                   : effectScope.allocations.map((a) => a.path)
               ).map((p) => p.replaceAll('\\', '/').toLowerCase());
             if (
-              tokens.length !== 2 ||
-              !tokens[0].startsWith('\\??\\') ||
-              !same(tokens[0].slice(4), canonical(self.consoleHost.path)) ||
-              !/^0x[0-9a-f]{1,16}$/i.test(tokens[1]) ||
+              !consoleInvocation(tokens, canonical(self.consoleHost.path)) ||
               [p.executable, p.commandLine, p.workingDirectory].some(
                 (t) =>
                   typeof t === 'string' &&
@@ -761,8 +849,58 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
         after.delete(pid);
       }
     }
+    if (processFamily) {
+      // Topology only, never unrelated argv or executable paths. Exit confirmation
+      // uses both observations to reject PID reuse and newly orphaned children.
+      result.processTopology = [before, after].flatMap((sample, phase) =>
+        [...sample.values()].map(({ pid, parentPid }) => ({
+          pid,
+          parentPid,
+          phase,
+        })),
+      );
+      result.exitedProcesses = [];
+      result.consoleProcesses = [];
+      result.exitedConsoleProcesses = [];
+    }
+    const consoleRows = new Set();
+    if (consoleSpec) {
+      for (const p of before.values()) {
+        if (
+          !visible(p) ||
+          !same(p.executable, consolePath) ||
+          !consoleInvocation(argv(p.commandLine), consolePath) ||
+          hash(argv(p.commandLine)) !== hash(consoleSpec.argv)
+        )
+          continue;
+        const current = after.get(p.pid);
+        if (current && hash(p) !== hash(current)) continue;
+        const row = {
+          pid: p.pid,
+          parentPid: p.parentPid,
+          startUtc: p.startUtc,
+          executableSha256: consoleSpec.sha256,
+          consoleHost: true,
+          invocationSha256: hash(consoleSpec),
+          identity: hash([
+            p.pid,
+            p.parentPid,
+            p.startUtc,
+            canonical(p.executable),
+            consoleSpec.sha256,
+            p.commandLine,
+          ]),
+        };
+        (current
+          ? result.consoleProcesses
+          : result.exitedConsoleProcesses
+        ).push(row);
+        consoleRows.add(p.pid);
+      }
+    }
     if (!controlOnly) {
       for (const p of before.values()) {
+        if (consoleRows.has(p.pid)) continue;
         if (
           projectOnly &&
           p.pid !== policy.preservingUpdate.active.oldProcess.pid &&
@@ -784,12 +922,18 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
           !refs.some((r) => same(r.packagePath, executableRef.packagePath))
         )
           refs.push(executableRef);
-        if (refs.length) matched.set(p.pid, refs);
+        if (refs.length) {
+          if (processFamily && (refs.length !== 1 || !refs[0].invocationSha256))
+            fail('REFERENCE_PROCESS_FAMILY_UNREVIEWED');
+          matched.set(p.pid, refs);
+        }
       }
       for (let pass = 0; pass < before.size; pass++) {
         let changed = false;
         for (const p of before.values())
           if (!matched.has(p.pid) && matched.has(p.parentPid)) {
+            if (processFamily && !consoleRows.has(p.pid))
+              fail('REFERENCE_PROCESS_FAMILY_UNREVIEWED');
             matched.set(p.pid, matched.get(p.parentPid));
             changed = true;
           }
@@ -798,17 +942,33 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
       for (const [pid, refs] of matched) {
         const p = before.get(pid),
           current = after.get(pid);
-        if (projectOnly && (!visible(p) || !visible(current)))
+        if (
+          projectOnly &&
+          (!visible(p) ||
+            (processFamily ? current && !visible(current) : !visible(current)))
+        )
           fail('REFERENCE_PROCESS_VISIBILITY_INCOMPLETE');
-        if (!current || hash(p) !== hash(current)) {
+        if (
+          (!current && !processFamily) ||
+          (current && hash(p) !== hash(current))
+        ) {
           result.uncertainChildren.push(pid);
           fail('REFERENCE_PROCESS_CHANGED');
         }
+        if (consoleRows.has(pid)) continue;
         const exe = canonical(p.executable),
           executableSha256 = digest(watch(exe, true, 256 * 1024 ** 2));
         for (const ref of refs)
-          record('processes', ref, {
+          (current
+            ? (detail) => record('processes', ref, detail)
+            : (detail) =>
+                result.exitedProcesses.push({
+                  kind: 'processes',
+                  ...ref,
+                  ...detail,
+                }))({
             pid,
+            ...(processFamily ? { parentPid: p.parentPid } : {}),
             startUtc: p.startUtc,
             executableSha256,
             identity: hash([
@@ -1070,7 +1230,289 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     }
     const ledgerFile = prefix + '.state.json',
       ledger = envelope(ledgerFile);
-    if (ledger.configSha !== lock.configSha || !Array.isArray(ledger.outputs))
+    if (recovery !== undefined) {
+      // Read-only bridge for the exact old claim while the same controller owns
+      // the new-policy lock. Ordinary observations still require all three pins.
+      const refuse = () => fail('REFERENCE_INFLIGHT_STATE_INVALID');
+      const checked = (at, wanted, limit = 1024 * 1024) => {
+        if (
+          !hex(wanted) ||
+          canonical(at) !== at ||
+          require('./scope-inventory.cjs').isPrivatePath(at)
+        )
+          refuse();
+        const s = fs.lstatSync(at, { bigint: true });
+        if (s.nlink !== 1n) refuse();
+        const raw = watch(at, true, limit);
+        if (digest(raw) !== wanted) refuse();
+        return raw;
+      };
+      if (
+        !recovery ||
+        Object.keys(recovery).sort().join(',') !==
+          'approvalPath,approvalSha256,lockSha256,policyPath' ||
+        !hex(recovery.lockSha256) ||
+        digest(lockRaw) !== recovery.lockSha256 ||
+        ledger.configSha === lock.configSha ||
+        !projectOnly ||
+        policy.format !== 2 ||
+        policy.preservingUpdate.operation !== 'install'
+      )
+        refuse();
+      const a = JSON.parse(
+        checked(recovery.approvalPath, recovery.approvalSha256, 65536),
+      );
+      if (
+        !a ||
+        hash(Object.keys(a).sort()) !==
+          hash(
+            [
+              'format',
+              'kind',
+              'scopeId',
+              'registryDirectory',
+              'registryIdentity',
+              'oldPolicyPath',
+              'oldPolicySha256',
+              'newPolicySha256',
+              'priorLedgerSha256',
+              'priorPayloadDigest',
+              'priorLedgerIdentity',
+              'adoptionSha256',
+              'auditedSourceIdentity',
+              'reviewEvidence',
+              'claimId',
+              'claimSha256',
+              'failureCode',
+              'failureEvidencePath',
+              'failureEvidenceSha256',
+              'toolBinding',
+              'probeBinding',
+              'releasedBuildLock',
+              'allowedDifferences',
+            ].sort(),
+          ) ||
+        !/^[a-f0-9-]{36}$/.test(a.claimId || '') ||
+        !hex(a.claimSha256)
+      )
+        refuse();
+      const old = JSON.parse(checked(a.oldPolicyPath, a.oldPolicySha256));
+      const current = JSON.parse(
+        checked(recovery.policyPath, a.newPolicySha256),
+      );
+      const original = JSON.parse(
+        checked(ledgerFile, a.priorLedgerSha256, 65536),
+      );
+      const stat = fs.lstatSync(ledgerFile, { bigint: true });
+      const claim = ledger.claim;
+      if (
+        a.format !== 1 ||
+        a.kind !== 'interrupted-empty-install-claim-recovery' ||
+        a.scopeId !== policy.scopeId ||
+        a.registryDirectory !== registry ||
+        hash(a.registryIdentity) !== hash(policy.registryIdentity) ||
+        hash(directoryId(registry)) !== hash(policy.registryIdentity) ||
+        a.newPolicySha256 !== native.policySha256 ||
+        a.oldPolicySha256 !== ledger.configSha ||
+        hash(current) !== hash(policy) ||
+        old.scopeId !== policy.scopeId ||
+        old.format !== 2 ||
+        original.digest !== hash(original.payload) ||
+        original.digest !== a.priorPayloadDigest ||
+        hash(original.payload) !== hash(ledger) ||
+        ledger.format !== 2 ||
+        ledger.bindingRepair ||
+        hash(a.priorLedgerIdentity) !==
+          hash([stat.dev, stat.ino, stat.birthtimeNs].map(String)) ||
+        !Array.isArray(ledger.outputs) ||
+        ledger.outputs.length ||
+        !claim ||
+        claim.id !== a.claimId ||
+        hash(claim) !== a.claimSha256 ||
+        claim.kind !== 'install' ||
+        claim.root !== effectScope.container ||
+        !Number.isSafeInteger(claim.reserveBytes) ||
+        claim.reserveBytes < 1 ||
+        claim.runtimeCopies !== 1 ||
+        !hex(claim.refs) ||
+        !Array.isArray(claim.outputs) ||
+        claim.outputs.length ||
+        a.failureCode !== 'RELEASE_SCOPE_SCAN_TIME_BUDGET' ||
+        typeof a.reviewEvidence !== 'string' ||
+        !a.reviewEvidence
+      )
+        refuse();
+      if (
+        checked(ledgerFile + '.adopted', a.adoptionSha256, 64).toString(
+          'utf8',
+        ) !== a.oldPolicySha256
+      )
+        refuse();
+      watchDirectory(registry, policy.registryIdentity);
+      checked(a.failureEvidencePath, a.failureEvidenceSha256);
+      const budget = {
+        profile: 'legacy-stream-v1',
+        checkpointMode: 'full',
+        scanEntries: 100000,
+        operationEntries: 1000000,
+        scanReadBytes: 1073741824,
+        operationReadBytes: 2147483648,
+        durationMs: 300000,
+      };
+      if (
+        Object.hasOwn(old, 'scanBudget') ||
+        !policy.scanBudget ||
+        Object.keys(policy.scanBudget).length !== Object.keys(budget).length ||
+        Object.entries(budget).some(([k, v]) => policy.scanBudget[k] !== v)
+      )
+        refuse();
+      const pin = a.toolBinding,
+        observer = a.probeBinding;
+      if (
+        !pin ||
+        pin.path !== canonical(path.join(__dirname, 'release-scope.cjs')) ||
+        Object.keys(pin).sort().join(',') !== 'newSha256,oldSha256,path' ||
+        !hex(pin.oldSha256) ||
+        pin.oldSha256 === pin.newSha256 ||
+        a.auditedSourceIdentity !== pin.newSha256 ||
+        !observer ||
+        hash(observer.old) !== hash(old.probe) ||
+        hash(observer.new) !== hash(policy.probe) ||
+        Object.keys(observer).sort().join(',') !== 'new,old' ||
+        policy.probe.path !== canonical(__filename) ||
+        old.probe.path !== policy.probe.path ||
+        !hex(old.probe.sha256) ||
+        old.probe.sha256 === policy.probe.sha256
+      )
+        refuse();
+      checked(pin.path, pin.newSha256);
+      checked(policy.probe.path, policy.probe.sha256);
+      const ps = fs.lstatSync(policy.probe.path, { bigint: true });
+      if (
+        hash(policy.probe.identity) !==
+        hash([ps.dev, ps.ino, ps.size, ps.mtimeNs, ps.ctimeNs].map(String))
+      )
+        refuse();
+      if (
+        hash({
+          ...policy.probe,
+          sha256: old.probe.sha256,
+          identity: old.probe.identity,
+        }) !== hash(old.probe)
+      )
+        refuse();
+      const matches = [];
+      old.windowsReferences.launchers.forEach((l, i) =>
+        l.files.forEach((f, j) => {
+          if (f.path === pin.path) matches.push([i, j]);
+        }),
+      );
+      if (matches.length !== 1) refuse();
+      const [i, j] = matches[0],
+        restored = structuredClone(policy),
+        previous = old.windowsReferences.launchers[i],
+        next = policy.windowsReferences.launchers[i];
+      if (
+        !previous.pointerPath ||
+        previous.packageId !== undefined ||
+        previous.files[j].sha256 !== pin.oldSha256 ||
+        next.files[j].sha256 !== pin.newSha256
+      )
+        refuse();
+      restored.windowsReferences.launchers[i].files[j].sha256 = pin.oldSha256;
+      delete restored.scanBudget;
+      restored.probe = structuredClone(old.probe);
+      const priorBoot = policy.preservingUpdate?.priorBootExit;
+      let restartDifference;
+      if (priorBoot) {
+        const rb = priorBoot.restartBinding,
+          at = path.join(__dirname, 'restart.cjs');
+        const indexes = previous.files.flatMap((f, k) =>
+          f.path === at ? [k] : [],
+        );
+        if (!rb || rb.path !== canonical(at) || indexes.length !== 1) refuse();
+        const k = indexes[0];
+        if (
+          previous.files[k].sha256 !== rb.oldSha256 ||
+          next.files[k]?.path !== at ||
+          next.files[k].sha256 !== rb.newSha256 ||
+          rb.oldSha256 === rb.newSha256
+        )
+          refuse();
+        checked(at, rb.newSha256);
+        checked(
+          path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+          priorBoot.helperSha256,
+        );
+        restored.windowsReferences.launchers[i].files[k].sha256 = rb.oldSha256;
+        restartDifference = `windowsReferences.launchers.${i}.files.${k}.sha256`;
+        if (
+          old.preservingUpdate.priorBootExit ||
+          priorBoot.oldReferences !== claim.refs ||
+          hash(priorBoot.launcherTransition) !==
+            hash({
+              pointer: previous.pointerPath,
+              oldSha256: hash(previous.files),
+              newSha256: hash(next.files),
+            })
+        )
+          refuse();
+        delete restored.preservingUpdate.priorBootExit;
+      }
+      if (
+        hash(restored) !== hash(old) ||
+        hash(a.allowedDifferences) !==
+          hash([
+            'scanBudget',
+            `windowsReferences.launchers.${i}.files.${j}.sha256`,
+            'probe.sha256',
+            'probe.identity',
+            ...(priorBoot
+              ? [restartDifference, 'preservingUpdate.priorBootExit']
+              : []),
+          ])
+      )
+        refuse();
+      const released = a.releasedBuildLock,
+        writer = path.join(__dirname, 'install-lifecycle.cjs');
+      if (
+        !released ||
+        !Number.isInteger(released.ownerPidDigits) ||
+        released.ownerPidDigits < 1 ||
+        released.ownerPidDigits > 10 ||
+        Object.keys(released).sort().join(',') !==
+          'ownerPidDigits,writerSha256' ||
+        previous.files.some(
+          (f) => f.path === writer && f.sha256 !== released.writerSha256,
+        )
+      )
+        refuse();
+      checked(writer, released.writerSha256);
+      const extra = Buffer.byteLength(
+        JSON.stringify({
+          pid: 10 ** (released.ownerPidDigits - 1),
+          token: '00000000-0000-0000-0000-000000000000',
+        }),
+      );
+      if (
+        claim.startBytes !== policy.baseline.bytes + extra ||
+        claim.startRuntimeCopies !== policy.baseline.runtimeCopies
+      )
+        refuse();
+      for (const p of [
+        path.join(effectScope.container, '.build-budget.lock'),
+        path.join(path.dirname(effectScope.container), '.active-release.lock'),
+      ])
+        if (watch(p, false)) refuse();
+      for (const allocation of effectScope.allocations) {
+        if (allocation.mode !== 'exclusive-package' || exists(allocation.path))
+          refuse();
+        absentDirectories.add(allocation.path);
+      }
+    } else if (
+      ledger.configSha !== lock.configSha ||
+      !Array.isArray(ledger.outputs)
+    )
       fail('REFERENCE_INFLIGHT_STATE_INVALID');
     if (
       ledger.claim &&
@@ -1143,6 +1585,22 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
     );
     if (preserving) result.observationComplete = true;
     else result.complete = true;
+    if (recovery && policy.preservingUpdate?.priorBootExit) {
+      const helperFile = path.join(__dirname, 'normal-start-claim-rebind.cjs');
+      if (
+        digest(bytes(helperFile)) !==
+        policy.preservingUpdate.priorBootExit.helperSha256
+      )
+        fail('REFERENCE_PRIOR_BOOT_HELPER_CHANGED');
+      const helper = require(helperFile),
+        evidence = helper.readPriorBootEvidence(policy);
+      helper.validatePriorBootEmpty({
+        policy,
+        facts: result,
+        ...evidence,
+        nowUtc: new Date().toISOString(),
+      });
+    }
   } catch (error) {
     // Keep private paths/command lines out of errors. Full raw host evidence is
     // never printed. A failed category is not silently declared empty.
@@ -1152,7 +1610,7 @@ function probe(policy, native, { callerPid = process.ppid, self } = {}) {
   }
   return result;
 }
-function main(policyFile) {
+function main(policyFile, recovery) {
   const policyBytes = bytes(canonical(policyFile)),
     policy = JSON.parse(policyBytes.toString('utf8'));
   require('./preserving-contract.cjs').referenceApplicability(policy);
@@ -1266,10 +1724,25 @@ function main(policyFile) {
   )
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   const result = probe(policy, native, {
+    ...(recovery
+      ? { recovery: { ...recovery, policyPath: canonical(policyFile) } }
+      : {}),
     self: {
       pid: process.pid,
       executable: process.execPath,
-      argv: [process.execPath, process.argv[1], policyFile],
+      argv: [
+        process.execPath,
+        process.argv[1],
+        policyFile,
+        ...(recovery
+          ? [
+              '--empty-install-recovery',
+              recovery.approvalPath,
+              recovery.approvalSha256,
+              recovery.lockSha256,
+            ]
+          : []),
+      ],
       collectorExecutable,
       consoleHost,
       collectorArgv: [collectorExecutable, ...collectorArgs],
@@ -1300,11 +1773,32 @@ function main(policyFile) {
     fail('REFERENCE_COLLECTOR_PIN_CHANGED');
   return result;
 }
+function policyArguments(args) {
+  if (
+    args.length !== 3 &&
+    (args.length !== 7 ||
+      args[3] !== '--empty-install-recovery' ||
+      !hex(args[5]) ||
+      !hex(args[6]))
+  )
+    fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
+  return {
+    policyFile: args[2],
+    recovery:
+      args.length === 7
+        ? {
+            approvalPath: args[4],
+            approvalSha256: args[5],
+            lockSha256: args[6],
+          }
+        : undefined,
+  };
+}
 if (require.main === module) {
   let value;
   try {
-    if (process.argv.length !== 3) fail('REFERENCE_POLICY_ARGUMENT_REQUIRED');
-    value = main(process.argv[2]);
+    const args = policyArguments(process.argv);
+    value = main(args.policyFile, args.recovery);
   } catch (error) {
     value = {
       complete: false,
@@ -1318,4 +1812,4 @@ if (require.main === module) {
   }
   process.stdout.write(JSON.stringify(value) + '\n');
 }
-module.exports = { probe, argv, main };
+module.exports = { probe, argv, main, policyArguments };

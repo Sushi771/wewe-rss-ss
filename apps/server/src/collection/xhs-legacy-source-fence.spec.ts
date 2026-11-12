@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -61,13 +62,22 @@ describe('legacy XHS facts close every candidate source lane', () => {
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        await db.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'fixture.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          ))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
     oldSql = (
       await fs.readFile(
         path.resolve(

@@ -257,7 +257,7 @@ function projectionScan(
     ]),
   };
 }
-function validateReferences(value, policy) {
+function validateReferences(value, policy, allowExits = false) {
   const applicability =
     require('./preserving-contract.cjs').referenceApplicability(policy);
   const { preserving } = applicability;
@@ -297,7 +297,8 @@ function validateReferences(value, policy) {
     !Array.isArray(value.errors) ||
     value.errors.length ||
     !Array.isArray(value.uncertainChildren) ||
-    value.uncertainChildren.length
+    value.uncertainChildren.length ||
+    (!allowExits && value.exitedProcesses?.length)
   )
     throw new Error(
       'RELEASE_SCOPE_REFERENCE_QUERY_INCOMPLETE [' +
@@ -319,7 +320,7 @@ function validateReferences(value, policy) {
     value.compatibility.proofSha256 !== policy.compatibilityProofSha256
   )
     throw new Error('RELEASE_SCOPE_COMPATIBILITY_UNPROVEN');
-  for (const r of value.records) {
+  for (const r of [...value.records, ...(value.exitedProcesses || [])]) {
     if (
       !kinds.includes(r.kind) ||
       typeof r.packageId !== 'string' ||
@@ -361,7 +362,45 @@ function validateReferences(value, policy) {
     )
       throw new Error('RELEASE_SCOPE_PROCESS_IDENTITY_UNCERTAIN');
   }
-  return hash(value);
+  if (
+    policy.preservingUpdate?.processFamily &&
+    (!Array.isArray(value.processTopology) ||
+      value.processTopology.length > 16384 ||
+      value.processTopology.some(
+        (r) =>
+          !Number.isInteger(r.pid) ||
+          r.pid < 0 ||
+          ![0, 1].includes(r.phase) ||
+          !Number.isInteger(r.parentPid) ||
+          r.parentPid < 0,
+      ))
+  )
+    throw Error('RELEASE_SCOPE_PROCESS_IDENTITY_UNCERTAIN');
+  // Unrelated host PID churn is not a reference transition. Topology is used
+  // solely to prove absence of the exact family during an approved stop.
+  return hash({
+    ...value,
+    processTopology: undefined,
+    consoleProcesses: undefined,
+    exitedConsoleProcesses: undefined,
+    exitedProcesses: undefined,
+  });
+}
+function priorBootEvidence(policy, facts) {
+  const spec = policy.preservingUpdate?.priorBootExit;
+  const file = path.join(__dirname, 'normal-start-claim-rebind.cjs');
+  if (!spec || fileHash(file) !== spec.helperSha256)
+    throw Error('RELEASE_PRIOR_BOOT_HELPER_CHANGED');
+  const helper = require(file),
+    evidence = helper.readPriorBootEvidence(policy);
+  validateReferences(evidence.oldFacts, policy);
+  helper.validatePriorBootEmpty({
+    policy,
+    facts,
+    ...evidence,
+    nowUtc: new Date().toISOString(),
+  });
+  return evidence;
 }
 function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
@@ -585,6 +624,10 @@ function open(request, options = {}, boundOperation) {
     claim,
     ledgerIdentity;
   let expectedProcesses;
+  const processFamily = preserving?.processFamily?.format === 1;
+  const families = require('./preserving-process-family.cjs');
+  const sealedFamilies = new Set(),
+    stoppingFamilies = new Map();
   const configIdentity = fileIdentity(file);
   // Narrow reviewed binding repair; uses this existing scope lock and never adopts.
   const repairPath =
@@ -654,7 +697,12 @@ function open(request, options = {}, boundOperation) {
       };
       if (!hex(repairSha)) reject();
       const preliminary = JSON.parse(bytes(repairPath, repairSha, 65536));
-      if (preliminary.kind === 'adopted-empty-install-caller-binding-repair') {
+      const recoverEmpty =
+        preliminary.kind === 'interrupted-empty-install-claim-recovery';
+      if (
+        recoverEmpty ||
+        preliminary.kind === 'adopted-empty-install-caller-binding-repair'
+      ) {
         const a = preliminary;
         if (
           a.format !== 1 ||
@@ -675,9 +723,10 @@ function open(request, options = {}, boundOperation) {
           !a.reviewEvidence ||
           !Array.isArray(a.priorLedgerIdentity) ||
           a.priorLedgerIdentity.length !== 3 ||
-          !a.launcher ||
-          typeof a.launcher !== 'object' ||
-          Array.isArray(a.launcher)
+          (!recoverEmpty &&
+            (!a.launcher ||
+              typeof a.launcher !== 'object' ||
+              Array.isArray(a.launcher)))
         )
           reject();
         const oldBytes = bytes(a.oldPolicyPath, a.oldPolicySha256),
@@ -701,19 +750,196 @@ function open(request, options = {}, boundOperation) {
         const changes = differences(old, policy).sort(),
           oldLaunchers = old.windowsReferences?.launchers,
           newLaunchers = policy.windowsReferences?.launchers;
+        let recoveredClaim,
+          failureBytes,
+          changedLauncher,
+          releasedLockBytes,
+          restartDifference;
+        const installWriter = path.join(__dirname, 'install-lifecycle.cjs');
+        if (recoverEmpty) {
+          // Only the omitted small-profile timeout and this module's existing
+          // launcher pin may change. No new launchers, probe, roots or budgets.
+          const budget = {
+            profile: 'legacy-stream-v1',
+            checkpointMode: 'full',
+            scanEntries: 100000,
+            operationEntries: 1000000,
+            scanReadBytes: 1073741824,
+            operationReadBytes: 2147483648,
+            durationMs: 300000,
+          };
+          const pin = a.toolBinding,
+            restored = structuredClone(policy);
+          if (
+            Object.hasOwn(old, 'scanBudget') ||
+            !policy.scanBudget ||
+            Object.keys(policy.scanBudget).length !==
+              Object.keys(budget).length ||
+            Object.entries(budget).some(
+              ([k, v]) => policy.scanBudget[k] !== v,
+            ) ||
+            !Array.isArray(oldLaunchers) ||
+            !Array.isArray(newLaunchers) ||
+            !pin ||
+            pin.path !== canonical(__filename) ||
+            !hex(pin.oldSha256) ||
+            !hex(pin.newSha256) ||
+            pin.oldSha256 === pin.newSha256 ||
+            fileHash(pin.path) !== pin.newSha256 ||
+            !hex(a.claimSha256) ||
+            !/^[a-f0-9-]{36}$/.test(a.claimId || '') ||
+            a.failureCode !== 'RELEASE_SCOPE_SCAN_TIME_BUDGET' ||
+            !hex(a.failureEvidenceSha256)
+          )
+            reject();
+          const matches = [];
+          oldLaunchers.forEach((l, i) =>
+            l.files?.forEach((f, j) => {
+              if (f.path === pin.path) matches.push([i, j]);
+            }),
+          );
+          if (matches.length !== 1) reject();
+          const [i, j] = matches[0],
+            nextPin = newLaunchers[i]?.files?.[j];
+          if (
+            oldLaunchers[i].files[j].sha256 !== pin.oldSha256 ||
+            nextPin?.path !== pin.path ||
+            nextPin.sha256 !== pin.newSha256 ||
+            !oldLaunchers[i].pointerPath ||
+            oldLaunchers[i].packageId !== undefined
+          )
+            reject();
+          restored.windowsReferences.launchers[i].files[j].sha256 =
+            pin.oldSha256;
+          delete restored.scanBudget;
+          // The read-only precommit observer is also an exact reviewed source.
+          const observer = a.probeBinding;
+          const probePath = canonical(
+            path.join(__dirname, 'windows-release-references.cjs'),
+          );
+          if (
+            !observer ||
+            hash(observer.old) !== hash(old.probe) ||
+            hash(observer.new) !== hash(policy.probe) ||
+            old.probe.path !== probePath ||
+            policy.probe.path !== probePath ||
+            !hex(old.probe.sha256) ||
+            !hex(policy.probe.sha256) ||
+            old.probe.sha256 === policy.probe.sha256 ||
+            a.auditedSourceIdentity !== pin.newSha256
+          )
+            reject();
+          const ps = fs.lstatSync(probePath, { bigint: true });
+          if (
+            hash(policy.probe.identity) !==
+            hash([ps.dev, ps.ino, ps.size, ps.mtimeNs, ps.ctimeNs].map(String))
+          )
+            reject();
+          if (
+            hash({
+              ...policy.probe,
+              sha256: old.probe.sha256,
+              identity: old.probe.identity,
+            }) !== hash(old.probe)
+          )
+            reject();
+          bytes(probePath, policy.probe.sha256);
+          restored.probe = structuredClone(old.probe);
+          if (preserving.priorBootExit) {
+            const b = preserving.priorBootExit;
+            const rb = b.restartBinding,
+              at = path.join(__dirname, 'restart.cjs');
+            const indexes = oldLaunchers[i].files.flatMap((f, k) =>
+              f.path === at ? [k] : [],
+            );
+            if (!rb || rb.path !== canonical(at) || indexes.length !== 1)
+              reject();
+            const k = indexes[0];
+            if (
+              oldLaunchers[i].files[k].sha256 !== rb.oldSha256 ||
+              newLaunchers[i].files[k]?.path !== at ||
+              newLaunchers[i].files[k].sha256 !== rb.newSha256 ||
+              rb.oldSha256 === rb.newSha256
+            )
+              reject();
+            bytes(at, rb.newSha256);
+            bytes(
+              path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+              b.helperSha256,
+            );
+            restored.windowsReferences.launchers[i].files[k].sha256 =
+              rb.oldSha256;
+            restartDifference = `windowsReferences.launchers.${i}.files.${k}.sha256`;
+            if (
+              old.preservingUpdate.priorBootExit ||
+              hash(b.launcherTransition) !==
+                hash({
+                  pointer: oldLaunchers[i].pointerPath,
+                  oldSha256: hash(oldLaunchers[i].files),
+                  newSha256: hash(newLaunchers[i].files),
+                })
+            )
+              reject();
+            delete restored.preservingUpdate.priorBootExit;
+          }
+          if (
+            hash(restored) !== hash(old) ||
+            hash(a.allowedDifferences) !==
+              hash([
+                'scanBudget',
+                `windowsReferences.launchers.${i}.files.${j}.sha256`,
+                'probe.sha256',
+                'probe.identity',
+                ...(preserving.priorBootExit
+                  ? [restartDifference, 'preservingUpdate.priorBootExit']
+                  : []),
+              ])
+          )
+            reject();
+          changedLauncher = {
+            pointer: oldLaunchers[i].pointerPath,
+            oldSha: hash(oldLaunchers[i].files),
+            newSha: hash(newLaunchers[i].files),
+          };
+          const released = a.releasedBuildLock;
+          if (
+            !released ||
+            !Number.isInteger(released.ownerPidDigits) ||
+            released.ownerPidDigits < 1 ||
+            released.ownerPidDigits > 10 ||
+            !hex(released.writerSha256) ||
+            oldLaunchers[i].files.some(
+              (f) =>
+                f.path === installWriter && f.sha256 !== released.writerSha256,
+            )
+          )
+            reject();
+          bytes(installWriter, released.writerSha256);
+          // The old installer charged its own transient lock before open().
+          // This explains only its reviewed byte count, not the former PID/token.
+          releasedLockBytes = Buffer.byteLength(
+            JSON.stringify({
+              pid: 10 ** (released.ownerPidDigits - 1),
+              token: '00000000-0000-0000-0000-000000000000',
+            }),
+          );
+          failureBytes = bytes(a.failureEvidencePath, a.failureEvidenceSha256);
+        }
         if (
-          !Array.isArray(oldLaunchers) ||
-          !Array.isArray(newLaunchers) ||
-          newLaunchers.length !== oldLaunchers.length + 1 ||
-          hash(newLaunchers.slice(0, -1)) !== hash(oldLaunchers) ||
-          hash(newLaunchers.at(-1)) !== hash(a.launcher) ||
-          !Array.isArray(a.allowedDifferences) ||
-          hash(changes) !== hash([...a.allowedDifferences].sort()) ||
-          new Set(a.allowedDifferences).size !== changes.length ||
-          !changes.includes('windowsReferences.launchers') ||
-          changes.some(
-            (k) => !['windowsReferences.launchers', 'probe.sha256'].includes(k),
-          ) ||
+          (!recoverEmpty &&
+            (!Array.isArray(oldLaunchers) ||
+              !Array.isArray(newLaunchers) ||
+              newLaunchers.length !== oldLaunchers.length + 1 ||
+              hash(newLaunchers.slice(0, -1)) !== hash(oldLaunchers) ||
+              hash(newLaunchers.at(-1)) !== hash(a.launcher) ||
+              !Array.isArray(a.allowedDifferences) ||
+              hash(changes) !== hash([...a.allowedDifferences].sort()) ||
+              new Set(a.allowedDifferences).size !== changes.length ||
+              !changes.includes('windowsReferences.launchers') ||
+              changes.some(
+                (k) =>
+                  !['windowsReferences.launchers', 'probe.sha256'].includes(k),
+              ))) ||
           old.scopeId !== policy.scopeId ||
           old.format !== 2 ||
           old.preservingUpdate?.operation !== 'install' ||
@@ -723,7 +949,7 @@ function open(request, options = {}, boundOperation) {
         const origin = bytes(ledger + '.adopted', a.adoptionSha256, 64);
         if (
           origin.toString('utf8') !== a.oldPolicySha256 ||
-          prior.claim !== null ||
+          (!recoverEmpty && prior.claim !== null) ||
           !Array.isArray(prior.outputs) ||
           prior.outputs.length ||
           prior.format !== 2
@@ -763,12 +989,39 @@ function open(request, options = {}, boundOperation) {
           before.digest !== a.priorPayloadDigest ||
           before.payload.format !== 2 ||
           before.payload.configSha !== a.oldPolicySha256 ||
-          before.payload.claim !== null ||
+          (!recoverEmpty && before.payload.claim !== null) ||
           !Array.isArray(before.payload.outputs) ||
           before.payload.outputs.length ||
           before.payload.bindingRepair
         )
           reject();
+        if (recoverEmpty) {
+          recoveredClaim = before.payload.claim;
+          if (
+            !recoveredClaim ||
+            hash(recoveredClaim) !== a.claimSha256 ||
+            recoveredClaim.id !== a.claimId ||
+            recoveredClaim.kind !== 'install' ||
+            recoveredClaim.root !== target ||
+            request.kind !== 'install' ||
+            request.transition ||
+            recoveredClaim.reserveBytes !== request.reserveBytes ||
+            recoveredClaim.runtimeCopies !== request.runtimeCopies ||
+            recoveredClaim.startBytes !==
+              policy.baseline.bytes + releasedLockBytes ||
+            recoveredClaim.startRuntimeCopies !==
+              policy.baseline.runtimeCopies ||
+            !hex(recoveredClaim.refs) ||
+            !Array.isArray(recoveredClaim.outputs) ||
+            recoveredClaim.outputs.length
+          )
+            reject();
+          if (
+            preserving.priorBootExit &&
+            preserving.priorBootExit.oldReferences !== recoveredClaim.refs
+          )
+            reject();
+        }
         const approvalBytes = bytes(repairPath, repairSha, 65536);
         const snapshot = Buffer.from(
           JSON.stringify({
@@ -777,18 +1030,29 @@ function open(request, options = {}, boundOperation) {
             oldPolicyBase64: oldBytes.toString('base64'),
             newPolicyBase64: nextBytes.toString('base64'),
             approvalBase64: approvalBytes.toString('base64'),
+            ...(recoverEmpty
+              ? { failureEvidenceBase64: failureBytes.toString('base64') }
+              : {}),
           }),
         );
         if (snapshot.length > 4 * 1024 * 1024) reject();
         const after = {
           ...before.payload,
           configSha,
+          ...(recoverEmpty ? { claim: null } : {}),
           bindingRepair: {
             kind: a.kind,
             approvalSha256: repairSha,
             snapshotSha256: digest(snapshot),
             oldPolicySha256: a.oldPolicySha256,
             newPolicySha256: configSha,
+            ...(recoverEmpty
+              ? {
+                  claimId: recoveredClaim.id,
+                  claimSha256: a.claimSha256,
+                  failureEvidenceSha256: a.failureEvidenceSha256,
+                }
+              : {}),
           },
         };
         const replay = prior.configSha === configSha;
@@ -800,7 +1064,7 @@ function open(request, options = {}, boundOperation) {
             ))
         )
           reject();
-        const validate = () => {
+        const validate = (observe = false) => {
           owner();
           checkRoots(referenceRoots);
           checkControls((n) => verifier.chargeExternal(n));
@@ -826,8 +1090,54 @@ function open(request, options = {}, boundOperation) {
           bytes(a.oldPolicyPath, a.oldPolicySha256);
           bytes(file, configSha);
           bytes(ledger + '.adopted', a.adoptionSha256, 64);
+          if (recoverEmpty) {
+            bytes(a.failureEvidencePath, a.failureEvidenceSha256);
+            bytes(a.toolBinding.path, a.toolBinding.newSha256);
+            bytes(installWriter, a.releasedBuildLock.writerSha256);
+            if (
+              measured.bytes !== policy.baseline.bytes ||
+              measured.runtimeCopies !== recoveredClaim.startRuntimeCopies ||
+              present(path.join(effectScope.container, '.build-budget.lock')) ||
+              present(
+                path.join(
+                  path.dirname(effectScope.container),
+                  '.active-release.lock',
+                ),
+              )
+            )
+              reject();
+            if (observe) {
+              const facts = structuredClone(
+                references(
+                  false,
+                  prior.configSha === configSha
+                    ? undefined
+                    : {
+                        approvalPath: repairPath,
+                        approvalSha256: repairSha,
+                        lockSha256: digest(Buffer.from(token)),
+                        policyPath: file,
+                      },
+                ).value,
+              );
+              // Undo only the reviewed launcher-file hash when comparing the
+              // fresh complete references to the interrupted claim's digest.
+              for (const r of preserving.priorBootExit ? [] : facts.records) {
+                if (
+                  r.viaPointer?.path === changedLauncher.pointer &&
+                  r.viaPointer.launcherSha256 === changedLauncher.newSha
+                )
+                  r.viaPointer.launcherSha256 = changedLauncher.oldSha;
+              }
+              if (preserving.priorBootExit) priorBootEvidence(policy, facts);
+              else if (validateReferences(facts, old) !== recoveredClaim.refs)
+                reject();
+              // References can be slow: recheck every local guard afterwards.
+              validate(false);
+            }
+          }
         };
-        validate();
+        validate(recoverEmpty);
         if (replay) return;
         options.onBindingRepairStep?.('before-snapshot');
         validate();
@@ -848,7 +1158,7 @@ function open(request, options = {}, boundOperation) {
           }
         }
         options.onBindingRepairStep?.('before-commit');
-        validate();
+        validate(recoverEmpty);
         if (
           !bytes(ledger, a.priorLedgerSha256, 65536).equals(original) ||
           hash(fileIdentity(ledger)) !== hash(a.priorLedgerIdentity)
@@ -1198,8 +1508,10 @@ function open(request, options = {}, boundOperation) {
       ledgerIdentity = fileIdentity(ledger);
       prior = after;
       options.onBindingRepairStep?.('after-commit');
-    } catch {
-      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED');
+    } catch (cause) {
+      throw new Error('RELEASE_SCOPE_BINDING_REPAIR_REVIEW_REQUIRED', {
+        cause,
+      });
     }
   };
 
@@ -1220,21 +1532,43 @@ function open(request, options = {}, boundOperation) {
     )
       throw new Error('RELEASE_SCOPE_STATE_REPLACED');
   };
-  const query = () => {
-    if (options.query) return options.query();
-    if (!policy.probe || fileHash(policy.probe.path) !== policy.probe.sha256)
+  const query = (recovery) => {
+    if (
+      !options.query &&
+      (!policy.probe || fileHash(policy.probe.path) !== policy.probe.sha256)
+    )
       throw new Error('RELEASE_SCOPE_REFERENCE_PROBE_UNAVAILABLE');
-    return JSON.parse(
-      execFileSync(process.execPath, [policy.probe.path, file], {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 30000,
-        maxBuffer: 1024 * 1024,
-      }),
-    );
+    const result = options.query
+      ? options.query(recovery)
+      : JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              policy.probe.path,
+              file,
+              ...(recovery
+                ? [
+                    '--empty-install-recovery',
+                    recovery.approvalPath,
+                    recovery.approvalSha256,
+                    recovery.lockSha256,
+                  ]
+                : []),
+            ],
+            {
+              encoding: 'utf8',
+              windowsHide: true,
+              timeout: 30000,
+              maxBuffer: 1024 * 1024,
+            },
+          ),
+        );
+    return processFamily
+      ? families.includeConsoles(result, expectedProcesses, policy)
+      : result;
   };
-  const references = (allowTransition = false) => {
-    const value = query();
+  const references = (allowTransition = false, recovery) => {
+    const value = query(recovery);
     verifier.assertBudget();
     const digest = validateReferences(value, policy);
     if (preserving && !rootRoles && !expectedProcesses)
@@ -1254,6 +1588,15 @@ function open(request, options = {}, boundOperation) {
     }
     if (preserving && preserving.operation !== 'build' && !refs) {
       const a = preserving.active;
+      if (preserving.priorBootExit) priorBootEvidence(policy, value);
+      else if (processFamily)
+        families.family(
+          expectedProcesses,
+          a.oldProcess.pid,
+          a.currentId,
+          policy,
+          true,
+        );
       if (
         canonical(a.pointer) !== a.pointer ||
         !policy.roots.some((r) => contains(r.path, a.pointer)) ||
@@ -1267,14 +1610,15 @@ function open(request, options = {}, boundOperation) {
             r.pointerPath === a.pointer &&
             r.packageId === a.currentId,
         ) ||
-        !value.records.some(
-          (r) =>
-            r.kind === 'processes' &&
-            r.packageId === a.currentId &&
-            r.pid === a.oldProcess.pid &&
-            r.startUtc === a.oldProcess.startUtc &&
-            r.executableSha256 === a.oldProcess.executableSha256,
-        )
+        (!preserving.priorBootExit &&
+          !value.records.some(
+            (r) =>
+              r.kind === 'processes' &&
+              r.packageId === a.currentId &&
+              r.pid === a.oldProcess.pid &&
+              r.startUtc === a.oldProcess.startUtc &&
+              r.executableSha256 === a.oldProcess.executableSha256,
+          ))
       )
         throw new Error('RELEASE_PRESERVING_ACTIVE_BINDING_CHANGED');
     }
@@ -1670,11 +2014,98 @@ function open(request, options = {}, boundOperation) {
           claimAcquiredAt: legacyClaimAcquiredAt,
         });
       },
+      preparePreservingProcessFamily(snapshot) {
+        if (!processFamily) return;
+        owner();
+        check(true);
+        const rows = families.family(
+          expectedProcesses,
+          snapshot.pid,
+          preserving.active.currentId,
+          policy,
+          true,
+        );
+        families.assertSnapshot(rows[0], snapshot);
+      },
+      preparePriorBootExit() {
+        if (!preserving?.priorBootExit || preserving.operation !== 'restart')
+          throw Error('RELEASE_PRIOR_BOOT_UNAPPROVED');
+        owner();
+        check(true);
+        const facts = references(true).value;
+        const proof = priorBootEvidence(policy, facts);
+        if (expectedProcesses.length)
+          throw Error('RELEASE_PRIOR_BOOT_WRITER_PRESENT');
+        return proof;
+      },
+      sealPreservingProcessFamily(snapshot, packageId, expectedCommand) {
+        if (!processFamily) return;
+        this.bindPreservingChild(snapshot, packageId, expectedCommand);
+        // bind has already validated a complete query and every present member.
+        // Only a reviewed ordinary invocation that has never appeared may wait.
+        if (
+          expectedProcesses.filter((r) => !r.consoleHost).length <
+          policy.windowsReferences.launchers.filter(
+            (l) => l.packageId === packageId,
+          ).length
+        )
+          return false;
+        families.family(
+          expectedProcesses,
+          snapshot.pid,
+          packageId,
+          policy,
+          true,
+        );
+        sealedFamilies.add(snapshot.pid);
+        return true;
+      },
       confirmPreservingProcessExit(pid, receipt, owned) {
         if (!preserving || preserving.operation !== 'restart') return;
         owner();
         if (receipt?.pid !== pid || receipt.stopped !== true)
           throw new Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+        if (processFamily) {
+          const root = expectedProcesses.find((r) => r.pid === pid);
+          if (
+            !root ||
+            (pid !== preserving.active.oldProcess.pid && !root.ownedTransition)
+          )
+            throw Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
+          families.assertSnapshot(root, receipt);
+          const rows = families.family(
+            expectedProcesses,
+            pid,
+            root.packageId,
+            policy,
+          );
+          let stopped = stoppingFamilies.get(pid);
+          if (!stopped) {
+            stopped = { rows: structuredClone(rows), exited: new Set() };
+            stoppingFamilies.set(pid, stopped);
+          }
+          const facts = query();
+          validateReferences(facts, policy, true);
+          verifier.assertBudget();
+          const actual = facts.records.filter((r) => r.kind === 'processes');
+          if (actual.some((r) => r.pid === pid))
+            throw Error('RELEASE_PRESERVING_PROCESS_EXIT_UNCONFIRMED');
+          if (
+            families.remaining(
+              stopped.rows,
+              actual,
+              stopped.exited,
+              facts.processTopology,
+              facts.exitedProcesses,
+            )
+          )
+            return false;
+          expectedProcesses = [];
+          stoppingFamilies.delete(pid);
+          if (pid === preserving.active.oldProcess.pid)
+            legacyStopped = Date.now();
+          return true;
+        }
         const known = expectedProcesses.filter((r) => r.pid === pid);
         if (!known.length && owned) {
           const s = owned.identity,
@@ -1734,7 +2165,8 @@ function open(request, options = {}, boundOperation) {
           !Number.isInteger(snapshot.pid) ||
           snapshot.pid < 1 ||
           snapshot.pid === a.oldProcess.pid ||
-          expectedProcesses.some((r) => r.pid === snapshot.pid) ||
+          (!processFamily &&
+            expectedProcesses.some((r) => r.pid === snapshot.pid)) ||
           snapshot.commandLine !== expectedCommand
         )
           throw new Error('RELEASE_PRESERVING_PROCESS_UNAPPROVED');
@@ -1742,6 +2174,17 @@ function open(request, options = {}, boundOperation) {
         validateReferences(facts, policy);
         verifier.assertBudget();
         const actual = facts.records.filter((r) => r.kind === 'processes');
+        if (processFamily) {
+          expectedProcesses = families.admit(
+            expectedProcesses,
+            actual,
+            snapshot,
+            packageId,
+            policy,
+            sealedFamilies.has(snapshot.pid),
+          );
+          return;
+        }
         const added = actual.filter((r) => r.pid === snapshot.pid);
         const clean = (rows) =>
           rows
@@ -2169,6 +2612,7 @@ function open(request, options = {}, boundOperation) {
             if (error)
               throw new Error(
                 'RELEASE_SCOPE_FAILED_OUTPUT_HELD_REQUIRES_REVIEW',
+                { cause: error },
               );
             row.identity = identity(row.path);
             const receipt = verifier.scan([

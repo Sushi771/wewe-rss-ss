@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- CommonJS fixture exports register the existing beforeAll without changing Jest setup order.
   require('../../../../scripts/local-release/writer-self.fixture.test.cjs')
@@ -33,25 +34,30 @@ describe('ordinary account edits and explicit credential protection (synthetic S
       SQLITE_PERIODIC_SNAPSHOT_ENABLED: '0',
     });
     prisma = new PrismaService();
-    for (const name of (
-      await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
-    ).sort()) {
-      const sql = await fs
-        .readFile(
-          path.resolve(
-            __dirname,
-            '../../prisma/migrations',
-            name,
-            'migration.sql',
-          ),
-          'utf8',
-        )
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(root, 'fixture.db'),
+      async (migrationClient) => {
+        for (const name of (
+          await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
+        ).sort()) {
+          const sql = await fs
+            .readFile(
+              path.resolve(
+                __dirname,
+                '../../prisma/migrations',
+                name,
+                'migration.sql',
+              ),
+              'utf8',
+            )
+            .catch(() => '');
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await prisma.account.create({
       data: {
         id: 'fixture',

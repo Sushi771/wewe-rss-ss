@@ -44,6 +44,171 @@ test('approved startup and retired Mp2RSS inverses reject unrelated writer chang
   }
 });
 
+test('reviewed runtime family inverse preserves every historical pin and rejects changed new or old gates', () => {
+  const fixtures = require('./fixtures/runtime-family-compat.json'),
+    installed = require('./fixtures/installed-writer-compat.json'),
+    file = 'scripts/local-release/restart.cjs';
+  assert.deepEqual(Object.keys(fixtures), [file]);
+  const reviewed = fixtures[file],
+    candidateSource = read(file),
+    source = restoreLegacyWriter.restorePriorBootRestart(file, candidateSource);
+  assert.equal(
+    reviewed.reviewedFromCommit,
+    '8fb806a54d415fc779881cee93fe7f3035dec385',
+  );
+  assert.equal(
+    reviewed.reviewedThroughCommit,
+    '52a34b16475728fbbd98b50db90cc339cd54270f',
+  );
+  assert.equal(hash(source), reviewed.afterSha256);
+  assert.equal(reviewed.beforeSha256, installed[file].afterSha256);
+  assert.equal(reviewed.hunks.length, 7);
+  let precursor = source;
+  for (const hunk of reviewed.hunks) {
+    assert.equal(precursor.split(hunk.after).length, 2);
+    precursor = precursor.replace(hunk.after, hunk.before);
+    assert.equal(source.split(hunk.after).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restoreCompatible(
+          file,
+          source.replace(
+            hunk.after,
+            '/* changed reviewed runtime family hunk */',
+          ),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+  assert.equal(hash(precursor), installed[file].afterSha256);
+  const restored = restoreLegacyWriter.restoreCompatible(file, source);
+  assert.equal(
+    restored,
+    restoreLegacyWriter.restoreCompatible(file, precursor),
+  );
+  assert.equal(hash(restored), installed[file].beforeSha256);
+  for (const [before, after] of [
+    [
+      '.preparePreservingProcessFamily(identity);',
+      '.preparePreservingProcessFamily(undefined);',
+    ],
+    [
+      'if (familyError) throw familyError;',
+      'if (familyError) void familyError;',
+    ],
+    [
+      'assert.equal(result.stopped, true);',
+      'assert.equal(result.stopped, false);',
+    ],
+    ["'PROJECT_WRITER_BOUNDARY_UNPROVEN'", "'BYPASSED_WRITER_BOUNDARY'"],
+    ['timeoutMs = 15000,', 'timeoutMs = Infinity,'],
+  ]) {
+    assert(candidateSource.includes(before));
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restoreCompatible(
+          file,
+          candidateSource.replace(before, after),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+});
+
+test('reviewed prior-boot inverse preserves the original family pins and rejects all changed source', () => {
+  const file = 'scripts/local-release/restart.cjs';
+  const fixtures = require('./fixtures/prior-boot-restart-compat.json');
+  assert.deepEqual(Object.keys(fixtures), [file]);
+  const reviewed = fixtures[file],
+    source = read(file);
+  assert.equal(
+    reviewed.reviewedFromCommit,
+    'fc58fd79f17620bcc429925da9890cb10f785868',
+  );
+  assert.equal(
+    reviewed.reviewedThroughCommit,
+    'cba0c3531325fb10e0b9cb11538d65ddda5af3e8',
+  );
+  assert.equal(hash(source), reviewed.afterSha256);
+  assert.equal(
+    reviewed.beforeSha256,
+    require('./fixtures/runtime-family-compat.json')[file].afterSha256,
+  );
+  const restored = restoreLegacyWriter.restorePriorBootRestart(file, source);
+  assert.equal(hash(restored), reviewed.beforeSha256);
+  assert.equal(
+    restoreLegacyWriter.restoreCompatible(file, source),
+    restoreLegacyWriter.restoreCompatible(file, restored),
+  );
+  for (const hunk of reviewed.hunks) {
+    assert.equal(source.split(hunk.after).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter.restorePriorBootRestart(
+          file,
+          source.replace(hunk.after, '/* changed reviewed prior-boot hunk */'),
+        ),
+      /exact candidate legacy writer seam/,
+    );
+  }
+  assert.throws(
+    () =>
+      restoreLegacyWriter.restorePriorBootRestart(
+        file,
+        source + '\n// unrelated change\n',
+      ),
+    /exact candidate legacy writer seam/,
+  );
+  assert.throws(
+    () =>
+      restoreLegacyWriter.restorePriorBootRestart(
+        file,
+        restored + '\n// changed historical source\n',
+      ),
+    /exact candidate legacy writer seam/,
+  );
+});
+
+test('metadata-only exclusion inverse cannot hide changed new or historical writer gates', () => {
+  const file = 'apps/server/src/collection/sqlite-write-coordinator.ts';
+  const source = read(file);
+  const addedAt = source.indexOf('  async knownAuthMetadataWrite<T>');
+  assert(addedAt > 0);
+  const added = source.slice(addedAt);
+  for (const [before, after] of [
+    ["this.acquire('backup')", "this.acquire('write')"],
+    ['this.context.getStore()?.active ||', 'false ||'],
+    ['this.protectedContext.getStore()?.active', 'false'],
+    [
+      'return await this.protectedContext.run(permit, operation);',
+      'return operation();',
+    ],
+    ['permit.active = false;', 'permit.active = true;'],
+    ['release();', 'void 0;'],
+  ]) {
+    assert.equal(added.split(before).length, 2);
+    assert.throws(
+      () =>
+        restoreLegacyWriter(
+          file,
+          source.slice(0, addedAt) + added.replace(before, after),
+        ),
+      /exact known-auth metadata exclusion method/,
+    );
+  }
+  assert.throws(
+    () =>
+      restoreLegacyWriter(
+        file,
+        source
+          .slice(0, addedAt)
+          .replace("this.acquire('backup')", "this.acquire('write')") + added,
+      ),
+    /exact reviewed collection integration source/,
+    'the original protected writer remains fully pinned',
+  );
+});
+
 test('approved XHS inverses reject lost local authentication, acknowledgements and client session injection', () => {
   const source = read('apps/server/src/trpc/trpc.router.ts');
   const fixture = require('./fixtures/xhs-approved-router-seams.json');
@@ -79,6 +244,33 @@ test('approved XHS inverses reject lost local authentication, acknowledgements a
     assert.throws(
       () => restorePreReviewedRecoveryRouter(ts, changed),
       /exact approved XHS node/,
+    );
+  }
+});
+
+test('retired pre-verification clear routes are absent and all historical router protection remains', () => {
+  const fixture = require('./fixtures/xhs-approved-router-seams.json');
+  assert.equal(
+    hash(JSON.stringify(fixture)),
+    '3a04c22d49e3ec9b57afe1f681c1476ddafb0cd76c2003ddd7e7256635418f4a',
+  );
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  for (const name of [
+    'prepareKnownResponseAuthReview',
+    'confirmKnownResponseAuthReview',
+    'prepareKnownAuthProfileProbe',
+    'confirmKnownAuthProfileProbe',
+  ]) {
+    assert(!source.includes(name + ':'));
+    const extra =
+      name + ': this.trpcService.protectedProcedure.mutation(() => undefined),';
+    assert.throws(
+      () =>
+        restorePreReviewedRecoveryRouter(
+          ts,
+          source.replace('connectionStatus:', extra + '\nconnectionStatus:'),
+        ),
+      /complete pre-recovery router AST preserved/,
     );
   }
 });
@@ -591,4 +783,37 @@ test('the reviewed export dialog and production reading layout retain their appr
       : [node.kind, node.getText(ast)];
   }
   assert.equal(hash(JSON.stringify(shape(returned))), copyPins.indexLayout);
+});
+
+test('automatic AUTH connection inverse preserves exact prior routes and rejects wider authorization', () => {
+  const source = read('apps/server/src/trpc/trpc.router.ts');
+  const entries = require('./fixtures/xhs-auth-connection-seams.json');
+  assert.deepEqual(
+    entries.map((e) => e.name),
+    ['connectSession', 'restoreSession'],
+  );
+  restorePreReviewedRecoveryRouter(ts, source);
+  for (const entry of entries) {
+    for (const [before, after] of [
+      [
+        'this.trpcService.protectedProcedure',
+        'this.trpcService.publicProcedure',
+      ],
+      ['this.requireLocalXhsConnection(ctx);', 'void ctx;'],
+      ['verifyKnownAuthenticationAfterConnection()', 'unreviewedOperation()'],
+      ...(entry.name === 'connectSession'
+        ? [['input.persist && this.xhsWhole', 'this.xhsWhole']]
+        : []),
+    ]) {
+      assert(entry.after.includes(before));
+      assert.throws(
+        () =>
+          restorePreReviewedRecoveryRouter(
+            ts,
+            source.replace(entry.after, entry.after.replace(before, after)),
+          ),
+        /exact approved XHS connection/,
+      );
+    }
+  }
 });

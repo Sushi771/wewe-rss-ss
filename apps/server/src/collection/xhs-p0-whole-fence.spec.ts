@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 jest.spyOn(global, 'fetch').mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
 jest.mock('./xhs-legacy-review', () => ({
   ...jest.requireActual('./xhs-legacy-review'),
@@ -227,12 +228,20 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await readdir(migrations)).sort())
-      if ((await stat(path.join(migrations, name))).isDirectory())
-        for (const sql of splitSqliteStatements(
-          await readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-        ))
-          await db.$executeRawUnsafe(sql);
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'fixture.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await readdir(migrations)).sort())
+          if ((await stat(path.join(migrations, name))).isDirectory())
+            for (const sql of splitSqliteStatements(
+              await readFile(
+                path.join(migrations, name, 'migration.sql'),
+                'utf8',
+              ),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+      },
+    );
     // Match PrismaService's raw-query coordinator admission. A bare client misses
     // expired dispatch ALS inherited by response-event receipt callbacks.
     db.$use(async (params, next) =>

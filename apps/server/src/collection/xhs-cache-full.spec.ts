@@ -66,10 +66,26 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
         path.join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await db.$executeRawUnsafe(statement);
+      // Native BEGIN/COMMIT must stay on one migration connection. Keep the
+      // business client and its concurrency coverage on the original URL.
+      const migrationClient = new PrismaClient({
+        datasources: {
+          db: {
+            url:
+              'file:' +
+              path.join(root, 'synthetic.sqlite').replace(/\\/g, '/') +
+              '?connection_limit=1',
+          },
+        },
+      });
+      try {
+        for (const statement of splitSqliteStatements(sql)
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await migrationClient.$executeRawUnsafe(statement);
+      } finally {
+        await migrationClient.$disconnect();
+      }
     }
     await db.$executeRawUnsafe('PRAGMA synchronous = FULL');
     cache = new XiaohongshuService(db as any);

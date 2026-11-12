@@ -135,6 +135,20 @@ const status = (state = 'running', kind = 'download') => ({
 });
 
 function fixture(options = {}) {
+  const previousWindow = global.window;
+  const storage = new Map();
+  const events = new EventTarget();
+  global.window = {
+    addEventListener: events.addEventListener.bind(events),
+    removeEventListener: events.removeEventListener.bind(events),
+    dispatchEvent: events.dispatchEvent.bind(events),
+    ...previousWindow,
+    localStorage: {
+      getItem: (key) => storage.get(key) ?? null,
+      setItem: (key, value) => storage.set(key, String(value)),
+      removeItem: (key) => storage.delete(key),
+    },
+  };
   let index = 0;
   const slots = [],
     effects = [],
@@ -363,6 +377,12 @@ function fixture(options = {}) {
     ),
   };
   const query = (data) => ({ data, isLoading: false, error: null });
+  utils.xiaohongshu.activeRefreshBatch = { fetch: async () => null };
+  utils.xiaohongshu.refreshBatchStatus = {
+    fetch: async () => {
+      throw Error('No synthetic persistent batch exists');
+    },
+  };
   const router = {
     connectionStatus: {
       useQuery: () => ({
@@ -457,6 +477,21 @@ function fixture(options = {}) {
       },
     },
   };
+  for (const name of [
+    'legacyRefresh',
+    'stopRefresh',
+    'createRefreshBatch',
+    'advanceRefreshBatch',
+    'stopRefreshBatch',
+  ])
+    router[name] = {
+      useMutation: () => ({
+        isLoading: false,
+        mutateAsync: async () => {
+          throw Error(`Unexpected mutation ${name}`);
+        },
+      }),
+    };
   api.notes = {
     query: async (input) => {
       calls.push(['notesScope', input]);
@@ -569,6 +604,18 @@ function fixture(options = {}) {
       trpc: { useUtils: () => ({ ...utils }), xiaohongshu: router },
     },
   });
+  const MemoryConnection = load(
+    'apps/web/src/components/XhsMemoryConnection.tsx',
+    {
+      react: { ...react, useLayoutEffect: react.useEffect },
+      'react/jsx-runtime': { jsx: element, jsxs: element },
+      '@web/utils/auth': { getAuthCode: () => '' },
+      '@web/utils/env': { privateOnlineMode: false },
+      '@web/utils/xhs-memory-connection': load(
+        'apps/web/src/utils/xhs-memory-connection.ts',
+      ),
+    },
+  ).default;
   const page = load('apps/web/src/pages/feeds/xiaohongshu.tsx', {
     react,
     'react/jsx-runtime': { jsx: element, jsxs: element },
@@ -581,6 +628,7 @@ function fixture(options = {}) {
       toast: { warning: (message) => calls.push(['warning', message]) },
     },
     '@web/components/ManagementFolders': 'ManagementFolders',
+    '@web/components/XhsMemoryConnection': MemoryConnection,
     '@web/components/XhsWholeCreator': 'XhsWholeCreator',
     '@web/components/XhsTaskRecovery': Recovery,
     '@web/components/XhsOriginalLink': 'XhsOriginalLink',
@@ -592,6 +640,9 @@ function fixture(options = {}) {
       'apps/web/src/utils/xhs-combined-filter.ts',
     ),
     '@web/utils/xhs-metric-sort': load('apps/web/src/utils/xhs-metric-sort.ts'),
+    '@web/utils/xiaohongshu-refresh': load(
+      'apps/web/src/utils/xiaohongshu-refresh.ts',
+    ),
     '@web/components/XhsSourceBudget': 'XhsSourceBudget',
     '@web/components/XhsEngagement': engagement,
     '@web/utils/xhs-note-presentation': load(
@@ -797,6 +848,8 @@ function fixture(options = {}) {
     dispose() {
       slots.forEach((slot) => slot?.cleanup?.());
       global.fetch = previousFetch;
+      if (previousWindow === undefined) delete global.window;
+      else global.window = previousWindow;
     },
     settings(o) {
       if ('cacheMode' in o) cacheMode = o.cacheMode;

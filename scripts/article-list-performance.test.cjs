@@ -108,7 +108,12 @@ test(
             select: { id: true },
           });
           const ids = new Set(cached.map((r) => r.id));
-          return rows.map((row) => ({ ...row, bodyCached: ids.has(row.id) }));
+          // The current list contract includes a null snippet outside body search.
+          return rows.map((row) => ({
+            ...row,
+            bodyCached: ids.has(row.id),
+            searchSnippet: null,
+          }));
         },
         { maxWait: 15000, timeout: 30000 },
       );

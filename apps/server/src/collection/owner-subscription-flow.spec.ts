@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { promises as fs } from 'node:fs';
@@ -78,15 +79,23 @@ describe('two explicitly bound publishers through original refresh/save (synthet
       datasources: { db: { url: process.env.DATABASE_URL } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const folder = path.join(migrations, name);
-      if (!(await fs.stat(folder)).isDirectory()) continue;
-      const sql = await fs.readFile(path.join(folder, 'migration.sql'), 'utf8');
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      process.env.DATABASE_URL!,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          const folder = path.join(migrations, name);
+          if (!(await fs.stat(folder)).isDirectory()) continue;
+          const sql = await fs.readFile(
+            path.join(folder, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     bindings = {};
     for (const p of publishers) {
       const directory = path.join(root, p.number);

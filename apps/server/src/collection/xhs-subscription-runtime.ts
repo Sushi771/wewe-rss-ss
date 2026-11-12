@@ -1,14 +1,19 @@
+import { knownAuthProfileRecoveryPermit } from './xhs-known-auth-profile-probe';
 import {
   fullHistoryContext,
   dispatchFullHistoryRequest,
   fullHistoryNextDelay,
   type FullHistoryWriter,
 } from './xhs-full-history-scope';
-import { prepareScheduledTaskReview } from './xhs-scheduled-review-scope';
+import {
+  prepareScheduledTaskReview,
+  readScheduledCommentOmission,
+} from './xhs-scheduled-review-scope';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import {
   unboundRoundContext,
   type Phase as RoundPhase,
+  type RoundTx,
 } from './xhs-unbound-round';
 import { roundSourceReceiptContext } from './round-source-receipt';
 import { projectWriterGate } from './project-writer-boundary';
@@ -663,7 +668,29 @@ export class XhsSubscriptionRuntime
   bindFullHistoryWriter(writer: FullHistoryWriter) {
     this.fullHistoryWriter ??= writer;
   }
+  /** Read-only identity for a known AUTH check, not permission to dispatch. */
+  knownAuthTransportBinding() {
+    this.knownAuthSessionForReview(true);
+    return createHash('sha256')
+      .update(this.fullHistoryInstance + ':' + this.generation)
+      .digest('hex');
+  }
+  private knownAuthProfilePermitted() {
+    if (this.changing || this.destroyed || this.sessionAbort.signal.aborted)
+      return false;
+    const context = this.reviewedContext.getStore();
+    return (
+      knownAuthProfileRecoveryPermit(
+        this.replacementSession?.binding ?? this.restoredKnownSession?.binding,
+        context?.binding.authorId,
+      ) &&
+      (!context || context.binding.phase === 'profile')
+    );
+  }
   fullScopeSessionBinding() {
+    // The one-profile exception never becomes a recurring/full-scope grant.
+    if (this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED')
+      return failure(this.stopCode);
     this.requireSession();
     if (this.changing) return failure('XHS_SESSION_CHANGED');
     return createHash('sha256')
@@ -711,6 +738,19 @@ export class XhsSubscriptionRuntime
     this.assertFullScopeSession(sessionBinding);
     return fullHistoryContext.run(context, work);
   }
+  async scheduledCommentAuthorization(
+    input: { round: string; creatorId: string },
+    tx?: Prisma.TransactionClient,
+  ): Promise<'not-authorized' | undefined> {
+    const sessionBinding = this.fullScopeSessionBinding();
+    if (!tx && !this.fullHistoryReader)
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    const read = (reader: RoundTx) =>
+      readScheduledCommentOmission(reader, { ...input, sessionBinding });
+    const result = tx ? await read(tx) : await this.fullHistoryReader!(read);
+    this.assertFullScopeSession(sessionBinding);
+    return result;
+  }
   private cookies?: XhsSessionCookies;
   private generation = 0;
   private sessionAbort = new AbortController();
@@ -727,7 +767,116 @@ export class XhsSubscriptionRuntime
     string,
     { digest: string; next: number; stopped: boolean; running: boolean }
   >();
-  private replacementSession?: { binding: string; connectedAt: number };
+  private replacementSession?: {
+    binding: string;
+    connectedAt: number;
+    persisted: boolean;
+    autoRestore?: boolean;
+  };
+  private restoredKnownSession?: {
+    binding: string;
+    connectedAt: number;
+    restorePolicy: { autoRestore: boolean; needsReconnect: boolean };
+  };
+  /** Known-response review only. A restore is not evidence of a new login. */
+  knownAuthSessionForReview(ownedProfileActive = false) {
+    if (!this.enabled() || this.changing || !this.cookies || this.destroyed)
+      return failure('XHS_SESSION_CHANGED');
+    if (
+      [this.stopCode, this.persistedRisk].some(
+        (code) =>
+          code &&
+          ![
+            'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+            'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+          ].includes(code),
+      )
+    )
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    if (this.replacementSession)
+      return {
+        ...(ownedProfileActive
+          ? this.replacementSession
+          : this.replacementSessionForReview()),
+        origin: 'fresh-replacement' as const,
+      };
+    if (
+      !this.enabled() ||
+      this.changing ||
+      !this.cookies ||
+      !this.restoredKnownSession ||
+      (!ownedProfileActive && this.hasActiveSourceSessions()) ||
+      this.destroyed
+    )
+      return failure('XHS_SESSION_CHANGED');
+    if (
+      [this.stopCode, this.persistedRisk].some(
+        (code) =>
+          code &&
+          ![
+            'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+            'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+          ].includes(code),
+      )
+    )
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    return {
+      ...this.restoredKnownSession,
+      restorePolicy: { ...this.restoredKnownSession.restorePolicy },
+      origin: 'user-confirmed-restored-saved-session' as const,
+    };
+  }
+  async assertSafeKnownAuthSession(
+    binding: string,
+    ownedProfileActive = false,
+  ) {
+    const current = this.knownAuthSessionForReview(ownedProfileActive);
+    if (current.binding !== binding) return failure('XHS_SESSION_CHANGED');
+    if (current.origin === 'fresh-replacement')
+      await this.assertSafeAuthSessionRestore(binding);
+    else {
+      const vault = this.options.vault;
+      if (!vault?.policy || !(await vault.status()).stored)
+        return failure('XHS_SESSION_CHANGED');
+      const policy = await vault.policy();
+      if (
+        policy.needsReconnect ||
+        policy.needsReconnect !== current.restorePolicy.needsReconnect ||
+        policy.autoRestore !== current.restorePolicy.autoRestore
+      )
+        return failure('XHS_SESSION_CHANGED');
+    }
+    const after = this.knownAuthSessionForReview(ownedProfileActive);
+    if (after.binding !== binding || after.origin !== current.origin)
+      return failure('XHS_SESSION_CHANGED');
+  }
+  /** Conservative memory mirror of the exact durable AUTH selected by the service. */
+  holdKnownAuthPause(binding: string) {
+    if (this.knownAuthSessionForReview().binding !== binding)
+      return failure('XHS_SESSION_CHANGED');
+    this.stopCode = 'XHS_SOURCE_AUTHENTICATION_BLOCKED';
+    this.verified = false;
+  }
+  /** Caller holds knownAuthMetadataWrite through this final, fail-closed step. */
+  async refreshKnownAuthSession(
+    binding: string,
+    expectedClearVersion: string,
+    profileCheckpointVerified = false,
+  ) {
+    if (this.knownAuthSessionForReview().binding !== binding || !this.riskStore)
+      return failure('XHS_SESSION_CHANGED');
+    if ((await this.riskStore.readClearVersion()) !== expectedClearVersion)
+      return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    if (this.knownAuthSessionForReview().binding !== binding)
+      return failure('XHS_SESSION_CHANGED');
+    this.persistedRisk = undefined;
+    if (profileCheckpointVerified) this.verified = true;
+    if (
+      this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' ||
+      this.stopCode === 'XHS_SOURCE_RISK_REVIEW_REQUIRED'
+    )
+      this.stopCode = undefined;
+  }
   replacementSessionForReview() {
     if (
       !this.enabled() ||
@@ -760,10 +909,44 @@ export class XhsSubscriptionRuntime
     )
       return failure('XHS_SESSION_CHANGED');
   }
-  async refreshAfterAuthSessionReview(binding: string) {
+  /** Prove restart safety without loading any credential or creating access. */
+  async assertSafeAuthSessionRestore(binding: string) {
     this.assertReplacementSession(binding);
-    if (!this.riskStore || (await this.riskStore.read()))
+    const savedProof = { ...this.replacementSession! },
+      vault = this.options.vault;
+    if (!vault) {
+      if (savedProof.persisted) return failure('XHS_VAULT_OPERATION_FAILED');
+    } else {
+      const status = await vault.status();
+      if (status.stored) {
+        if (!vault.policy) return failure('XHS_VAULT_OPERATION_FAILED');
+        const policy = await vault.policy();
+        if (
+          savedProof.persisted
+            ? policy.needsReconnect ||
+              policy.autoRestore !== savedProof.autoRestore
+            : !policy.needsReconnect
+        )
+          return failure('XHS_SESSION_CHANGED');
+      } else if (savedProof.persisted) return failure('XHS_SESSION_CHANGED');
+    }
+    this.assertReplacementSession(binding);
+  }
+  async refreshAfterAuthSessionReview(
+    binding: string,
+    expectedClearVersion?: string,
+  ) {
+    this.assertReplacementSession(binding);
+    if (!this.riskStore) return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    if (expectedClearVersion !== undefined) {
+      if ((await this.riskStore.readClearVersion()) !== expectedClearVersion)
+        return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    } else if (await this.riskStore.read())
       return failure('XHS_SOURCE_RISK_REVIEW_REQUIRED');
+    // No await is permitted between this check and the memory mutation. The
+    // known-response service keeps the SQLite writer coordinator throughout.
+    if (this.replacementSessionForReview().binding !== binding)
+      return failure('XHS_SESSION_CHANGED');
     this.persistedRisk = undefined;
     if (
       this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' ||
@@ -1515,6 +1698,10 @@ export class XhsSubscriptionRuntime
     if (
       this.stopCode &&
       !(
+        this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' &&
+        this.knownAuthProfilePermitted()
+      ) &&
+      !(
         (this.limitedRecoveryScope.getStore() ||
           this.wholeSourceGroup.getStore() ||
           this.reviewedSingle.getStore() ||
@@ -1527,6 +1714,7 @@ export class XhsSubscriptionRuntime
   }
   private clearMemory() {
     this.replacementSession = undefined;
+    this.restoredKnownSession = undefined;
     this.generation++;
     this.sessionAbort.abort();
     this.sessionAbort = new AbortController();
@@ -1673,6 +1861,7 @@ export class XhsSubscriptionRuntime
         a1: input.a1,
         web_session: input.webSession,
       });
+      let persisted = false;
       try {
         if (input.persist) {
           if (!this.options.vault) return failure('XHS_VAULT_UNAVAILABLE');
@@ -1691,6 +1880,11 @@ export class XhsSubscriptionRuntime
                 ...(await this.options.vault.policy()),
                 restoreFailed: false,
               };
+            persisted =
+              !!this.options.vault.configureRestore &&
+              !!this.options.vault.policy &&
+              !this.persistence.needsReconnect &&
+              this.persistence.autoRestore === (input.autoRestore === true);
             this.stored = true;
           } catch {
             return failure('XHS_VAULT_OPERATION_FAILED');
@@ -1702,6 +1896,8 @@ export class XhsSubscriptionRuntime
         this.replacementSession = {
           binding: createHash('sha256').update(randomUUID()).digest('hex'),
           connectedAt: Date.now(),
+          persisted,
+          ...(persisted ? { autoRestore: input.autoRestore === true } : {}),
         };
         return this.snapshot();
       } finally {
@@ -1717,9 +1913,18 @@ export class XhsSubscriptionRuntime
       if (!this.options.vault) return failure('XHS_VAULT_UNAVAILABLE');
       const generation = this.generation;
       let next: XhsSessionCookies | undefined;
+      let restoredPolicy: { autoRestore: boolean; needsReconnect: boolean };
       try {
         try {
+          if (
+            !this.options.vault.policy ||
+            (await this.options.vault.policy()).needsReconnect
+          )
+            return failure('XHS_SESSION_CHANGED');
           next = checkedXhsCookies(await this.options.vault.load());
+          restoredPolicy = await this.options.vault.policy();
+          if (restoredPolicy.needsReconnect)
+            return failure('XHS_SESSION_CHANGED');
         } catch {
           return failure('XHS_VAULT_OPERATION_FAILED');
         }
@@ -1729,6 +1934,14 @@ export class XhsSubscriptionRuntime
         this.clearMemory();
         this.cookies = { ...next };
         this.stored = true;
+        this.restoredKnownSession = {
+          binding: createHash('sha256').update(randomUUID()).digest('hex'),
+          connectedAt: Date.now(),
+          restorePolicy: {
+            autoRestore: restoredPolicy.autoRestore,
+            needsReconnect: restoredPolicy.needsReconnect,
+          },
+        };
         return this.snapshot();
       } finally {
         if (next) {
@@ -1880,6 +2093,7 @@ export class XhsSubscriptionRuntime
           'rate_limit',
         ].includes(error.reason)
       ) {
+        this.platformFailureVersion++;
         this.stopCode = `XHS_SOURCE_${error.reason.toUpperCase()}_BLOCKED`;
         if (error.reason === 'authentication') {
           this.persistence.needsReconnect = true;
@@ -2150,12 +2364,20 @@ export class XhsSubscriptionRuntime
       if (!this.cookies) return failure('XHS_SESSION_REQUIRED');
       if (
         this.stopCode &&
-        this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
+        this.stopCode !== 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' &&
+        !(
+          this.stopCode === 'XHS_SOURCE_AUTHENTICATION_BLOCKED' &&
+          this.knownAuthProfilePermitted()
+        )
       )
         return failure(this.stopCode);
       if (generation !== this.generation || this.sessionAbort.signal.aborted)
         return failure('XHS_SESSION_CHANGED');
     };
+  }
+  private platformFailureVersion = 0;
+  reviewedFailureVersion() {
+    return this.platformFailureVersion;
   }
   reviewedFailureCode() {
     return this.stopCode &&

@@ -5,6 +5,7 @@ type Host = {
   privateMode: boolean;
   authCode: () => string | null;
   send: typeof fetch;
+  onAuthenticationRecovery?: (state: string) => void;
 };
 /** Never use a query cache for secret-bearing responses. */
 export async function savedSessionRequest(
@@ -71,6 +72,9 @@ export async function savedSessionRequest(
     const data = envelope?.result?.data;
     if (input) {
       if (data?.connected !== true) throw new Error('unconfirmed');
+      const recovery = data.authenticationRecovery?.state;
+      if (['profile-verified', 'paused', 'not-applicable'].includes(recovery))
+        host.onAuthenticationRecovery?.(recovery);
       return null;
     }
     if (typeof data?.a1 !== 'string' || typeof data?.webSession !== 'string')

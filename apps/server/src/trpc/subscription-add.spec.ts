@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -113,17 +114,23 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
       datasources: { db: { url: process.env.DATABASE_URL } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const dir of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, dir))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, dir, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      process.env.DATABASE_URL!,
+      async (migrationClient) => {
+        for (const dir of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, dir))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, dir, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await prisma.$disconnect();
     const source = path.join(root, 'empty-source.sqlite');
     await fs.copyFile(database, source);

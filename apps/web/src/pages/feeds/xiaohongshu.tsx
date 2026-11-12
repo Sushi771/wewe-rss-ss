@@ -1461,8 +1461,11 @@ export default function Xiaohongshu() {
     });
   const updateConnection = (action: 'restore' | 'disconnect') =>
     run(async () => {
-      if (action === 'restore') await restoreConnection.mutateAsync();
-      else await disconnectConnection.mutateAsync();
+      const restored =
+        action === 'restore'
+          ? await restoreConnection.mutateAsync()
+          : undefined;
+      if (action === 'disconnect') await disconnectConnection.mutateAsync();
       setResolution(null);
       await Promise.all([
         connection.refetch(),
@@ -1470,7 +1473,13 @@ export default function Xiaohongshu() {
       ]);
       setMessage(
         action === 'restore'
-          ? '已恢复本机会话，请重新识别需要订阅的链接。'
+          ? 'authenticationRecovery' in (restored ?? {}) &&
+            (restored as { authenticationRecovery?: { state: string } })
+              .authenticationRecovery?.state === 'profile-verified'
+            ? '一次资料验证和保存成功，对应认证暂停已解除；未补跑旧任务。'
+            : restored?.riskCode
+              ? '已恢复本机会话；资料验证未确认恢复，来源暂停仍保留，不会自动重试。'
+              : '已恢复本机会话，请重新识别需要订阅的链接。'
           : '已断开本机会话，本地内容保留。',
       );
     });
@@ -2282,7 +2291,10 @@ export default function Xiaohongshu() {
               {connection.data && (
                 <p className="text-default-500 text-xs" role="status">
                   {connection.data.riskCode
-                    ? '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
+                    ? connection.data.riskCode ===
+                      'XHS_SOURCE_AUTHENTICATION_BLOCKED'
+                      ? '本机存在认证暂停；保存并连接或明确恢复后验证一次资料，成功保存后才解除，失败不重试。'
+                      : '本机存在已记录的来源停止状态；原因和解除条件须核查，恢复会话不会清除该记录。'
                     : '未发现已记录的来源停止状态；缺失的历史记录仍待核查，不能据此认定限制已解除。'}
                 </p>
               )}
@@ -3084,6 +3096,16 @@ type CommentSummary = {
   incompleteRoots: number;
 };
 export function XhsCommentSummary({ task }: { task: unknown }) {
+  const collection = (
+    task as {
+      commentCollection?: {
+        round: string;
+        state: string;
+        notCollectedNotes: number;
+      };
+    }
+  ).commentCollection;
+
   const summary = (task as { commentSummary?: CommentSummary }).commentSummary;
   const conflicts = (task as { archiveConflicts?: number }).archiveConflicts;
   const archive =
@@ -3092,15 +3114,30 @@ export function XhsCommentSummary({ task }: { task: unknown }) {
       : conflicts > 0
         ? `归档有 ${conflicts} 项冲突：已保留原附页并另存冲突版本，归档待核。`
         : '本次未发现归档冲突。';
-  if (!summary) return <p role="status">评论与回复进度待统计。{archive}</p>;
+  const notice =
+    collection?.state === 'not-authorized' ? (
+      <p role="status">
+        本轮 {collection.round} 评论及回复未获调度授权，
+        {collection.notCollectedNotes}{' '}
+        篇未采集。已有正文和图片可继续归档；这不代表评论或全链归档完整。
+        {archive}
+      </p>
+    ) : null;
+  if (!summary)
+    return notice ?? <p role="status">评论与回复进度待统计。{archive}</p>;
   return (
-    <p role="status">
-      评论轮次 {summary.round}：范围 {summary.eligibleNotes} 篇，完成{' '}
-      {summary.completedNotes}，待补 {summary.pendingNotes}，失败{' '}
-      {summary.failedNotes}，结果未知 {summary.unknownNotes}；本地已保存评论{' '}
-      {summary.savedComments} 条、回复 {summary.savedReplies} 条；已发现顶层评论{' '}
-      {summary.discoveredRoots} 条，回复窗口到末页 {summary.completedRoots}
-      ，未完成 {summary.incompleteRoots}。本地数量不代表平台总量。{archive}
-    </p>
+    <>
+      {notice}
+      <p role="status">
+        {notice ? '既有评论统计（不代表本轮采集）：' : ''}
+        评论轮次 {summary.round}：范围 {summary.eligibleNotes} 篇，完成{' '}
+        {summary.completedNotes}，待补 {summary.pendingNotes}，失败{' '}
+        {summary.failedNotes}，结果未知 {summary.unknownNotes}；本地已保存评论{' '}
+        {summary.savedComments} 条、回复 {summary.savedReplies}{' '}
+        条；已发现顶层评论 {summary.discoveredRoots} 条，回复窗口到末页{' '}
+        {summary.completedRoots}
+        ，未完成 {summary.incompleteRoots}。本地数量不代表平台总量。{archive}
+      </p>
+    </>
   );
 }

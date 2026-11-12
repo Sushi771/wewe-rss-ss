@@ -540,3 +540,257 @@ test('a bound local admission review permits another scheduled account but rejec
     db.close();
   }
 });
+
+const {
+  prepareScheduledPolicy,
+  confirmScheduledPolicy,
+  prepareScheduledTaskReview,
+} = require('./xhs-scheduled-review-scope.ts');
+const { fullHistoryContext } = require('./xhs-full-history-scope.ts');
+
+// Entirely synthetic retained history and approval. No platform or production I/O.
+async function reviewedFixture() {
+  const { db, tx } = fixture();
+  tx.$queryRawUnsafe = async (sql, ...v) => db.prepare(sql).all(...v);
+  tx.$executeRawUnsafe = async (sql, ...v) =>
+    Number(db.prepare(sql).run(...v).changes);
+  db.exec(`
+    ALTER TABLE xhs_request_budgets ADD COLUMN next_at INTEGER DEFAULT 0;
+    ALTER TABLE xhs_request_budgets ADD COLUMN interval_ms INTEGER DEFAULT 1000;
+    ALTER TABLE xhs_source_risk ADD COLUMN code TEXT;
+    ALTER TABLE xhs_source_risk ADD COLUMN owner TEXT;
+    ALTER TABLE xhs_source_risk ADD COLUMN http_status INTEGER;
+    ALTER TABLE xhs_source_risk ADD COLUMN endpoint TEXT;
+    CREATE TABLE xhs_unbound_owner_reviews(id TEXT PRIMARY KEY,plan_digest TEXT,original_risk_json TEXT,original_outcome TEXT,old_task_ids_json TEXT,old_job_ids_json TEXT,creator_bindings_json TEXT,budget_snapshot_json TEXT,scope_json TEXT,backup_sha256 TEXT,approved_at INTEGER);
+    CREATE TABLE xhs_unbound_owner_requests(operation_id TEXT PRIMARY KEY,review_id TEXT,task_id TEXT,creator_id TEXT,phase TEXT,logical_target TEXT,outcome TEXT,listed_note_ids_json TEXT);
+    INSERT INTO xhs_creators VALUES('b',1,'author-b'),('c',1,'author-c');
+    INSERT INTO xhs_request_budgets(id,used,request_limit) VALUES('xhs:source-total',0,100),('xhs:dispatch-pending:synthetic-old',1,1);
+  `);
+  const old = {
+    taskId: 'synthetic-old-task',
+    creatorId: 'b',
+    state: 'blocked',
+    code: 'XHS_SOURCE_TRANSPORT_BLOCKED',
+    sourceActive: {
+      phase: 'detail',
+      state: 'started',
+      noteId: 'synthetic-old-note',
+      marker: 'xhs:dispatch-pending:synthetic-old',
+    },
+  };
+  const writeOld = (doc = old, state = doc.state) =>
+    db
+      .prepare(
+        'INSERT OR REPLACE INTO xhs_subscription_tasks VALUES(?,?,?,?,1)',
+      )
+      .run(old.taskId, 'b', state, JSON.stringify(doc));
+  writeOld();
+  const scopeInput = {
+    creatorIds: ['a', 'b', 'c'],
+    maxRequests: 20,
+    phaseLimits: { profile: 3, list: 3, detail: 10, media: 10 },
+  };
+  const plan = await prepareScheduledPolicy(tx, scopeInput);
+  await confirmScheduledPolicy(
+    tx,
+    scopeInput,
+    plan.digest,
+    {
+      assertQuiescent: async () => {},
+      verifyBackup: async () => 'a'.repeat(64),
+    },
+    10n,
+  );
+  const context = await prepareScheduledTaskReview(
+    tx,
+    {
+      round,
+      creatorId: 'a',
+      phase: 'basic',
+      taskId: input().task.taskId,
+      sessionBinding: 'b'.repeat(64),
+      authorId: 'author',
+    },
+    11n,
+  );
+  assert.ok(context);
+  const admit = () =>
+    fullHistoryContext.run(context, () =>
+      commit(db, () => admitScheduledXhs(tx, input())),
+    );
+  return { db, tx, old, writeOld, plan, context, admit };
+}
+
+test('exact retained terminal sourceActive permits another account without changing or replaying history', async () => {
+  const f = await reviewedFixture();
+  try {
+    const snapshot = () =>
+      f.db
+        .prepare('SELECT * FROM xhs_subscription_tasks WHERE id=?')
+        .get(f.old.taskId);
+    const before = snapshot();
+    const budgets = f.db
+      .prepare('SELECT * FROM xhs_request_budgets ORDER BY id')
+      .all();
+    assert.deepEqual(f.plan.scope.exclusions.b, [
+      { phase: 'detail', target: 'synthetic-old-note' },
+    ]);
+    assert.equal((await f.admit()).kind, 'created');
+    assert.equal((await f.admit()).kind, 'existing');
+    assert.deepEqual(snapshot(), before);
+    assert.deepEqual(
+      f.db.prepare('SELECT * FROM xhs_request_budgets ORDER BY id').all(),
+      budgets,
+    );
+    assert.equal(
+      f.db.prepare('SELECT COUNT(*) n FROM xhs_unbound_owner_requests').get().n,
+      0,
+    );
+  } finally {
+    f.db.close();
+  }
+});
+
+test('unreviewed retained sourceActive still blocks admission', async () => {
+  const f = await reviewedFixture();
+  try {
+    assert.equal(
+      (await commit(f.db, () => admitScheduledXhs(f.tx, input()))).reason,
+      'XHS_SCHEDULE_SOURCE_BLOCKED',
+    );
+  } finally {
+    f.db.close();
+  }
+});
+
+for (const mutation of [
+  'changed-active',
+  'new-active',
+  'changed-unknowns',
+  'new-marker',
+  'new-ledger',
+]) {
+  test(`reviewed baseline rejects ${mutation} before creating any scheduled work`, async () => {
+    const f = await reviewedFixture();
+    try {
+      if (mutation === 'changed-active')
+        f.writeOld({
+          ...f.old,
+          sourceActive: { ...f.old.sourceActive, noteId: 'new-note' },
+        });
+      if (mutation === 'new-active')
+        f.db
+          .prepare('INSERT INTO xhs_subscription_tasks VALUES(?,?,?,?,1)')
+          .run(
+            'new-task',
+            'c',
+            'blocked',
+            JSON.stringify({ ...f.old, taskId: 'new-task', creatorId: 'c' }),
+          );
+      if (mutation === 'changed-unknowns')
+        f.writeOld({
+          ...f.old,
+          sourceUnknowns: [
+            { phase: 'detail', outcome: 'unknown', targetHash: 'f'.repeat(64) },
+          ],
+        });
+      if (mutation === 'new-marker')
+        f.db.exec(
+          "INSERT INTO xhs_request_budgets(id,used,request_limit) VALUES('xhs:dispatch-pending:new',1,1)",
+        );
+      if (mutation === 'new-ledger')
+        f.db.exec(
+          "INSERT INTO xhs_unbound_owner_requests VALUES('new-operation','review','task','c','detail','new-note','unknown',NULL)",
+        );
+      await assert.rejects(f.admit(), /SCHEDULED_NEW_UNKNOWN_REVIEW_REQUIRED/);
+      assert.equal(
+        f.db
+          .prepare('SELECT COUNT(*) n FROM xhs_subscription_tasks WHERE id=?')
+          .get(input().task.taskId).n,
+        0,
+      );
+    } finally {
+      f.db.close();
+    }
+  });
+}
+
+for (const mutation of [
+  'running',
+  'queued',
+  'state-mismatch',
+  'task-mismatch',
+  'creator-mismatch',
+  'new-restriction',
+  'other-corrupt-state',
+]) {
+  test(`retained receipt cannot exempt ${mutation} from the structural and live-task guards`, async () => {
+    const f = await reviewedFixture();
+    try {
+      if (mutation === 'running' || mutation === 'queued')
+        f.writeOld({ ...f.old, state: mutation });
+      if (mutation === 'state-mismatch')
+        f.writeOld({ ...f.old, state: 'completed' }, 'blocked');
+      if (mutation === 'task-mismatch')
+        f.writeOld({ ...f.old, taskId: 'not-the-row' });
+      if (mutation === 'creator-mismatch')
+        f.writeOld({ ...f.old, creatorId: 'not-the-creator' });
+      if (mutation === 'new-restriction')
+        f.writeOld({ ...f.old, code: 'XHS_SOURCE_AUTHENTICATION_BLOCKED' });
+      if (mutation === 'other-corrupt-state')
+        f.db.exec(
+          "INSERT INTO xhs_subscription_tasks VALUES('other','c','invalid','{}',1)",
+        );
+      assert.equal((await f.admit()).reason, 'XHS_SCHEDULE_SOURCE_BLOCKED');
+      assert.equal(
+        f.db.prepare('SELECT COUNT(*) n FROM xhs_unbound_owner_requests').get()
+          .n,
+        0,
+      );
+    } finally {
+      f.db.close();
+    }
+  });
+}
+
+test('stored retained baseline must still match its reviewed digest', async () => {
+  const f = await reviewedFixture();
+  try {
+    const row = f.db
+      .prepare('SELECT scope_json FROM xhs_unbound_owner_reviews WHERE id=?')
+      .get(f.context.reviewId);
+    const scope = JSON.parse(row.scope_json);
+    scope.baseline.unknowns[0].sourceActive.noteId = 'tampered-review';
+    f.db
+      .prepare('UPDATE xhs_unbound_owner_reviews SET scope_json=? WHERE id=?')
+      .run(JSON.stringify(scope), f.context.reviewId);
+    await assert.rejects(f.admit(), /REVIEW_STATE_CHANGED/);
+  } finally {
+    f.db.close();
+  }
+});
+
+for (const sourceActive of [false, 0, '']) {
+  test(`malformed non-null sourceActive ${JSON.stringify(sourceActive)} remains blocked`, async () => {
+    const { db, tx } = fixture();
+    try {
+      db.prepare('INSERT INTO xhs_subscription_tasks VALUES(?,?,?,?,1)').run(
+        'old',
+        'a',
+        'blocked',
+        JSON.stringify({
+          taskId: 'old',
+          creatorId: 'a',
+          state: 'blocked',
+          sourceActive,
+        }),
+      );
+      assert.equal(
+        (await commit(db, () => admitScheduledXhs(tx, input()))).reason,
+        'XHS_SCHEDULE_SOURCE_BLOCKED',
+      );
+    } finally {
+      db.close();
+    }
+  });
+}

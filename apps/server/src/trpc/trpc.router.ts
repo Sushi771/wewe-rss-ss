@@ -1747,7 +1747,10 @@ export class TrpcRouter {
       .mutation(async ({ input, ctx }) => {
         this.requireLocalXhsConnection(ctx);
         try {
-          return await this.xhsRuntime!.connectSession(input);
+          const connected = await this.xhsRuntime!.connectSession(input);
+          return input.persist && this.xhsWhole
+            ? await this.xhsWhole.verifyKnownAuthenticationAfterConnection()
+            : connected;
         } catch (error) {
           throw new TRPCError({
             code: 'PRECONDITION_FAILED',
@@ -1759,7 +1762,10 @@ export class TrpcRouter {
       async ({ ctx }) => {
         this.requireLocalXhsConnection(ctx);
         try {
-          return await this.xhsRuntime!.restoreSession();
+          const connected = await this.xhsRuntime!.restoreSession();
+          return this.xhsWhole
+            ? await this.xhsWhole.verifyKnownAuthenticationAfterConnection()
+            : connected;
         } catch (error) {
           throw new TRPCError({
             code: 'PRECONDITION_FAILED',

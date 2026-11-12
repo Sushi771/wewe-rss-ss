@@ -83,6 +83,9 @@ test(
       const express = require(
         require.resolve('express', { paths: [serverPath] }),
       );
+      // Install the real checked-out runtime, retaining its writer lease checks.
+      require('./local-release/project-writer-gate.cjs');
+      fs.writeFileSync(path.join(temp, 'synthetic.sqlite'), '', { flag: 'wx' });
       prisma = new PrismaService();
       reader = new PrismaClient({ datasources: { db: { url } } });
       for (const migration of fs

@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import { spawnSync } from 'node:child_process';
@@ -274,21 +275,26 @@ describe('XHS additive migration/persistence/pagination/export on synthetic SQLi
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (
-        !(await fs.stat(path.join(migrations, name))).isDirectory() ||
-        name === '20261025090000_xhs_engagement'
-      )
-        continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const s of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await db.$executeRawUnsafe(s);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (
+            !(await fs.stat(path.join(migrations, name))).isDirectory() ||
+            name === '20261025090000_xhs_engagement'
+          )
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          );
+          for (const s of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(s);
+        }
+      },
+    );
     await db.feed.create({
       data: {
         id: 'wechat',

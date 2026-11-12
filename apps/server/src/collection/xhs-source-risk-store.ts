@@ -36,6 +36,22 @@ type Row = {
 };
 export class XhsSourceRiskStore {
   constructor(private readonly db: PrismaService) {}
+  /** Exact clear receipt for post-commit memory refresh under the writer lock. */
+  async readClearVersion(): Promise<string> {
+    const rows = await this.db.$queryRawUnsafe<any[]>(
+      "SELECT state,code,owner,http_status,endpoint,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'",
+    );
+    if (
+      rows.length !== 1 ||
+      rows[0].state !== 'clear' ||
+      ['code', 'owner', 'http_status', 'endpoint'].some(
+        (k) => rows[0][k] !== null,
+      ) ||
+      !/^\d+$/.test(rows[0].updated_at)
+    )
+      throw new XhsSubscriptionError(REVIEW);
+    return rows[0].updated_at;
+  }
   private async rows(db: Pick<Prisma.TransactionClient, '$queryRaw'>) {
     const rows = await db.$queryRaw<
       Row[]

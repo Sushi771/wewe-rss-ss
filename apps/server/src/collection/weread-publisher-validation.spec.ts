@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import axios from 'axios';
 import { createHash } from 'node:crypto';
@@ -733,19 +734,25 @@ describe('publisher candidate directory: offline transport and success-only bind
     });
     try {
       const migrations = path.resolve(__dirname, '../../prisma/migrations');
-      for (const child of (await fs.readdir(migrations)).sort()) {
-        const file = path.join(migrations, child, 'migration.sql');
-        try {
-          for (const sql of splitSqliteStatements(
-            await fs.readFile(file, 'utf8'),
-          )
-            .map((x) => x.trim())
-            .filter(Boolean))
-            await prisma.$executeRawUnsafe(sql);
-        } catch (error: any) {
-          if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
-        }
-      }
+      await withFixtureMigrationConnection(
+        `file:${path.join(dir, 'provider.sqlite').replace(/\\/g, '/')}`,
+        async (migrationClient) => {
+          for (const child of (await fs.readdir(migrations)).sort()) {
+            const file = path.join(migrations, child, 'migration.sql');
+            try {
+              for (const sql of splitSqliteStatements(
+                await fs.readFile(file, 'utf8'),
+              )
+                .map((x) => x.trim())
+                .filter(Boolean))
+                await migrationClient.$executeRawUnsafe(sql);
+            } catch (error: any) {
+              if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+                throw error;
+            }
+          }
+        },
+      );
       await prisma.feed.create({
         data: {
           id: mpId,

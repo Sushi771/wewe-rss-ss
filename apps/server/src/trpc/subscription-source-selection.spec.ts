@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { PrismaClient } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
@@ -39,18 +40,23 @@ describe('explicit add source through original router (offline SQLite)', () => {
       datasources: { db: { url: `file:${database.replace(/\\/g, '/')}` } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const directory of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, directory))).isDirectory())
-        continue;
-      const sql = await fs.readFile(
-        path.join(migrations, directory, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      `file:${database.replace(/\\/g, '/')}`,
+      async (migrationClient) => {
+        for (const directory of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, directory))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, directory, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
   }, 60000);
 
   beforeEach(async () => {

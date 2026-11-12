@@ -39,6 +39,18 @@ it.each([false, true, 'rate-limited'])(
           ).isDirectory()
         )
           continue;
+        // Native BEGIN/COMMIT and uncommitted schema need one connection.
+        // Keep the business client's original pool and concurrency coverage.
+        const migrationClient = new PrismaClient({
+          datasources: {
+            db: {
+              url:
+                'file:' +
+                path.join(folder, 'fixture.sqlite').replace(/\\/g, '/') +
+                '?connection_limit=1',
+            },
+          },
+        });
         try {
           for (const sql of splitSqliteStatements(
             await fs.readFile(
@@ -51,9 +63,11 @@ it.each([false, true, 'rate-limited'])(
               'utf8',
             ),
           ))
-            await db.$executeRawUnsafe(sql);
+            await migrationClient.$executeRawUnsafe(sql);
         } catch (e) {
           if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+        } finally {
+          await migrationClient.$disconnect();
         }
       }
       const bindings = ['a', 'b', 'c'].map((creatorId) => ({

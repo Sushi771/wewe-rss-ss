@@ -111,7 +111,7 @@ export function createRoundSourceReceipt(
       outcome = 'checkpointed';
       terminal = true;
     },
-    fail(error: unknown) {
+    fail(error: unknown, localParseFailure = false) {
       active = false;
       const classified = safeSourceFailure(error, stage);
       code = classified.code;
@@ -125,9 +125,11 @@ export function createRoundSourceReceipt(
       if (error instanceof Error && localReasons.includes(error.message))
         localReason = error.message;
       outcome =
-        status !== undefined && classified.outcome !== 'local-failure'
-          ? 'response-received'
-          : classified.outcome;
+        localParseFailure && status !== undefined
+          ? 'local-failure'
+          : status !== undefined && classified.outcome !== 'local-failure'
+            ? 'response-received'
+            : classified.outcome;
       if (error instanceof RedbookTransportDiagnosticError) {
         const kinds = [
           'guard-url',

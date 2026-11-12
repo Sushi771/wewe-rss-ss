@@ -25,7 +25,7 @@ it('records a bound invalid full detail and continues to the next note through t
     .spyOn(global, 'fetch')
     .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
   try {
-    await applyFixtureMigrations(db);
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
     const creatorId = 'parse-creator',
       author = 'parse-author';
     const keys = ['parse-a', 'parse-b'].map((n) =>
@@ -437,7 +437,7 @@ it('starts a real subscription batch with a synthetic source and pauses an inter
   const globalFetch = jest
     .spyOn(global, 'fetch')
     .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-  await applyFixtureMigrations(db);
+  await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
   const api = jest.fn(async (request: any) => {
     const note = JSON.parse(request.body).source_note_id;
     return {
@@ -562,7 +562,7 @@ it.each(['parse', 'restricted', 'unknown'] as const)(
     const globalFetch = jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
-    await applyFixtureMigrations(db);
+    await applyFixtureMigrations('file:' + file.replace(/\\/g, '/'));
     let detailRequests = 0;
     const api = jest.fn(async (request: any) => {
       const url = new URL(request.url);

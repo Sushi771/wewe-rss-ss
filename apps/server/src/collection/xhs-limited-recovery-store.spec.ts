@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -21,13 +22,18 @@ describe('bounded single-note recovery reservation (synthetic only)', () => {
       },
     });
     const root = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(root)).sort()) {
-      if (!(await fs.stat(path.join(root, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(root, name, 'migration.sql'), 'utf8'),
-      ))
-        await db.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'test.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(root)).sort()) {
+          if (!(await fs.stat(path.join(root, name))).isDirectory()) continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(path.join(root, name, 'migration.sql'), 'utf8'),
+          ))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
   }, 40000);
   beforeEach(async () => {
     await db.$executeRaw`DELETE FROM xhs_limited_recovery_append`;
