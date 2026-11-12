@@ -1,0 +1,46 @@
+{
+  "apps/server/src/feeds/cache-sync-engine.ts": {
+    "beforeSha256": "ee98963dd969a93929224e9e64fbefd64855766fe6d0036ba95576adf523bb0c",
+    "afterSha256": "1010dc1e8aef7b826192d68f37c40758ade9373583ce315ff7a91dbb18c12063",
+    "hunks": [
+      {
+        "before": "};\nexport type CacheSyncDependencies = {\n  now(): number;\n  /** Durable adapter replaces the volatile page media queue in the main service. */\n  durableMedia?: {\n    tick(allowedFeeds: ReadonlySet<string>): Promise<void>;\n",
+        "after": "};\nexport type CacheSyncDependencies = {\n  now(): number;\n  /** Explicit local-only recovery mode never schedules or runs media work. */\n  textOnly?: boolean;\n  /** Durable adapter replaces the volatile page media queue in the main service. */\n  durableMedia?: {\n    tick(allowedFeeds: ReadonlySet<string>): Promise<void>;\n"
+      },
+      {
+        "before": "            await this.deps.sync(id, page, true);\n            await this.deps.syncText?.(id, page);\n            slot.fingerprint = fingerprint;\n            if (!this.deps.durableMedia) this.media.set(id, { page, due: now });\n          } else if (!this.media.has(id)) {\n            // Reconcile local SQLite gaps without downloading healthy media or\n            // rewriting a successful list. Unknown readiness stays pending.\n",
+        "after": "            await this.deps.sync(id, page, true);\n            await this.deps.syncText?.(id, page);\n            slot.fingerprint = fingerprint;\n            if (!this.deps.textOnly && !this.deps.durableMedia)\n              this.media.set(id, { page, due: now });\n          } else if (!this.media.has(id)) {\n            // Reconcile local SQLite gaps without downloading healthy media or\n            // rewriting a successful list. Unknown readiness stays pending.\n"
+      },
+      {
+        "before": "            const local = this.deps.syncText\n              ? await this.deps.syncText(id, page)\n              : await this.deps.inspectLocalMedia?.(id, page);\n            if (local?.mediaReady !== true && !this.deps.durableMedia) {\n              this.media.set(id, { page, due: now });\n            }\n          }\n",
+        "after": "            const local = this.deps.syncText\n              ? await this.deps.syncText(id, page)\n              : await this.deps.inspectLocalMedia?.(id, page);\n            if (\n              !this.deps.textOnly &&\n              local?.mediaReady !== true &&\n              !this.deps.durableMedia\n            ) {\n              this.media.set(id, { page, due: now });\n            }\n          }\n"
+      },
+      {
+        "before": "        }\n      }\n    } finally {\n      if (this.deps.durableMedia && !this.stopped) {\n        const allowed = new Set(\n          cacheSyncDaytime(this.deps.now()) &&\n            !this.sourceBlocked &&\n",
+        "after": "        }\n      }\n    } finally {\n      if (!this.deps.textOnly && this.deps.durableMedia && !this.stopped) {\n        const allowed = new Set(\n          cacheSyncDaytime(this.deps.now()) &&\n            !this.sourceBlocked &&\n"
+      },
+      {
+        "before": "  }\n  private async runMedia(onlyId?: string) {\n    if (\n      this.sourceBlocked ||\n      this.deps.sourceStopped?.() ||\n      this.mediaBusy ||\n",
+        "after": "  }\n  private async runMedia(onlyId?: string) {\n    if (\n      this.deps.textOnly ||\n      this.sourceBlocked ||\n      this.deps.sourceStopped?.() ||\n      this.mediaBusy ||\n"
+      }
+    ]
+  },
+  "apps/server/src/feeds/cache-sync.service.ts": {
+    "beforeSha256": "840ada91251f24a573b7abce4a2cbe735b28cd3bce34942e801f388907943181",
+    "afterSha256": "ccfb48eafce9afb5da66de6a3464e96cdb2e0651339c135952a2a56698f24226",
+    "hunks": [
+      {
+        "before": "import { mediaSafetyStop } from './media-safety-stop';\nimport { AutomaticMediaQueue } from './automatic-media-queue';\nimport { AutomaticMediaScan } from './automatic-media-scan';\nimport { fetchAllowedImage } from '../collection/image-fetch';\n\n@Injectable()\n",
+        "after": "import { mediaSafetyStop } from './media-safety-stop';\nimport { AutomaticMediaQueue } from './automatic-media-queue';\nimport { AutomaticMediaScan } from './automatic-media-scan';\nimport {\n  listLocalWechat2RssCache,\n  readLocalWechat2RssCache,\n} from '../collection/local-cache-reader';\nimport { fetchAllowedImage } from '../collection/image-fetch';\n\n@Injectable()\n"
+      },
+      {
+        "before": "  }\n  private async start() {\n    try {\n      const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');\n      const provider = wechat2RssProvider();\n      let allowedFeeds: ReadonlySet<string> = new Set();\n",
+        "after": "  }\n  private async start() {\n    try {\n      if (process.env.WECHAT2RSS_LOCAL_CACHE_SYNC === '1') {\n        this.startLocalOnly();\n        this.startWatching();\n        return;\n      }\n      const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');\n      const provider = wechat2RssProvider();\n      let allowedFeeds: ReadonlySet<string> = new Set();\n"
+      },
+      {
+        "before": "        sync: (id, page, listOnly) =>\n          this.trpc.syncCachedWechat2RssPage(id, page, listOnly),\n      });\n      cacheSyncState.enabled = true;\n      const database = process.env.WECHAT2RSS_CACHE_DB?.trim();\n      if (database) {\n        this.monitor = new CacheSqliteMonitor(\n          database,\n          (hashes) => {\n            this.engine?.signal(hashes);\n            this.tick();\n          },\n          () => this.engine?.signalUnavailable(),\n        );\n        void this.monitor.start();\n      }\n      this.timer = setInterval(() => this.tick(), 1000);\n      this.timer.unref();\n      this.tick();\n    } catch {\n      cacheSyncState.state = 'configuration-unavailable';\n    }\n  }\n  private tick() {\n    if (databaseWritesAllowed())\n",
+        "after": "        sync: (id, page, listOnly) =>\n          this.trpc.syncCachedWechat2RssPage(id, page, listOnly),\n      });\n      this.startWatching();\n    } catch {\n      cacheSyncState.state = 'configuration-unavailable';\n    }\n  }\n  private startLocalOnly() {\n    // No provider construction, account check, source gate or media queue.\n    // An invalid/missing local database fails closed, never falls back to HTTP.\n    this.engine = new CacheSyncEngine({\n      now: Date.now,\n      textOnly: true,\n      list: listLocalWechat2RssCache,\n      localFeeds: async () =>\n        (await this.prisma.feed.findMany({ where: { status: 1 } })).filter(\n          (feed) => resolveCollectionRoute(feed).channel === 'wechat2rss',\n        ),\n      read: (feed, name) => readLocalWechat2RssCache(feed.feedId, name),\n      syncText: (id, page) =>\n        this.trpc.syncCachedWechat2RssPage(id, page, false, {\n          fetchMedia: false,\n        }),\n      sync: (id, page, listOnly) =>\n        this.trpc.syncCachedWechat2RssPage(id, page, listOnly, {\n          fetchMedia: false,\n        }),\n    });\n    cacheSyncState.mediaPause = 'local-cache-only';\n  }\n  private startWatching() {\n    cacheSyncState.enabled = true;\n    const database = process.env.WECHAT2RSS_CACHE_DB?.trim();\n    if (database) {\n      this.monitor = new CacheSqliteMonitor(\n        database,\n        (hashes) => {\n          this.engine?.signal(hashes);\n          this.tick();\n        },\n        () => this.engine?.signalUnavailable(),\n      );\n      void this.monitor.start();\n    }\n    this.timer = setInterval(() => this.tick(), 1000);\n    this.timer.unref();\n    this.tick();\n  }\n  private tick() {\n    if (databaseWritesAllowed())\n"
+      }
+    ]
+  }
+}

@@ -126,6 +126,31 @@ function restorePriorBootRestart(file, source) {
   );
   return source;
 }
+// Only the separately reviewed local-only adapter delta is invertible. Every
+// earlier integration/writer hash still applies to the reconstructed source.
+function restoreLocalCacheOnly(file, source) {
+  const reviewed = require('./fixtures/local-cache-only-compat.json')[file];
+  if (!reviewed) return source;
+  assert.equal(
+    sha(source),
+    reviewed.afterSha256,
+    'exact reviewed local-cache-only source: ' + file,
+  );
+  for (const hunk of reviewed.hunks) {
+    assert.equal(
+      source.split(hunk.after).length,
+      2,
+      'exact reviewed local-cache-only hunk: ' + file,
+    );
+    source = source.replace(hunk.after, hunk.before);
+  }
+  assert.equal(
+    sha(source),
+    reviewed.beforeSha256,
+    'unchanged pre-local-cache-only source: ' + file,
+  );
+  return source;
+}
 function restoreCollectionIntegration(file, source) {
   const reviewed = require('./fixtures/collection-integration-compat.json')[
     file
@@ -182,6 +207,7 @@ module.exports = function restoreLegacyWriter(file, source) {
     );
     source = source.replace(added, '');
   }
+  source = restoreLocalCacheOnly(file, source);
   source = restoreCollectionIntegration(file, source);
   source = restoreCompatible(file, source);
   for (const seam of seams[file] || []) {
@@ -215,3 +241,5 @@ module.exports = function restoreLegacyWriter(file, source) {
 };
 module.exports.restoreCompatible = restoreCompatible;
 module.exports.restorePriorBootRestart = restorePriorBootRestart;
+
+module.exports.restoreLocalCacheOnly = restoreLocalCacheOnly;

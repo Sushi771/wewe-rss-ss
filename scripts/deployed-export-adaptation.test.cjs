@@ -18,6 +18,49 @@ const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
+test('local-cache-only inverse retains old pins and rejects unknown adapter changes', () => {
+  const reviewed = require('./fixtures/local-cache-only-compat.json');
+  assert.deepEqual(Object.keys(reviewed).sort(), [
+    'apps/server/src/feeds/cache-sync-engine.ts',
+    'apps/server/src/feeds/cache-sync.service.ts',
+  ]);
+  for (const [file, fixture] of Object.entries(reviewed)) {
+    const source = read(file);
+    assert.equal(
+      hash(restoreLegacyWriter.restoreLocalCacheOnly(file, source)),
+      fixture.beforeSha256,
+    );
+    assert.equal(
+      fixture.beforeSha256,
+      require('./fixtures/collection-integration-compat.json')[file]
+        .afterSha256,
+    );
+    for (const hunk of fixture.hunks) {
+      const changed = source.replace(hunk.after, hunk.before);
+      assert.notEqual(changed, source);
+      assert.throws(
+        () => restoreLegacyWriter.restoreLocalCacheOnly(file, changed),
+        /exact reviewed local-cache-only source/,
+      );
+    }
+    for (const changed of [
+      source + '// unknown extra statement\n',
+      source.replace(
+        file.endsWith('service.ts')
+          ? 'textOnly: true'
+          : 'this.deps.textOnly ||',
+        file.endsWith('service.ts') ? 'textOnly: false' : 'false ||',
+      ),
+    ]) {
+      assert.notEqual(changed, source);
+      assert.throws(
+        () => restoreLegacyWriter.restoreLocalCacheOnly(file, changed),
+        /exact reviewed local-cache-only source/,
+      );
+    }
+  }
+});
+
 test('approved startup and retired Mp2RSS inverses reject unrelated writer changes', () => {
   for (const [file, before, after] of [
     [
