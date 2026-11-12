@@ -465,3 +465,43 @@ describe('media lane restriction isolation', () => {
     },
   );
 });
+
+it('local text-only mode keeps reconciling multiple accounts without a media lane or inferred metadata', async () => {
+  let now = start;
+  const read = jest.fn().mockResolvedValue(page('<p>local</p>'));
+  const sync = jest.fn().mockResolvedValue({});
+  const syncText = jest.fn().mockResolvedValue({ mediaReady: false });
+  const media = { tick: jest.fn(), close: jest.fn() };
+  const engine = new CacheSyncEngine({
+    now: () => now,
+    textOnly: true,
+    list: async () => ids.map((id) => ({ ...metadata(id), paused: null })),
+    localFeeds: async () => ids.map((id) => ({ id, mpName: id })),
+    read,
+    sync,
+    syncText,
+    mediaEnabled: () => false,
+    durableMedia: media,
+  });
+  try {
+    await engine.tick();
+    now += 1000;
+    await engine.tick();
+    expect(read.mock.calls.map((call) => call[0].feedId)).toEqual(ids);
+    now += 60000;
+    await engine.tick();
+    now += 1000;
+    await engine.tick();
+    expect(syncText).toHaveBeenCalledTimes(4);
+    expect(sync).toHaveBeenCalledTimes(2);
+    expect(sync.mock.calls.every((call) => call[2] === true)).toBe(true);
+    expect(media.tick).not.toHaveBeenCalled();
+    expect(
+      cacheSyncState.feeds.every(
+        (row) => row.paused === null && row.upstreamCheckTime === null,
+      ),
+    ).toBe(true);
+  } finally {
+    engine.close();
+  }
+});

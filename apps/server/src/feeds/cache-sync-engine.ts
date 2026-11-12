@@ -48,6 +48,8 @@ type Slot = {
 };
 export type CacheSyncDependencies = {
   now(): number;
+  /** Explicit local-only recovery mode never schedules or runs media work. */
+  textOnly?: boolean;
   /** Durable adapter replaces the volatile page media queue in the main service. */
   durableMedia?: {
     tick(allowedFeeds: ReadonlySet<string>): Promise<void>;
@@ -253,7 +255,8 @@ export class CacheSyncEngine {
             await this.deps.sync(id, page, true);
             await this.deps.syncText?.(id, page);
             slot.fingerprint = fingerprint;
-            if (!this.deps.durableMedia) this.media.set(id, { page, due: now });
+            if (!this.deps.textOnly && !this.deps.durableMedia)
+              this.media.set(id, { page, due: now });
           } else if (!this.media.has(id)) {
             // Reconcile local SQLite gaps without downloading healthy media or
             // rewriting a successful list. Unknown readiness stays pending.
@@ -262,7 +265,11 @@ export class CacheSyncEngine {
             const local = this.deps.syncText
               ? await this.deps.syncText(id, page)
               : await this.deps.inspectLocalMedia?.(id, page);
-            if (local?.mediaReady !== true && !this.deps.durableMedia) {
+            if (
+              !this.deps.textOnly &&
+              local?.mediaReady !== true &&
+              !this.deps.durableMedia
+            ) {
               this.media.set(id, { page, due: now });
             }
           }
@@ -303,7 +310,7 @@ export class CacheSyncEngine {
         }
       }
     } finally {
-      if (this.deps.durableMedia && !this.stopped) {
+      if (!this.deps.textOnly && this.deps.durableMedia && !this.stopped) {
         const allowed = new Set(
           cacheSyncDaytime(this.deps.now()) &&
             !this.sourceBlocked &&
@@ -344,6 +351,7 @@ export class CacheSyncEngine {
   }
   private async runMedia(onlyId?: string) {
     if (
+      this.deps.textOnly ||
       this.sourceBlocked ||
       this.deps.sourceStopped?.() ||
       this.mediaBusy ||

@@ -38,6 +38,30 @@ class ReadCacheTests(unittest.TestCase):
         self.assertEqual(item['date_published'], '2026-10-11T05:27:00+00:00')
         self.assertEqual(self.database.read_bytes(), before)
 
+    def test_local_metadata_keeps_optional_fields_unknown_and_is_readonly(self):
+        before = self.database.read_bytes()
+        result = module.list_subscriptions(str(self.database))
+        self.assertEqual(result, [{'feedId': 'MP_WXS_1234567890', 'name': '测试公众号',
+                                  'feedUrl': '/feed/1234567890.json',
+                                  'checkTime': None, 'nextUpdateTime': None, 'paused': None}])
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_duplicate_identity_and_missing_database_fail_closed(self):
+        with closing(sqlite3.connect(self.database)) as db:
+            db.execute('INSERT INTO rsses VALUES(1234567890,?)', ('测试公众号',))
+            db.commit()
+        with self.assertRaisesRegex(ValueError, 'CACHE_LOCAL_IDENTITY_CONFLICT'):
+            module.list_subscriptions(str(self.database))
+        with self.assertRaisesRegex(ValueError, 'CACHE_LOCAL_READ_UNAVAILABLE'):
+            module.list_subscriptions(str(self.database.with_name('missing.db')))
+        self.assertFalse(self.database.with_name('missing.db').exists())
+
+    def test_uncommitted_source_changes_are_not_imported(self):
+        with closing(sqlite3.connect(self.database)) as writer:
+            writer.execute('UPDATE articles SET content=?', ('uncommitted',))
+            self.assertIn('正文', module.read(str(self.database), 'MP_WXS_1234567890', '测试公众号')['items'][0]['content_html'])
+            writer.rollback()
+
     def test_wrong_publisher_name_or_identity_is_rejected(self):
         with self.assertRaises(ValueError):
             module.read(str(self.database), 'MP_WXS_1234567890', '另一个号')

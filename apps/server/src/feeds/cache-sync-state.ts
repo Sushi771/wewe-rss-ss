@@ -38,6 +38,12 @@ export type CacheSyncFeedState = {
     | 'paused'
     | 'unavailable';
 };
+export type CacheMediaPause =
+  | 'blocked'
+  | 'disabled'
+  | 'night'
+  | 'metadata'
+  | 'local-cache-only';
 export const cacheSyncState = {
   enabled: false,
   signal: 'metadata' as 'metadata' | 'sqlite',
@@ -48,7 +54,7 @@ export const cacheSyncState = {
   metadataFailure: undefined as CacheFailureDiagnostic | undefined,
   feeds: [] as CacheSyncFeedState[],
   media: [] as AutomaticMediaSummary[],
-  mediaPause: undefined as string | undefined,
+  mediaPause: undefined as CacheMediaPause | undefined,
   mediaFailure: undefined as string | undefined,
 };
 export function cacheSyncStatus() {

@@ -11,7 +11,8 @@ import { PrismaClient } from '@prisma/client';
 import { CollectionService } from '../collection/collection.service';
 import { TrpcService } from '../trpc/trpc.service';
 import { createVerifiedSqliteBackup } from '../collection/sqlite-backup';
-import { cacheRevision } from './cache-sync-state';
+import { CacheSyncService } from './cache-sync.service';
+import { cacheRevision, cacheSyncState } from './cache-sync-state';
 import { ProviderPage } from '../collection/subscription-provider';
 import { canonicalArticleUrl } from '../collection/collection-format';
 jest.mock('../collection/sqlite-backup', () => ({
@@ -119,6 +120,203 @@ describe('cache delta through original SQLite merge', () => {
       path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)
     )
       await fs.rm(root, { recursive: true, force: true });
+  });
+  it('explicit local-only service preserves archived subsets, edited fields and unknown source state across resume', async () => {
+    const localId = 'MP_WXS_3234567890';
+    await prisma.feed.create({
+      data: {
+        id: localId,
+        mpName: 'local-only-fixture',
+        mpIntro: '',
+        mpCover: '',
+        collectionChannel: 'wechat2rss',
+        status: 1,
+        updateTime: 0,
+      },
+    });
+    const article = (mid: number) =>
+      canonicalArticleUrl(
+        `https://mp.weixin.qq.com/s?__biz=MzIzNDU2Nzg5MA==&mid=${mid}&idx=1`,
+      );
+    const archive = article(1),
+      existing = article(2),
+      fresh = article(3);
+    for (const identity of [archive, existing])
+      await prisma.article.create({
+        data: {
+          id: identity.id,
+          mpId: localId,
+          title: 'preserved title',
+          publishTime: 1760000000,
+          picUrl: 'data:image/png;base64,cHJlc2VydmVk',
+          sourceUrl: identity.url,
+          verifiedSourceUrl: identity.url,
+          contentHtml: '<p>saved edited text</p>',
+          metrics: '{"note":"preserve"}',
+          readCount: 42,
+        },
+      });
+    const before = await prisma.article.findMany({
+      where: { mpId: localId },
+      orderBy: { id: 'asc' },
+    });
+    await prisma.$executeRawUnsafe(
+      "UPDATE Wechat2RssSourceGate SET state='pending', token='synthetic-unknown', status=NULL WHERE id=1",
+    );
+    const gateBefore = await prisma.$queryRawUnsafe(
+      'SELECT * FROM Wechat2RssSourceGate',
+    );
+    await prisma.$executeRawUnsafe(
+      'INSERT INTO refresh_submission_claims(id,mp_id,state,reserved_at,previous_at,updated_at_ms) VALUES(?,?,?,?,?,?)',
+      'f'.repeat(64),
+      localId,
+      'unknown',
+      1794412800,
+      0,
+      1794412800000,
+    );
+    const claimsBefore = await prisma.$queryRawUnsafe(
+      'SELECT * FROM refresh_submission_claims',
+    );
+    const metadata = {
+      feedId: localId,
+      name: 'local-only-fixture',
+      feedUrl: '/feed/3234567890.json',
+      checkTime: null,
+      nextUpdateTime: null,
+      paused: null,
+    };
+    const snapshot: ProviderPage = {
+      articles: [
+        {
+          ...existing,
+          title: 'preserved title',
+          publishTime: 1760000000,
+          picUrl: '',
+          contentHtml: null,
+        },
+        {
+          ...fresh,
+          title: 'fresh',
+          publishTime: 1794412800,
+          picUrl: '',
+          contentHtml:
+            '<div class="rich_media_content"><p>fresh cached text</p><img src="https://mmbiz.qpic.cn/local-only.png"></div>',
+        },
+      ],
+      bodyMissing: 1,
+      imageBlocked: 0,
+      coverage: 'recent-window',
+      upstreamCount: 2,
+    };
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(Error('NETWORK_FORBIDDEN'));
+    const provider = jest
+      .spyOn(providerRegistry, 'wechat2RssProvider')
+      .mockImplementation(() => {
+        throw Error('PROVIDER_FORBIDDEN');
+      });
+    const listed = jest
+      .spyOn(localCache, 'listLocalWechat2RssCache')
+      .mockResolvedValue([metadata]);
+    const read = jest
+      .spyOn(localCache, 'readLocalWechat2RssCache')
+      .mockResolvedValue(snapshot);
+    const now = jest
+      .spyOn(Date, 'now')
+      .mockReturnValue(Date.parse('2026-11-12T08:00:00Z'));
+    const oldFlag = process.env.WECHAT2RSS_LOCAL_CACHE_SYNC;
+    process.env.WECHAT2RSS_LOCAL_CACHE_SYNC = '1';
+    let service: CacheSyncService | undefined;
+    const run = async () => {
+      service = new CacheSyncService(prisma as any, trpc);
+      jest.spyOn(service as any, 'startWatching').mockImplementation(() => {});
+      await (service as any).start();
+      await (service as any).engine.tick();
+    };
+    let save: jest.SpyInstance | undefined;
+    try {
+      // Fail one local import attempt, then restart/replay the committed snapshot.
+      save = jest
+        .spyOn(trpc, 'syncCachedWechat2RssPage')
+        .mockRejectedValueOnce(Error('SYNTHETIC_INTERRUPTION'));
+      await run();
+      service!.onModuleDestroy();
+      expect(
+        await prisma.article.findMany({
+          where: { mpId: localId },
+          orderBy: { id: 'asc' },
+        }),
+      ).toEqual(before);
+      await run();
+      service!.onModuleDestroy();
+      const after = await prisma.article.findMany({
+        where: { mpId: localId },
+        orderBy: { id: 'asc' },
+      });
+      expect(after).toHaveLength(3);
+      for (const original of before)
+        expect(after.find((row) => row.id === original.id)).toEqual(original);
+      expect(after.find((row) => row.id === fresh.id)?.contentHtml).toContain(
+        'fresh cached text',
+      );
+      expect(after.find((row) => row.id === fresh.id)?.contentHtml).toContain(
+        'https://mmbiz.qpic.cn/local-only.png',
+      );
+      const backups = (createVerifiedSqliteBackup as jest.Mock).mock.calls
+        .length;
+      await run();
+      service!.onModuleDestroy();
+      expect(
+        await prisma.article.findMany({
+          where: { mpId: localId },
+          orderBy: { id: 'asc' },
+        }),
+      ).toEqual(after);
+      expect((createVerifiedSqliteBackup as jest.Mock).mock.calls.length).toBe(
+        backups,
+      );
+      expect(
+        save.mock.calls.every((call) => call[3]?.fetchMedia === false),
+      ).toBe(true);
+      expect(cacheSyncState.mediaPause).toBe('local-cache-only');
+      expect(
+        await prisma.$queryRawUnsafe('SELECT * FROM Wechat2RssSourceGate'),
+      ).toEqual(gateBefore);
+      expect(
+        await prisma.$queryRawUnsafe('SELECT * FROM refresh_submission_claims'),
+      ).toEqual(claimsBefore);
+      const readsBeforeUnavailable = read.mock.calls.length;
+      listed.mockRejectedValueOnce(Error('CACHE_LOCAL_READ_UNAVAILABLE'));
+      await run();
+      service!.onModuleDestroy();
+      expect(read.mock.calls.length).toBe(readsBeforeUnavailable);
+      expect(cacheSyncState.metadataFailure?.failurePoint).toBe(
+        'metadata-read',
+      );
+      expect(
+        await prisma.article.findMany({
+          where: { mpId: localId },
+          orderBy: { id: 'asc' },
+        }),
+      ).toEqual(after);
+      expect(provider).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      save?.mockRestore();
+      service?.onModuleDestroy();
+      now.mockRestore();
+      listed.mockRestore();
+      read.mockRestore();
+      provider.mockRestore();
+      network.mockRestore();
+      if (oldFlag === undefined) delete process.env.WECHAT2RSS_LOCAL_CACHE_SYNC;
+      else process.env.WECHAT2RSS_LOCAL_CACHE_SYNC = oldFlag;
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='idle', token=NULL, status=NULL WHERE id=1",
+      );
+    }
   });
   it('saves real list identity, later fills body with original time, preserves metrics; no unchanged backup/revision', async () => {
     const request = jest
