@@ -149,7 +149,7 @@ jobs:
       - name: Install dependencies for the native full-main lifecycle fixture
         run: pnpm install --frozen-lockfile
       - name: Test real local-only main and exact native child family on Windows
-        run: node --test scripts/local-release/local-cache-native-family.test.cjs
+        run: node --test --test-concurrency=1 scripts/local-release/local-cache-native-family.test.cjs scripts/local-release/local-cache-temp-root.test.cjs
 
   lint-test:
     runs-on: ubuntu-latest

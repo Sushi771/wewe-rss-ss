@@ -36,7 +36,10 @@
   const root = reuse
     ? fs.realpathSync.native(process.argv[3])
     : fs.mkdtempSync(
-        path.join(require('node:os').tmpdir(), 'wewe-full-bootstrap-'),
+        path.join(
+          fs.realpathSync.native(require('node:os').tmpdir()),
+          'wewe-full-bootstrap-',
+        ),
       );
   assert.equal(
     path.dirname(root).toLowerCase(),
