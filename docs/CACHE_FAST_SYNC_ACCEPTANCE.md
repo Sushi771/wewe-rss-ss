@@ -83,7 +83,6 @@ Unix 持久只读连接每秒查询 `PRAGMA data_version`，只有版本变化�
 
 后续增量已增加 Node fs.watch 目录提示、只读提交快照与 1s 轮询校准，详见[目录事件与批量入库性能验收](CACHE_EVENT_SYNC_ACCEPTANCE.md)。100ms 仍是优化目标，不能保证；发现、入库、正文、图片及前端可见分别计时。原一致性备份、稳定身份和旧数据保护继续保留。
 
-
 ## 显式本地缓存正文模式（2026-11-12）
 
 `WECHAT2RSS_LOCAL_CACHE_SYNC=1` 配合原有 `WECHAT2RSS_ENABLED=1`、`WECHAT2RSS_CACHE_SYNC=1` 和本机绝对路径 `WECHAT2RSS_CACHE_DB`，令缓存同步服务只读本地 SQLite。未开启时原有 HTTP 缓存和媒体流程不变。此开关只约束缓存同步服务，不会解除来源安全门或改写原定时批次，也不是全局网络开关。
