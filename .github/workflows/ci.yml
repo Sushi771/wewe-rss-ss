@@ -70,10 +70,15 @@ jobs:
         with:
           node-version: 24
           cache: 'pnpm'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Test fresh cache reconciliation on synthetic SQLite
-        run: pnpm --filter server exec jest --runInBand src/feeds/cache-sync-engine.spec.ts src/feeds/cache-sync-storage.spec.ts
+        run: pnpm --filter server exec jest --runInBand src/collection/local-cache-reader.spec.ts src/feeds/cache-sync-engine.spec.ts src/feeds/cache-sync-storage.spec.ts
+      - name: Test real local-only Nest bootstrap and strict process family offline
+        run: node --test --test-concurrency=1 scripts/local-release/local-cache-full-bootstrap.test.cjs scripts/local-release/local-cache-family-contract.test.cjs
       - name: Test independent media lane and check server types
         run: |
           node --test scripts/offline-media-recovery.test.cjs
@@ -105,7 +110,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:TEMP = $fixtureTemp
           $env:TMP = $fixtureTemp
-          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/normal-start-claim-rebind.test.cjs scripts/local-release/prior-boot-restart.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
+          node --test --test-concurrency=1 scripts/local-release/space-budget.test.cjs scripts/local-release/startup-sqlite.test.cjs scripts/local-release/startup-audit.test.cjs scripts/local-release/runtime-policy.test.cjs scripts/local-release/lifecycle-regression.test.cjs scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/normal-start-claim-rebind.test.cjs scripts/local-release/prior-boot-restart.test.cjs scripts/local-release/lifecycle-error-chain.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs scripts/local-release/entry-budget.test.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s apps/server/scripts -p 'test_backup_space.py'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -138,6 +143,13 @@ jobs:
         run: node --test scripts/saved-media-cas.test.cjs
       - name: Test article layout repair and original-file preservation on Windows
         run: node --test scripts/repair-article-layout.test.cjs
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - name: Install dependencies for the native full-main lifecycle fixture
+        run: pnpm install --frozen-lockfile
+      - name: Test real local-only main and exact native child family on Windows
+        run: node --test scripts/local-release/local-cache-native-family.test.cjs
 
   lint-test:
     runs-on: ubuntu-latest
@@ -162,7 +174,7 @@ jobs:
         run: pnpm install
 
       - name: Test finite release generation and installation lifetimes offline
-        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/normal-start-claim-rebind.test.cjs scripts/local-release/prior-boot-restart.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs
+        run: node --test --test-concurrency=1 scripts/local-release/build-budget.test.cjs scripts/local-release/install-lifecycle.test.cjs scripts/local-release/release-scope.test.cjs scripts/local-release/scope-inventory.test.cjs scripts/local-release/private-inventory.test.cjs scripts/local-release/private-artifact-proof.test.cjs scripts/local-release/windows-release-references.test.cjs scripts/local-release/normal-start-claim-rebind.test.cjs scripts/local-release/prior-boot-restart.test.cjs scripts/local-release/lifecycle-error-chain.test.cjs scripts/local-release/scoped-publication.test.cjs scripts/local-release/host-write-boundaries.test.cjs
 
       - name: Format check
         run: pnpm fmt.check

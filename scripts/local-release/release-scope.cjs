@@ -2604,6 +2604,7 @@ function open(request, options = {}, boundOperation) {
       close(error, { transition = false } = {}) {
         if (closed) return;
         closed = true;
+        let closeError;
         try {
           owner();
           check(transition);
@@ -2627,17 +2628,37 @@ function open(request, options = {}, boundOperation) {
           prior.outputs = prior.outputs.filter((row) => present(row.path));
           prior.claim = null;
           save();
+        } catch (error) {
+          closeError = error;
+          throw error;
         } finally {
-          owner();
-          fs.unlinkSync(lock);
+          try {
+            owner();
+            fs.unlinkSync(lock);
+          } catch (cleanupError) {
+            throw failureChain(closeError, cleanupError);
+          }
         }
       },
     };
   } catch (error) {
-    owner();
-    fs.unlinkSync(lock);
+    try {
+      owner();
+      fs.unlinkSync(lock);
+    } catch (cleanupError) {
+      throw failureChain(error, cleanupError);
+    }
     throw error;
   }
+}
+// Preserve the original failure without weakening any cleanup refusal.
+function failureChain(primary, secondary) {
+  if (primary === undefined || primary === secondary) return secondary;
+  return new AggregateError(
+    [primary, secondary],
+    secondary?.message || 'RELEASE_SCOPE_FAILED',
+    { cause: primary },
+  );
 }
 function session() {
   return context.getStore();
@@ -2661,7 +2682,11 @@ function within(request, run, options) {
   try {
     result = context.run(lease, () => run(lease));
   } catch (error) {
-    lease.close(error, { transition: request.transition === true });
+    try {
+      lease.close(error, { transition: request.transition === true });
+    } catch (closeError) {
+      throw failureChain(error, closeError);
+    }
     throw error;
   }
   if (result && typeof result.then === 'function')
@@ -2671,7 +2696,11 @@ function within(request, run, options) {
         return value;
       },
       (error) => {
-        lease.close(error, { transition: request.transition === true });
+        try {
+          lease.close(error, { transition: request.transition === true });
+        } catch (closeError) {
+          throw failureChain(error, closeError);
+        }
         throw error;
       },
     );

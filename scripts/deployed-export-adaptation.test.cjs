@@ -18,6 +18,42 @@ const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
+test('error-retention inverse preserves complete original lifecycle sources and refuses every unknown delta', () => {
+  const fixtures = require('./fixtures/lifecycle-error-chain-compat.json');
+  assert.deepEqual(Object.keys(fixtures).sort(), [
+    'scripts/local-release/release-scope.cjs',
+    'scripts/local-release/restart.cjs',
+  ]);
+  for (const [file, fixture] of Object.entries(fixtures)) {
+    const source = read(file);
+    assert.equal(
+      fixture.baseCommit,
+      '07545272dcc53da01b38944ab285ae3339d5f3d6',
+    );
+    const restored = restoreLegacyWriter.restoreLifecycleErrors(file, source);
+    assert.equal(hash(restored), fixture.beforeSha256);
+    if (file.endsWith('/restart.cjs'))
+      assert.equal(
+        fixture.beforeSha256,
+        require('./fixtures/prior-boot-restart-compat.json')[file].afterSha256,
+      );
+    assert.equal(
+      restoreLegacyWriter.restoreLifecycleErrors(file, restored),
+      restored,
+    );
+    for (const changed of [
+      source + '// unknown delta\n',
+      ...fixture.hunks.map((h) => source.replace(h.after, h.before)),
+    ]) {
+      assert.notEqual(changed, source);
+      assert.throws(
+        () => restoreLegacyWriter.restoreLifecycleErrors(file, changed),
+        /exact reviewed lifecycle error-chain source/,
+      );
+    }
+  }
+});
+
 test('local-cache-only inverse retains old pins and rejects unknown adapter changes', () => {
   const reviewed = require('./fixtures/local-cache-only-compat.json');
   assert.deepEqual(Object.keys(reviewed).sort(), [
@@ -93,7 +129,10 @@ test('reviewed runtime family inverse preserves every historical pin and rejects
     file = 'scripts/local-release/restart.cjs';
   assert.deepEqual(Object.keys(fixtures), [file]);
   const reviewed = fixtures[file],
-    candidateSource = read(file),
+    candidateSource = restoreLegacyWriter.restoreLifecycleErrors(
+      file,
+      read(file),
+    ),
     source = restoreLegacyWriter.restorePriorBootRestart(file, candidateSource);
   assert.equal(
     reviewed.reviewedFromCommit,
@@ -163,7 +202,7 @@ test('reviewed prior-boot inverse preserves the original family pins and rejects
   const fixtures = require('./fixtures/prior-boot-restart-compat.json');
   assert.deepEqual(Object.keys(fixtures), [file]);
   const reviewed = fixtures[file],
-    source = read(file);
+    source = restoreLegacyWriter.restoreLifecycleErrors(file, read(file));
   assert.equal(
     reviewed.reviewedFromCommit,
     'fc58fd79f17620bcc429925da9890cb10f785868',
@@ -364,7 +403,10 @@ test('legacy writer additions cannot hide changed original admission or restart 
   const seams = require('./fixtures/legacy-writer-seams.json');
   for (const [file, entries] of Object.entries(seams))
     for (const seam of entries) {
-      const source = restoreLegacyWriter.restoreCompatible(file, read(file));
+      const source = restoreLegacyWriter.restoreCompatible(
+        file,
+        restoreLegacyWriter.restoreLifecycleErrors(file, read(file)),
+      );
       assert.equal(source.split(seam.after).length, 2);
       assert.throws(
         () =>

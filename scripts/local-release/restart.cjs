@@ -1,3 +1,12 @@
+// Preserve the original failure without weakening any cleanup refusal.
+function failureChain(primary, secondary) {
+  if (primary === undefined || primary === secondary) return secondary;
+  return new AggregateError(
+    [primary, secondary],
+    secondary?.message || 'RESTART_FAILED',
+    { cause: primary },
+  );
+}
 // 当前 schema 的 Windows 本机启动/重启。仅停止精确核验的本项目进程。
 const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
@@ -507,6 +516,7 @@ async function controlledRestartInner(options) {
     const ownedIdentities = new Map();
     let oldStopCheckpoint;
     let stopped = false;
+    let lifecycleError;
     let priorBootArchived = false,
       priorBootReceipt,
       priorBootLocks,
@@ -867,135 +877,160 @@ async function controlledRestartInner(options) {
       if (options.production) newChild.unref();
       return summary;
     } catch (error) {
-      if (newChild) {
-        const owned = ownedIdentities.get(newChild.pid);
-        let familyError;
-        if (
-          preserving?.processFamily &&
-          owned &&
-          newChild.exitCode === null &&
-          typeof newChild.signalCode !== 'string'
-        ) {
+      lifecycleError = error;
+      try {
+        if (newChild) {
+          const owned = ownedIdentities.get(newChild.pid);
+          let familyError;
+          if (
+            preserving?.processFamily &&
+            owned &&
+            newChild.exitCode === null &&
+            typeof newChild.signalCode !== 'string'
+          ) {
+            try {
+              require('./release-scope.cjs')
+                .session()
+                .bindPreservingChild(
+                  owned.identity,
+                  owned.packageId,
+                  owned.commandLine,
+                );
+            } catch (failure) {
+              familyError = failure;
+            }
+          }
+          let receipt;
           try {
-            require('./release-scope.cjs')
-              .session()
-              .bindPreservingChild(
-                owned.identity,
-                owned.packageId,
+            receipt = await stopOwned(newChild, owned?.identity);
+          } catch (stopError) {
+            throw failureChain(familyError, stopError);
+          }
+          // Cleanup may stop our exact spawned root, but a rejected family must
+          // never be adopted or grant a backup/fallback transition.
+          if (familyError) throw familyError;
+          if (preserving)
+            await confirmFamilyExit(
+              require('./release-scope.cjs').session(),
+              newChild.pid,
+              receipt || {
+                pid: newChild.pid,
+                stopped:
+                  newChild.exitCode !== null ||
+                  typeof newChild.signalCode === 'string',
+              },
+              owned,
+            );
+          if (owned)
+            require('./project-writer-gate.cjs').retireStoppedWriter(database, {
+              identity: owned.identity,
+              stopReceipt: receipt,
+              scopeLease: require('./release-scope.cjs').session(),
+            });
+          else if (
+            fs.existsSync(
+              require('./project-writer-gate.cjs').binding(database).file,
+            )
+          )
+            throw Error('PROJECT_WRITER_BOUNDARY_UNPROVEN');
+        }
+        if (oldStopCheckpoint)
+          require('./project-writer-gate.cjs').retireStoppedWriter(
+            database,
+            oldStopCheckpoint,
+          );
+        if (stopped || (priorBootArchived && !priorBootReleaseFailed)) {
+          try {
+            fallbackChild = start(
+              previous,
+              previousManifest,
+              'previous-fallback',
+            );
+            await waitReady(port, fallbackChild);
+            const fallbackIdentity = processIdentity(
+              'Snapshot',
+              fallbackChild.pid,
+              port,
+            );
+            if (preserving) {
+              const owned = ownedIdentities.get(fallbackChild.pid);
+              await sealFamily(
+                require('./release-scope.cjs').session(),
+                fallbackIdentity,
+                previousManifest.id,
                 owned.commandLine,
               );
-          } catch (failure) {
-            familyError = failure;
-          }
-        }
-        const receipt = await stopOwned(newChild, owned?.identity);
-        // Cleanup may stop our exact spawned root, but a rejected family must
-        // never be adopted or grant a backup/fallback transition.
-        if (familyError) throw familyError;
-        if (preserving)
-          await confirmFamilyExit(
-            require('./release-scope.cjs').session(),
-            newChild.pid,
-            receipt || {
-              pid: newChild.pid,
-              stopped:
-                newChild.exitCode !== null ||
-                typeof newChild.signalCode === 'string',
-            },
-            owned,
-          );
-        if (owned)
-          require('./project-writer-gate.cjs').retireStoppedWriter(database, {
-            identity: owned.identity,
-            stopReceipt: receipt,
-            scopeLease: require('./release-scope.cjs').session(),
-          });
-        else if (
-          fs.existsSync(
-            require('./project-writer-gate.cjs').binding(database).file,
-          )
-        )
-          throw Error('PROJECT_WRITER_BOUNDARY_UNPROVEN');
-      }
-      if (oldStopCheckpoint)
-        require('./project-writer-gate.cjs').retireStoppedWriter(
-          database,
-          oldStopCheckpoint,
-        );
-      if (stopped || (priorBootArchived && !priorBootReleaseFailed)) {
-        try {
-          fallbackChild = start(
-            previous,
-            previousManifest,
-            'previous-fallback',
-          );
-          await waitReady(port, fallbackChild);
-          const fallbackIdentity = processIdentity(
-            'Snapshot',
-            fallbackChild.pid,
-            port,
-          );
-          if (preserving) {
-            const owned = ownedIdentities.get(fallbackChild.pid);
-            await sealFamily(
-              require('./release-scope.cjs').session(),
-              fallbackIdentity,
-              previousManifest.id,
-              owned.commandLine,
-            );
-          }
-          verifyNewWriter(fallbackIdentity, previous, previousManifest);
-          releasePriorBootLocks();
-          if (options.production)
-            await writeActiveReleaseAsync(previous, { recovery: true });
-          const summary = {
-            ...(schemaProof ? { schemaProof } : {}),
-            passed: options.rehearsal && options.injectFailure === true,
-            mode: options.production ? 'production' : 'rehearsal',
-            action: options.mode,
-            audit,
-            database,
-            finalBackup: finalBackup?.backup,
-            oldStopped: stopped,
-            ...(priorBoot
-              ? { oldExitReason: 'owner-from-prior-boot', priorBootReceipt }
-              : {}),
-            rollbackUsed: true,
-            failure: error.message,
-            fallbackIdentity,
-            databaseRestored: false,
-          };
-          writeJson(path.join(audit, 'summary.json'), summary);
-          if (options.production) fallbackChild.unref();
-          if (options.production) throw error;
-          return summary;
-        } catch (fallbackError) {
-          if (fallbackError !== error)
-            writeJson(path.join(audit, 'fallback-failure.json'), {
+            }
+            verifyNewWriter(fallbackIdentity, previous, previousManifest);
+            releasePriorBootLocks();
+            if (options.production)
+              await writeActiveReleaseAsync(previous, { recovery: true });
+            const summary = {
+              ...(schemaProof ? { schemaProof } : {}),
+              passed: options.rehearsal && options.injectFailure === true,
+              mode: options.production ? 'production' : 'rehearsal',
+              action: options.mode,
+              audit,
+              database,
+              finalBackup: finalBackup?.backup,
+              oldStopped: stopped,
+              ...(priorBoot
+                ? { oldExitReason: 'owner-from-prior-boot', priorBootReceipt }
+                : {}),
+              rollbackUsed: true,
               failure: error.message,
-              fallbackFailure: fallbackError.message,
+              fallbackIdentity,
               databaseRestored: false,
-            });
-          throw fallbackError;
+            };
+            writeJson(path.join(audit, 'summary.json'), summary);
+            if (options.production) fallbackChild.unref();
+            if (options.production) throw error;
+            lifecycleError = undefined;
+            return summary;
+          } catch (fallbackError) {
+            if (fallbackError !== error) {
+              try {
+                writeJson(path.join(audit, 'fallback-failure.json'), {
+                  failure: error.message,
+                  fallbackFailure: fallbackError.message,
+                  databaseRestored: false,
+                });
+              } catch (diagnosticError) {
+                throw failureChain(fallbackError, diagnosticError);
+              }
+            }
+            throw fallbackError;
+          }
         }
+        writeJson(path.join(audit, 'failure.json'), {
+          failure: error.message,
+          oldStopped: false,
+          databaseRestored: false,
+        });
+        throw error;
+      } catch (cleanupError) {
+        lifecycleError = failureChain(error, cleanupError);
+        throw lifecycleError;
       }
-      writeJson(path.join(audit, 'failure.json'), {
-        failure: error.message,
-        oldStopped: false,
-        databaseRestored: false,
-      });
-      throw error;
     } finally {
-      releasePriorBootLocks();
-      if (options.rehearsal)
-        for (const child of [oldChild, newChild, fallbackChild])
-          await stopOwned(child);
+      try {
+        releasePriorBootLocks();
+        if (options.rehearsal)
+          for (const child of [oldChild, newChild, fallbackChild])
+            await stopOwned(child);
+      } catch (cleanupError) {
+        throw failureChain(lifecycleError, cleanupError);
+      }
     }
   } catch (error) {
     artifactError = error;
     throw error;
   } finally {
-    artifacts?.finish(artifactError);
+    try {
+      artifacts?.finish(artifactError);
+    } catch (cleanupError) {
+      throw failureChain(artifactError, cleanupError);
+    }
   }
 }
 

@@ -18,6 +18,11 @@ for (const failure of [
   'health',
   'active-release',
   'budget-release',
+  'health-family',
+  'health-family-stop',
+  'health-fallback-diagnostic',
+  'backup-diagnostic',
+  'health-final-lock',
 ]) {
   test('prior-boot restart ordering and fallback: ' + failure, async () => {
     const base = fs.realpathSync.native(
@@ -111,6 +116,12 @@ for (const failure of [
       },
       bindPreservingChild() {
         events.push('bind');
+        if (
+          failure.startsWith('health-family') &&
+          events.includes('candidate-start') &&
+          events.filter((v) => v === 'bind').length > 1
+        )
+          throw Error('synthetic-unknown-family');
       },
       sealPreservingProcessFamily() {
         events.push('seal');
@@ -169,6 +180,13 @@ for (const failure of [
       cleanEnvironment: (v) => v,
       inside: (r, p) => p.startsWith(r + path.sep),
       writeJson(p, v) {
+        if (
+          (failure === 'backup-diagnostic' &&
+            path.basename(p) === 'failure.json') ||
+          (failure === 'health-fallback-diagnostic' &&
+            path.basename(p) === 'fallback-failure.json')
+        )
+          throw Error('synthetic-diagnostic');
         if (path.basename(p) === 'summary.json') summary = v;
         fs.writeFileSync(p, JSON.stringify(v));
       },
@@ -183,7 +201,7 @@ for (const failure of [
           events.push('backup');
           assert.equal(held.size, 0);
           assert.equal(fs.readFileSync(marker, 'utf8'), oldRaw);
-          if (failure === 'backup') throw Error('synthetic-backup');
+          if (failure.startsWith('backup')) throw Error('synthetic-backup');
           const backup = path.join(base, 'backup.db');
           fs.copyFileSync(database, backup);
           return JSON.stringify({
@@ -214,6 +232,8 @@ for (const failure of [
             assert(held.has(p));
             held.delete(p);
             if (
+              (failure === 'health-final-lock' &&
+                p.endsWith('.active-release.lock')) ||
               (failure === 'active-release' &&
                 p.endsWith('.active-release.lock')) ||
               (failure === 'budget-release' && p.endsWith('.build-budget.lock'))
@@ -257,12 +277,18 @@ for (const failure of [
             action === 'Port' ? [] : identity(pid),
           waitReady: async (_port, child) => {
             if (
-              failure === 'health' &&
+              failure === 'health-fallback-diagnostic' &&
+              children.get(child.pid).exe.includes('current')
+            )
+              throw Error('synthetic-fallback-health');
+            if (
+              failure.startsWith('health') &&
               children.get(child.pid).exe.includes('candidate')
             )
               throw Error('synthetic-health');
           },
           stopOwned: async (child) => {
+            if (failure === 'health-family-stop') throw Error('synthetic-stop');
             if (child) {
               child.exitCode = 0;
               events.push('stop-new');
@@ -314,7 +340,35 @@ for (const failure of [
         assert.equal(result.oldStopped, false);
         assert.equal(result.oldExitReason, 'owner-from-prior-boot');
         assert.equal(result.priorBootReceipt.leaseSha256, sha(oldRaw));
-      } else await assert.rejects(run);
+      } else
+        await assert.rejects(run, (error) => {
+          const messages = [];
+          const visit = (e) => {
+            messages.push(e.message);
+            for (const inner of e.errors || []) visit(inner);
+          };
+          visit(error);
+          if (failure.startsWith('health-'))
+            assert(messages.includes('synthetic-health'), messages.join('|'));
+          if (failure.startsWith('health-family')) {
+            assert(messages.includes('synthetic-unknown-family'));
+            assert(
+              !events.includes('fallback-start'),
+              'unknown family must still deny fallback',
+            );
+          }
+          if (failure === 'health-family-stop')
+            assert(messages.includes('synthetic-stop'));
+          if (failure.endsWith('diagnostic'))
+            assert(messages.includes('synthetic-diagnostic'));
+          if (failure === 'backup-diagnostic')
+            assert(messages.includes('synthetic-backup'));
+          if (failure === 'health-fallback-diagnostic')
+            assert(messages.includes('synthetic-fallback-health'));
+          if (failure === 'health-final-lock')
+            assert(messages.includes('synthetic-release'));
+          return true;
+        });
       assert.equal(held.size, 0);
       assert.equal(
         new Set(attempts).size,

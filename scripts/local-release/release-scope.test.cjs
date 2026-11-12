@@ -3806,3 +3806,101 @@ test('empty install recovery: explicit lease feeds normal installPair with nine 
     assert(saved.outputs[0].complete);
     assert(fs.readFileSync(x.adopted).equals(x.origin));
   }));
+
+for (const asynchronous of [false, true]) {
+  for (const failure of ['none', 'body', 'close', 'both']) {
+    test(`within preserves failures: async=${asynchronous}, failure=${failure}`, () =>
+      fixture(async (f) => {
+        const bodyError = new Error('synthetic-body');
+        const closeError = new Error('synthetic-close');
+        const run = () =>
+          scope.within(
+            { kind: 'build', root: f.build, reserveBytes: 4096 },
+            (lease) => {
+              const close = lease.close.bind(lease);
+              lease.close = (...args) => {
+                close(...args);
+                if (['close', 'both'].includes(failure)) throw closeError;
+              };
+              if (['body', 'both'].includes(failure)) {
+                if (asynchronous) return Promise.reject(bodyError);
+                throw bodyError;
+              }
+              return asynchronous ? Promise.resolve(42) : 42;
+            },
+            f.options(),
+          );
+        if (failure === 'none') assert.equal(await run(), 42);
+        else {
+          const check = (error) => {
+            if (failure === 'both') {
+              assert(error instanceof AggregateError);
+              assert.deepEqual(error.errors, [bodyError, closeError]);
+              assert.equal(error.cause, bodyError);
+            } else
+              assert.equal(error, failure === 'body' ? bodyError : closeError);
+            return true;
+          };
+          if (asynchronous) await assert.rejects(run, check);
+          else assert.throws(run, check);
+        }
+      }));
+  }
+}
+
+test('close check and owned-lock cleanup failures both remain visible', () =>
+  fixture((f) => {
+    const lease = f.open();
+    f.facts.complete = false;
+    const originalUnlink = fs.unlinkSync;
+    const cleanupError = new Error('synthetic-unlink');
+    fs.unlinkSync = () => {
+      throw cleanupError;
+    };
+    try {
+      assert.throws(
+        () => lease.close(),
+        (error) => {
+          assert(error instanceof AggregateError);
+          assert.match(error.errors[0].message, /REFERENCE_QUERY_INCOMPLETE/);
+          assert.equal(error.errors[1], cleanupError);
+          assert.equal(error.cause, error.errors[0]);
+          return true;
+        },
+      );
+    } finally {
+      fs.unlinkSync = originalUnlink;
+    }
+  }));
+
+for (const cleanup of [null, undefined, 'primitive', 0]) {
+  for (const asynchronous of [false, true]) {
+    test(`within preserves non-Error cleanup: ${String(cleanup)}, async=${asynchronous}`, () =>
+      fixture(async (f) => {
+        const primary = new Error('synthetic-primary');
+        const run = () =>
+          scope.within(
+            { kind: 'build', root: f.build, reserveBytes: 4096 },
+            (lease) => {
+              const close = lease.close.bind(lease);
+              lease.close = (...args) => {
+                close(...args);
+                throw cleanup;
+              };
+              if (asynchronous) return Promise.reject(primary);
+              throw primary;
+            },
+            f.options(),
+          );
+        const check = (error) => {
+          assert(error instanceof AggregateError);
+          assert.deepEqual(error.errors, [primary, cleanup]);
+          assert.equal(error.cause, primary);
+          assert.equal(error.message, 'RELEASE_SCOPE_FAILED');
+          return true;
+        };
+        if (asynchronous) await assert.rejects(run, check);
+        else assert.throws(run, check);
+      }));
+  }
+}
