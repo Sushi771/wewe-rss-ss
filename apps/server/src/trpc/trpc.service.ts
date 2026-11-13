@@ -1,5 +1,10 @@
 import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
+import {
+  refreshPreparationFailure,
+  refreshPreparationOutcome,
+  RefreshPreparationStage,
+} from '../collection/refresh-preparation-failure';
 import { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';
 import {
   saveRefreshResponseReceipt,
@@ -661,9 +666,14 @@ export class TrpcService {
         stopBatch: false,
         message: 'Existing work holds collection admission; update not sent.',
       });
-    const feed = await this.prismaService.feed.findUnique({
-      where: { id: feedId },
-    });
+    let feed: Feed | null;
+    try {
+      feed = await this.prismaService.feed.findUnique({
+        where: { id: feedId },
+      });
+    } catch (error) {
+      return noRequest(refreshPreparationOutcome(error, 'feed-lookup'));
+    }
     if (
       !feed ||
       feed.status !== 1 ||
@@ -704,6 +714,7 @@ export class TrpcService {
         this.activeSubscriptionAdds.delete('wechat2rss:add');
       }
     };
+    let preparationStage: RefreshPreparationStage = 'claim-read';
     try {
       const claimKey = waveKey.split('/')[0];
       const prior = await readRefreshSubmission(
@@ -715,7 +726,9 @@ export class TrpcService {
         release();
         return noRequest(prior);
       }
+      preparationStage = 'provider-config';
       const provider = wechat2RssProvider();
+      preparationStage = 'account-status';
       const account = await provider.checkAccountStatus();
       if (account.challenged || !account.available) {
         release();
@@ -728,12 +741,14 @@ export class TrpcService {
           message: 'Account restricted; prepared wave will not be submitted.',
         });
       }
+      preparationStage = 'subscription-check';
       const submit = await provider.prepareRefreshSubscription(
         feedId,
         automatic,
         (response) => saveRefreshResponseReceipt(ticket, response),
       );
       const now = Math.floor(Date.now() / 1000);
+      preparationStage = 'reservation';
       const reserved = await reserveRefreshSubmission(
         this.prismaService,
         feed,
@@ -792,7 +807,11 @@ export class TrpcService {
       };
     } catch (error) {
       release();
-      const code = (error as Error)?.message;
+      const preparationFailure = refreshPreparationFailure(
+        error,
+        preparationStage,
+      );
+      const code = preparationFailure.code;
       if (
         [
           'WECHAT2RSS_SUBSCRIPTION_PAUSED',
@@ -805,6 +824,7 @@ export class TrpcService {
           submissionUnknown: false,
           stopBatch: false,
           code: 'SUBSCRIPTION_PAUSED',
+          preparationFailure,
           message: 'Upstream subscription paused or removed; update not sent.',
         });
       if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED')
@@ -813,19 +833,10 @@ export class TrpcService {
           accepted: false,
           submissionUnknown: false,
           stopBatch: false,
+          preparationFailure,
           message: 'Automatic window closed; update not sent.',
         });
-      return noRequest({
-        state: code === 'WECHAT2RSS_RATE_LIMITED' ? 'blocked' : 'failed',
-        accepted: false,
-        submissionUnknown: false,
-        retryable: code !== 'WECHAT2RSS_RATE_LIMITED',
-        stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',
-        sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',
-        restrictionKind:
-          code === 'WECHAT2RSS_RATE_LIMITED' ? 'rate-limit' : undefined,
-        message: 'Preparation failed before update request.',
-      });
+      return noRequest(refreshPreparationOutcome(error, preparationStage));
     }
   }
   private async reconcileUnreservedRefresh(

@@ -6,6 +6,31 @@ const runtimeFamilies = require('./fixtures/runtime-family-compat.json');
 const priorBootRestarts = require('./fixtures/prior-boot-restart-compat.json');
 const sha = (source) =>
   crypto.createHash('sha256').update(source).digest('hex');
+// Test-only inverse of the exact preparation diagnostic delta. Historical
+// source/admission pins still apply after restoring the complete 922 source.
+function restoreRefreshPreparation(file, source) {
+  const reviewed = require('./fixtures/refresh-preparation-compat.json')[file];
+  if (!reviewed || sha(source) === reviewed.beforeSha256) return source;
+  assert.equal(
+    sha(source),
+    reviewed.afterSha256,
+    'exact reviewed preparation diagnostic source: ' + file,
+  );
+  for (const hunk of reviewed.hunks) {
+    assert.equal(
+      source.split(hunk.after).length,
+      2,
+      'exact reviewed preparation diagnostic hunk: ' + file,
+    );
+    source = source.replace(hunk.after, hunk.before);
+  }
+  assert.equal(
+    sha(source),
+    reviewed.beforeSha256,
+    'unchanged pre-preparation-diagnostic source: ' + file,
+  );
+  return source;
+}
 // Test-only inverse of the exact error-retention delta. No admission, family,
 // reference or historical source pin is relaxed by this comparison layer.
 function restoreLifecycleErrors(file, source) {
@@ -239,6 +264,7 @@ module.exports = function restoreLegacyWriter(file, source) {
     );
     source = source.replace(added, '');
   }
+  source = restoreRefreshPreparation(file, source);
   source = restoreLocalCacheOnly(file, source);
   source = restoreCollectionIntegration(file, source);
   source = restoreCompatible(file, source);
@@ -276,3 +302,4 @@ module.exports.restorePriorBootRestart = restorePriorBootRestart;
 
 module.exports.restoreLocalCacheOnly = restoreLocalCacheOnly;
 module.exports.restoreLifecycleErrors = restoreLifecycleErrors;
+module.exports.restoreRefreshPreparation = restoreRefreshPreparation;

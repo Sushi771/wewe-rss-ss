@@ -16,6 +16,43 @@ const { restoreXhsReaderRoute } = require('./xhs-reader-removal.cjs');
 const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+test('preparation diagnostics inverse retains every old pin and rejects each unknown hunk', () => {
+  const fixtures = require('./fixtures/refresh-preparation-compat.json');
+  assert.deepEqual(Object.keys(fixtures), [
+    'apps/server/src/trpc/trpc.service.ts',
+  ]);
+  for (const [file, fixture] of Object.entries(fixtures)) {
+    assert.equal(
+      fixture.baseCommit,
+      '9221b62c0757ce5c45fcd78ba94b5addc211949a',
+    );
+    assert.equal(
+      fixture.beforeSha256,
+      require('./fixtures/collection-integration-compat.json')[file]
+        .afterSha256,
+    );
+    const source = read(file);
+    const restored = restoreLegacyWriter.restoreRefreshPreparation(
+      file,
+      source,
+    );
+    assert.equal(hash(restored), fixture.beforeSha256);
+    assert.equal(
+      restoreLegacyWriter.restoreRefreshPreparation(file, restored),
+      restored,
+    );
+    for (const changed of [
+      source + '// unknown delta\n',
+      ...fixture.hunks.map((h) => source.replace(h.after, h.before)),
+    ]) {
+      assert.notEqual(changed, source);
+      assert.throws(
+        () => restoreLegacyWriter.restoreRefreshPreparation(file, changed),
+        /exact reviewed preparation diagnostic source/,
+      );
+    }
+  }
+});
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
 test('error-retention inverse preserves complete original lifecycle sources and refuses every unknown delta', () => {
