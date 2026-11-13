@@ -103,13 +103,23 @@ export class XhsScheduledClock {
     if (this.accepting.has(round.intentKey)) return;
     this.accepting.add(round.intentKey);
     try {
-      await this.enqueue(round.label, round.intentKey);
+      const outcome = await this.enqueue(round.label, round.intentKey);
       await this.stateChange(async () => {
         const current = JSON.parse(await fs.readFile(file, 'utf8'));
         if (current.pending?.intentKey === round.intentKey)
           await persist({
             version: 1,
             notBefore: Math.max(current.notBefore, round.due + 1),
+            ...(outcome &&
+            typeof outcome === 'object' &&
+            (outcome as { outcome?: string }).outcome === 'settled-incomplete'
+              ? {
+                  lastSettled: {
+                    round: round.label,
+                    outcome: 'settled-incomplete',
+                  },
+                }
+              : {}),
           });
       });
     } finally {

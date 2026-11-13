@@ -1,4 +1,15 @@
 import {
+  prepareKnownAuthProfile,
+  runKnownAuthProfile,
+  type KnownProfileInput,
+} from './xhs-known-auth-profile-probe';
+import {
+  prepareKnownAuthResponseReview,
+  confirmKnownAuthResponseReview,
+  refreshKnownAuthAfterCommit,
+  type KnownAuthTarget,
+} from './xhs-known-auth-response-review';
+import {
   prepareFullHistoryNarrowReview,
   confirmFullHistoryNarrowReview,
   type FullHistoryNarrowInput,
@@ -234,14 +245,20 @@ export class XhsWholeCreatorService implements OnModuleInit {
   private write<T>(
     fn: (tx: Prisma.TransactionClient) => Promise<T>,
     expectedBytes = 2_000_000,
+    transactionTimeout?: number,
   ) {
     return incrementalWrite(this.db, expectedBytes, () =>
       sqliteWrites.write(async () => {
         await assertIncrementalWriteAdmission();
-        return this.db.$transaction(async (tx) => {
-          await assertIncrementalTransaction(tx);
-          return fn(tx);
-        });
+        return this.db.$transaction(
+          async (tx) => {
+            await assertIncrementalTransaction(tx);
+            return fn(tx);
+          },
+          transactionTimeout === undefined
+            ? undefined
+            : { timeout: transactionTimeout },
+        );
       }),
     );
   }
@@ -1782,6 +1799,292 @@ export class XhsWholeCreatorService implements OnModuleInit {
       authenticationVerified: false,
       maxListPages: 1,
     };
+  }
+  private assertKnownAuthIdle(binding: string, own = false) {
+    if (
+      this.runtime.knownAuthSessionForReview().binding !== binding ||
+      this.starting.size > (own ? 1 : 0) ||
+      this.subscriptions.hasLocalSourceWork() ||
+      this.runtime.hasActiveSourceSessions()
+    )
+      throw Error('SOURCE_WORK_NOT_IDLE');
+  }
+  /** Called only by explicit local encrypted-connect / restore HTTP actions.
+   * Startup restore never calls this. No polling, retry, timer or wider grant. */
+  async verifyKnownAuthenticationAfterConnection() {
+    let verification: 'not-applicable' | 'profile-verified' | 'paused' =
+      'not-applicable';
+    try {
+      await this.readyForMutation();
+      const binding = this.runtime.knownAuthSessionForReview().binding;
+      this.assertKnownAuthIdle(binding);
+      if (this.starting.size || this.running.size || this.reviewing.size)
+        throw Error('SOURCE_WORK_NOT_IDLE');
+      this.starting.add('known-auth-connection-verification');
+      try {
+        verification = await sqliteWrites.knownAuthMetadataWrite(async () => {
+          this.assertKnownAuthIdle(binding, true);
+          const risk = await this.db.$queryRawUnsafe<any[]>(
+            "SELECT state,code,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'",
+          );
+          if (
+            risk.length !== 1 ||
+            risk[0].state !== 'blocked' ||
+            risk[0].code !== 'XHS_SOURCE_AUTHENTICATION_BLOCKED'
+          )
+            return 'not-applicable' as const;
+          const candidates = await this.db.$queryRawUnsafe<any[]>(
+            `SELECT DISTINCT t.id,t.creator_id,t.document FROM xhs_subscription_tasks t
+             JOIN xhs_unbound_owner_requests q ON q.task_id=t.id AND q.creator_id=t.creator_id
+             WHERE t.state='blocked' AND t.updated_at>=? AND q.phase='profile'
+             AND q.logical_target='profile:1' AND q.outcome='response-received'`,
+            BigInt(risk[0].updated_at),
+          );
+          const matching = candidates.filter(
+            (t) =>
+              JSON.parse(t.document).code ===
+              'XHS_SOURCE_AUTHENTICATION_BLOCKED',
+          );
+          if (matching.length !== 1) return 'paused' as const;
+          const input = {
+            taskId: matching[0].id,
+            creatorId: matching[0].creator_id,
+            authReviewId: '',
+            authDigest: '',
+          };
+          const plan = await this.db.$transaction((tx) =>
+            prepareKnownAuthProfile(tx, input, this.runtime, false, true),
+          );
+          this.runtime.holdKnownAuthPause(binding);
+          const result = await runKnownAuthProfile(
+            // Native vault checks start Windows helpers inside the atomic
+            // checkpoint. Keep every check, with a bounded budget for this path
+            // only; ordinary writes retain Prisma's default transaction timeout.
+            (work) => this.write((tx) => work(tx), 2_000_000, 30000),
+            this.runtime,
+            input,
+            plan.digest,
+            true,
+            true,
+          );
+          if (result.state !== 'profile-saved' || !result.verifiedCommit)
+            return 'paused' as const;
+          // All durable profile/audit/clear facts committed; last step clears memory.
+          // The same exclusive coordinator remains held until this returns.
+          await this.runtime.refreshKnownAuthSession(
+            binding,
+            result.verifiedCommit.riskClearedAt,
+            true,
+          );
+          return 'profile-verified' as const;
+        });
+      } finally {
+        this.starting.delete('known-auth-connection-verification');
+      }
+    } catch {
+      // A connection/save may have succeeded. Never ask the client to retry a
+      // possibly consumed request or misreport it as a credential-save failure.
+      verification = 'paused';
+    }
+    return {
+      ...(await this.runtime.connectionStatus()),
+      authenticationRecovery: {
+        state: verification,
+        automaticRetry: false,
+        notesCollected: 0,
+        imagesCollected: 0,
+      },
+    };
+  }
+
+  /** Known response only. Never grants a round, changes budgets or dispatches. */
+  async prepareKnownAuthProfileProbe(input: KnownProfileInput) {
+    await this.readyForMutation();
+    this.assertKnownAuthIdle(this.runtime.knownAuthSessionForReview().binding);
+    const plan = await this.db.$transaction((tx) =>
+      prepareKnownAuthProfile(tx, input, this.runtime),
+    );
+    return {
+      ...input,
+      digest: plan.digest,
+      maxProfileRequests: 1,
+      automaticRetry: false,
+      sourceRequestsSent: 0,
+    };
+  }
+  async confirmKnownAuthProfileProbe(
+    input: KnownProfileInput & { digest: string; acknowledgedOneProfile: true },
+  ) {
+    await this.readyForMutation();
+    this.assertKnownAuthIdle(this.runtime.knownAuthSessionForReview().binding);
+    if (this.starting.size || this.running.size || this.reviewing.size)
+      throw Error('SOURCE_WORK_NOT_IDLE');
+    this.starting.add('known-auth-profile-probe');
+    try {
+      return await runKnownAuthProfile(
+        (work) => this.write((tx) => work(tx), 2_000_000, 30000),
+        this.runtime,
+        input,
+        input.digest,
+        input.acknowledgedOneProfile,
+      );
+    } finally {
+      this.starting.delete('known-auth-profile-probe');
+    }
+  }
+  async prepareKnownResponseAuthReview(input: KnownAuthTarget) {
+    await this.readyForMutation();
+    const binding = this.runtime.knownAuthSessionForReview().binding;
+    this.assertKnownAuthIdle(binding);
+    if (this.running.size || this.reviewing.size)
+      throw Error('SOURCE_WORK_NOT_IDLE');
+    await this.runtime.assertSafeKnownAuthSession(binding);
+    const target = { taskId: input.taskId, creatorId: input.creatorId };
+    const plan = await this.db.$transaction((tx) =>
+      prepareKnownAuthResponseReview(tx, target, this.runtime),
+    );
+    this.assertKnownAuthIdle(binding);
+    return {
+      digest: plan.digest,
+      sessionOrigin: plan.replacement.origin,
+      taskId: input.taskId,
+      creatorId: input.creatorId,
+      originalOutcome: plan.originalOutcome,
+      authenticationVerified: false,
+      sourceRequestsSent: 0,
+      newGrant: false,
+    };
+  }
+  async confirmKnownResponseAuthReview(
+    input: KnownAuthTarget & {
+      digest: string;
+      acknowledgedKnownResponseAuth: true;
+      confirmedSessionOrigin:
+        | 'fresh-replacement'
+        | 'user-confirmed-restored-saved-session';
+    },
+  ) {
+    await this.readyForMutation();
+    const binding = this.runtime.knownAuthSessionForReview().binding;
+    const idle = (own = false) => {
+      this.assertKnownAuthIdle(binding, own);
+      if (this.running.size || this.reviewing.size)
+        throw Error('SOURCE_WORK_NOT_IDLE');
+    };
+    idle();
+    this.starting.add('known-response-auth-review');
+    try {
+      let prepared: Awaited<ReturnType<typeof prepareKnownAuthResponseReview>>;
+      const target = { taskId: input.taskId, creatorId: input.creatorId };
+      const result = await sqliteWrites.knownAuthMetadataWrite(async () => {
+        idle(true);
+        await this.runtime.assertSafeKnownAuthSession(binding);
+        prepared = await this.db.$transaction((tx) =>
+          prepareKnownAuthResponseReview(tx, target, this.runtime),
+        );
+        if (
+          input.acknowledgedKnownResponseAuth !== true ||
+          prepared.digest !== input.digest ||
+          input.confirmedSessionOrigin !== prepared.replacement.origin
+        )
+          throw Error('PLAN_NOT_AUTHORIZED');
+        let committed:
+          | Awaited<ReturnType<typeof confirmKnownAuthResponseReview>>
+          | undefined;
+        try {
+          committed = await confirmKnownAuthResponseReview(
+            target,
+            input.digest,
+            {
+              knownAuthSessionForReview: () =>
+                this.runtime.knownAuthSessionForReview(),
+              protectedTransaction: (work) =>
+                this.write(async (tx) => {
+                  idle(true);
+                  return work(tx);
+                }),
+              assertQuiescent: async () => idle(true),
+              authorizePlan: async (plan) => {
+                if (
+                  input.acknowledgedKnownResponseAuth !== true ||
+                  plan.digest !== input.digest ||
+                  input.confirmedSessionOrigin !== plan.replacement.origin ||
+                  plan.replacement.binding !== binding
+                )
+                  throw Error('PLAN_NOT_AUTHORIZED');
+              },
+              assertPolicyInstalled: async (id, digest) => {
+                this.runtime.assertUnboundPolicyInstalled();
+                if (
+                  id !== prepared.policyId ||
+                  digest !== prepared.evidence.policyDigest
+                )
+                  throw Error('SCHEDULED_POLICY_CHANGED');
+              },
+              assertSafeRestorePolicy: () =>
+                this.runtime.assertSafeKnownAuthSession(binding),
+            },
+            BigInt(Date.now()),
+          );
+          // The SQLite writer coordinator stays held after COMMIT through the
+          // exact-risk-version/same-session memory refresh. No source request.
+          idle(true);
+          const clearVersion = committed.riskClearedAt;
+          await refreshKnownAuthAfterCommit(this.db, committed, {
+            knownAuthSessionForReview: () =>
+              this.runtime.knownAuthSessionForReview(),
+            refreshAfterAuthSessionReview: (value) =>
+              this.runtime.refreshKnownAuthSession(value, clearVersion),
+          });
+          return { ...committed, runtimeRestored: true };
+        } catch (error) {
+          // An acknowledged commit or an exact durable audit distinguishes
+          // refresh/ACK failure from rollback. Never repeat CAS or dispatch.
+          const records = await this.db
+            .$queryRawUnsafe<
+              Array<{ document: string }>
+            >('SELECT document FROM xhs_subscription_tasks WHERE id=? AND creator_id=?', target.taskId, target.creatorId)
+            .catch(() => []);
+          const audit =
+            records.length === 1
+              ? JSON.parse(records[0].document).knownResponseAuthReviews?.[0]
+              : undefined;
+          if (
+            committed ||
+            (audit?.id === 'known-auth-' + input.digest &&
+              audit.digest === prepared.digest &&
+              audit.stateDigest === prepared.stateDigest &&
+              audit.originalTaskRaw === prepared.evidence.task.document &&
+              audit.session?.binding === binding &&
+              audit.originalOutcome === 'response-received' &&
+              audit.authenticationVerified === false &&
+              audit.sourceRequestsSent === 0 &&
+              audit.newGrant === false)
+          )
+            return {
+              reviewId: committed?.reviewId ?? audit.id,
+              taskId: target.taskId,
+              originalOutcome: 'response-received' as const,
+              runtimeRestored: false,
+            };
+          throw error;
+        }
+      });
+      return {
+        reviewId: result.reviewId,
+        taskId: result.taskId,
+        originalOutcome: result.originalOutcome,
+        authenticationVerified: false,
+        sourceRequestsSent: 0,
+        newGrant: false,
+        state: result.runtimeRestored
+          ? 'confirmed-runtime-ready'
+          : 'committed-runtime-blocked',
+        doNotRetryConfirmation: !result.runtimeRestored,
+      };
+    } finally {
+      this.starting.delete('known-response-auth-review');
+    }
   }
   async confirmAuthSessionThreePageRound(input: {
     creatorIds: string[];

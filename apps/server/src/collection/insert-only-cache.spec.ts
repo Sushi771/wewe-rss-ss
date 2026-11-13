@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import * as registry from './provider-registry';
 import { promises as fs } from 'node:fs';
@@ -68,12 +69,12 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
   `;
   const insert = (page = makePage(), listOnly = true) =>
     tryInsertOnlyCachedPage(prisma, expected, page, listOnly);
-  const initSql = async (file: string) => {
+  const initSql = async (file: string, receiver: PrismaClient = prisma) => {
     const sql = await fs.readFile(file, 'utf8');
     for (const statement of splitSqliteStatements(sql)
       .map((s) => s.trim())
       .filter(Boolean))
-      await prisma.$executeRawUnsafe(statement);
+      await receiver.$executeRawUnsafe(statement);
   };
   beforeAll(async () => {
     directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wewe-insert-only-'));
@@ -93,10 +94,16 @@ describe('opt-in pure INSERT transaction (real isolated SQLite, zero external IO
       return next(params);
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const file = path.join(migrations, name, 'migration.sql');
-      if (await fs.stat(file).catch(() => null)) await initSql(file);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(directory, 'fixture.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          const file = path.join(migrations, name, 'migration.sql');
+          if (await fs.stat(file).catch(() => null))
+            await initSql(file, migrationClient);
+        }
+      },
+    );
     trpc = new TrpcService(
       prisma as any,
       { get: () => ({ url: '', updateDelayTime: 0 }) } as any,

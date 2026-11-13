@@ -7,19 +7,71 @@ const test = require('node:test'),
 const gate = require('./project-writer-gate.cjs');
 const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
 test.before(require('./writer-self.fixture.test.cjs').prepareWriterSelf);
-const source = fs
-  .readFileSync(path.join(__dirname, 'restart.cjs'), 'utf8')
-  .replace(/\r\n/g, '\n');
-const from = source.indexOf(
-    '      if(newChild){',
-    source.indexOf('} catch (error) {', source.indexOf('const baseline =')),
-  ),
-  to = source.indexOf('    } finally {\n      if (options.rehearsal)', from);
-assert(from > 0 && to > from);
+const source = fs.readFileSync(path.join(__dirname, 'restart.cjs'), 'utf8');
+function extractRestartCatch(value) {
+  const text = value.replace(/\r\n/g, '\n');
+  const baseline = text.indexOf('const baseline =');
+  const catching =
+    /\}\s*catch\s*\(\s*error\s*\)\s*\{(?=\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\))/.exec(
+      text.slice(baseline),
+    );
+  const caught = catching ? baseline + catching.index : -1;
+  const from = catching ? caught + catching[0].length : -1;
+  const ending =
+    /\}\s*finally\s*\{\s*try\s*\{\s*releasePriorBootLocks\s*\(\s*\)\s*;\s*if\s*\(\s*options\.rehearsal\s*\)/.exec(
+      text.slice(from),
+    );
+  const to = ending ? from + ending.index : -1;
+  assert(baseline > 0 && caught > baseline && from > caught && to > from);
+  const body = text.slice(from, to);
+  assert.match(
+    body,
+    /^\s*lifecycleError\s*=\s*error\s*;\s*try\s*\{\s*if\s*\(\s*newChild\s*\)/,
+  );
+  assert.match(
+    body,
+    /\}\s*catch\s*\(\s*cleanupError\s*\)\s*\{\s*lifecycleError\s*=\s*failureChain\s*\(\s*error\s*,\s*cleanupError\s*\)\s*;\s*throw\s+lifecycleError\s*;\s*\}\s*$/,
+  );
+  return body;
+}
+// Execute the current pure helper too, not a reimplementation or historical catch.
+const helper = /^function failureChain\([^]*?^\}/m.exec(
+  source.replace(/\r\n/g, '\n'),
+);
+assert(helper);
+const failureChain = new Function('return (' + helper[0] + ')')();
 const runCatch = new Function(
   'ctx',
-  'return(async()=>{with(ctx){' + source.slice(from, to) + '}})()',
+  'return(async()=>{with(ctx){' + extractRestartCatch(source) + '}})()',
 );
+test('restart catch extraction tolerates formatting but requires exact orchestration anchors', () => {
+  const expected = extractRestartCatch(source).replace(/\s/g, '');
+  for (const value of [
+    source.replace(/\r?\n/g, '\r\n'),
+    source.replace(/if\s*\(newChild\)\s*\{/, 'if(newChild){'),
+  ])
+    assert.equal(extractRestartCatch(value).replace(/\s/g, ''), expected);
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replace('const baseline =', 'const changedBaseline ='),
+    ),
+  );
+  for (const [before, after] of [
+    ['lifecycleError = error;', 'lifecycleError = undefined;'],
+    ['failureChain(error, cleanupError)', 'failureChain(cleanupError, error)'],
+  ])
+    assert.throws(() => extractRestartCatch(source.replace(before, after)));
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replaceAll('options.rehearsal', 'options.changedRehearsal'),
+    ),
+  );
+  assert.throws(() =>
+    extractRestartCatch(
+      source.replaceAll('releasePriorBootLocks()', 'changedReleaseLocks()'),
+    ),
+  );
+});
 for (const kind of [
   'after-stop-backup-failure',
   'bound-candidate-health-failure',
@@ -97,6 +149,10 @@ for (const kind of [
           ],
     );
     const ctx = {
+      failureChain,
+      lifecycleError: undefined,
+      confirmFamilyExit: require('./restart.cjs').confirmFamilyExit,
+      sealFamily: require('./restart.cjs').sealFamily,
       newChild,
       ownedIdentities,
       oldStopCheckpoint: {
@@ -106,6 +162,17 @@ for (const kind of [
       },
       error: Error(kind),
       stopped: true,
+      // This fixture exercises the original live-stop branch. The new typed
+      // branch is covered by prior-boot-restart.test.cjs, not enabled here.
+      priorBoot: false,
+      priorBootArchived: false,
+      priorBootReleaseFailed: false,
+      verifyNewWriter() {
+        assert.equal(ctx.priorBoot, false);
+      },
+      releasePriorBootLocks() {
+        assert.equal(ctx.priorBoot, false);
+      },
       preserving: true,
       stopOwned: async (child) => {
         if (child) child.exitCode = 1;
@@ -132,6 +199,8 @@ for (const kind of [
       start() {
         starts++;
         fallbackLease = gate.acquireWriter(database);
+        // The real start() records the owned command before returning its child.
+        ownedIdentities.set(33333, { commandLine: 'synthetic fallback' });
         return { pid: 33333 };
       },
       waitReady: async () => {},

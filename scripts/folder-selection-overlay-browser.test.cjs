@@ -82,15 +82,30 @@ createRoot(document.getElementById('root')).render(<MemoryRouter initialEntries=
     { productionStyles: true },
   );
 }
-async function ready({ evaluate, pause }) {
+async function ready({ evaluate, pause, send }) {
   for (let i = 0; i < 100; i++) {
-    if (await evaluate('Boolean(document.querySelector(".folder-filter"))'))
+    if (await evaluate('Boolean(document.querySelector(".folder-filter"))')) {
+      await click(
+        { evaluate, pause, send },
+        `document.querySelector('[aria-controls="wechat-management-sidebar"]')`,
+      );
       return;
+    }
     await pause(30);
   }
   throw Error('actual feeds page did not render');
 }
 async function click({ evaluate, send, pause }, expression) {
+  if (
+    await evaluate(
+      `Boolean((${expression})?.closest('.feed-sidebar:not(.feed-sidebar-open)'))`,
+    )
+  ) {
+    await click(
+      { evaluate, send, pause },
+      `document.querySelector('[aria-controls="wechat-management-sidebar"]')`,
+    );
+  }
   const point = await evaluate(
     `(()=>{const node=${expression};node.scrollIntoView({block:'nearest'});const r=node.getBoundingClientRect();const x=r.x+r.width/2,y=r.y+r.height/2;window.fixture.lastClick={node:node.outerHTML.slice(0,150),hit:document.elementFromPoint(x,y)?.outerHTML.slice(0,200),x,y};return {x,y};})()`,
   );

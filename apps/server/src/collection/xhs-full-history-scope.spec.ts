@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
@@ -31,34 +32,39 @@ it('binds all three existing jobs, preserves unknown and budgets, supports full 
     },
   });
   try {
-    for (const name of (
-      await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
-    ).sort()) {
-      if (
-        !(
-          await fs.stat(
-            path.resolve(__dirname, '../../prisma/migrations', name),
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'fixture.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (
+          await fs.readdir(path.resolve(__dirname, '../../prisma/migrations'))
+        ).sort()) {
+          if (
+            !(
+              await fs.stat(
+                path.resolve(__dirname, '../../prisma/migrations', name),
+              )
+            ).isDirectory()
           )
-        ).isDirectory()
-      )
-        continue;
-      try {
-        for (const sql of splitSqliteStatements(
-          await fs.readFile(
-            path.resolve(
-              __dirname,
-              '../../prisma/migrations',
-              name,
-              'migration.sql',
-            ),
-            'utf8',
-          ),
-        ))
-          await db.$executeRawUnsafe(sql);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      }
-    }
+            continue;
+          try {
+            for (const sql of splitSqliteStatements(
+              await fs.readFile(
+                path.resolve(
+                  __dirname,
+                  '../../prisma/migrations',
+                  name,
+                  'migration.sql',
+                ),
+                'utf8',
+              ),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+          } catch (e) {
+            if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+          }
+        }
+      },
+    );
     const bindings = ['a', 'b', 'c'].map((creatorId) => ({
       creatorId,
       jobId: randomUUID(),

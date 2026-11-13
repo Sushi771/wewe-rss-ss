@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -46,16 +47,25 @@ describe('local collection with real SQLite migrations', () => {
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      )
-        .map((s) => s.trim())
-        .filter(Boolean)) {
-        await prisma.$executeRawUnsafe(sql);
-      }
-    }
+    await withFixtureMigrationConnection(
+      `file:${path.join(root, 'test.db').replace(/\\/g, '/')}`,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          )
+            .map((s) => s.trim())
+            .filter(Boolean)) {
+            await migrationClient.$executeRawUnsafe(sql);
+          }
+        }
+      },
+    );
     service = new CollectionService(prisma as any);
     (resolvePublicArticle as jest.Mock).mockResolvedValue({
       ...canonicalArticleUrl(url(1)),

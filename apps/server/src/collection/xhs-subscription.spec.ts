@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { scheduledTaskId } from './xhs-scheduled-admission';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -74,17 +75,23 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await db.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await db.$executeRawUnsafe('PRAGMA synchronous = FULL');
     cache = new XiaohongshuService(db as any);
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);
@@ -157,7 +164,7 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
   const finish = async (taskId: string) => {
     for (let i = 0; i < 2000; i++) {
       const t = await service.task({ taskId });
-      if (!['queued', 'running'].includes(t.state)) return t;
+      if (!['queued', 'running'].includes(t.state) && !t.settling) return t;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error('SYNTHETIC_TASK_TIMEOUT');
@@ -1287,10 +1294,18 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
     try {
       const first = await service.downloadNotes(request);
       await committed;
-      expect(await finish(first.taskId)).toMatchObject({
+      expect(await service.task(first)).toMatchObject({
         state: 'completed',
         completed: 1,
+        settling: true,
       });
+      let finished = false;
+      const finishing = finish(first.taskId).then((task) => {
+        finished = true;
+        return task;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(finished).toBe(false);
       expect((service as any).pending.has(first.taskId)).toBe(true);
       expect((service as any).controllers.has(first.taskId)).toBe(true);
       await expect(service.downloadNotes(request)).rejects.toThrow(
@@ -1299,6 +1314,10 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       expect(source.detail).toHaveBeenCalledTimes(1);
       release();
       await (service as any).lane;
+      expect(await finishing).toMatchObject({
+        state: 'completed',
+        settling: false,
+      });
       expect((service as any).pending.has(first.taskId)).toBe(false);
       expect((service as any).controllers.has(first.taskId)).toBe(false);
       const repeat = await service.downloadNotes(request);

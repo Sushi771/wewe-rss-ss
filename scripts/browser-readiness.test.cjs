@@ -404,3 +404,220 @@ test('responsive startup failure spawns once and cleans its child, stderr and lo
     assert.ok(errors[0].includes(code));
   }
 });
+
+test('shared fixture uses bounded readiness once and preserves failure cleanup and business assertions', async () => {
+  const vm = require('node:vm');
+  const { EventEmitter } = require('node:events');
+  const source = fs.readFileSync(
+    path.join(__dirname, 'offline-browser-fixture.cjs'),
+    'utf8',
+  );
+  // Replace only the Vite import; execute the actual fixture with in-memory IO.
+  assert.equal(source.split('await import(').length, 2);
+  for (const scenario of [
+    'no-port',
+    'spawn-failed',
+    'early-exit',
+    'socket-timeout',
+    'socket-error',
+    'socket-exit',
+    'business-failure',
+  ]) {
+    let time = 0;
+    const counts = {
+      spawn: 0,
+      ready: 0,
+      run: 0,
+      kill: 0,
+      destroy: 0,
+      close: 0,
+      remove: 0,
+    };
+    const child = new EventEmitter();
+    Object.assign(child, { pid: 123, exitCode: null, signalCode: null });
+    child.stderr = new EventEmitter();
+    child.stderr.destroy = () => counts.destroy++;
+    const stop = () => {
+      child.exitCode = 0;
+      child.emit('exit', 0);
+    };
+    child.kill = () => {
+      counts.kill++;
+      stop();
+    };
+    const directory = path.join(
+      os.tmpdir(),
+      'wewe-classification-ui-synthetic',
+    );
+    const server = {
+      listen(port, host, done) {
+        assert.equal(port, 0);
+        assert.equal(host, '127.0.0.1');
+        done();
+      },
+      address: () => ({ port: 12345 }),
+      closeAllConnections() {},
+      close(done) {
+        counts.close++;
+        done();
+      },
+    };
+    class Socket extends EventTarget {
+      static OPEN = 1;
+      readyState = 0;
+      constructor(url) {
+        super();
+        assert.equal(url, page.webSocketDebuggerUrl);
+        queueMicrotask(() => {
+          if (scenario === 'socket-timeout') return;
+          if (scenario === 'socket-exit') return stop();
+          if (scenario === 'socket-error')
+            return this.dispatchEvent(new Event('error'));
+          this.readyState = Socket.OPEN;
+          this.dispatchEvent(new Event('open'));
+        });
+      }
+      send(raw) {
+        const message = JSON.parse(raw);
+        if (message.method === 'Browser.close') return stop();
+        const reply = (data) =>
+          this.dispatchEvent(
+            new MessageEvent('message', { data: JSON.stringify(data) }),
+          );
+        reply({ id: message.id, result: { result: { value: true } } });
+        if (message.method === 'Page.navigate')
+          reply({ method: 'Page.loadEventFired' });
+      }
+      close() {
+        this.readyState = 3;
+      }
+    }
+    const modules = {
+      'node:fs': {
+        mkdtempSync: () => directory,
+        writeFileSync() {},
+        realpathSync: () => path.resolve(os.tmpdir()),
+        rmSync(owned) {
+          assert.equal(owned, directory);
+          counts.remove++;
+        },
+      },
+      'node:path': path,
+      'node:os': os,
+      'node:http': { createServer: () => server },
+      'node:child_process': {
+        spawn() {
+          counts.spawn++;
+          return child;
+        },
+      },
+      'node:url': require('node:url'),
+      'node:assert/strict': assert,
+      './browser-readiness.cjs': {
+        waitForBrowser: async (options) => {
+          counts.ready++;
+          assert.equal(options.child, child);
+          assert.equal(options.profile, path.join(directory, 'profile'));
+          assert.equal(options.timeoutMs, 30000);
+          assert.equal(options.stderr(), '');
+          assert.equal(options.spawnError(), null);
+          if (scenario === 'spawn-failed') {
+            child.pid = undefined;
+            child.emit(
+              'error',
+              Object.assign(Error('synthetic spawn failure'), {
+                code: 'ENOENT',
+              }),
+            );
+          }
+          if (scenario === 'early-exit') stop();
+          return waitForBrowser({
+            ...options,
+            now: () => time,
+            pause: async (ms) => {
+              time += ms;
+            },
+            portReader: () =>
+              scenario !== 'no-port' && time >= 15000
+                ? { port: 9222, source: 'port-file' }
+                : undefined,
+            fetchImpl: async () => ({ ok: true, json: async () => [page] }),
+          });
+        },
+      },
+    };
+    const requireMock = (name) => {
+      assert.ok(name in modules, 'unexpected dependency ' + name);
+      return modules[name];
+    };
+    requireMock.resolve = (name) => {
+      assert.equal(name, 'vite');
+      return path.resolve('synthetic-vite/index.js');
+    };
+    const exported = { exports: {} },
+      errors = [];
+    vm.runInNewContext(
+      source.replace('await import(', 'await fixtureImport('),
+      {
+        require: requireMock,
+        module: exported,
+        process: { env: { LAYOUT_TEST_BROWSER: 'synthetic-browser' } },
+        performance: { now: () => time },
+        fixtureImport: async () => ({ build: async () => {} }),
+        console: { error: (message) => errors.push(JSON.parse(message)) },
+        WebSocket: Socket,
+        setTimeout(fn, ms) {
+          const timer = { cancelled: false };
+          setImmediate(() => {
+            if (!timer.cancelled) {
+              time += ms;
+              fn();
+            }
+          });
+          return timer;
+        },
+        clearTimeout(timer) {
+          if (timer) timer.cancelled = true;
+        },
+      },
+    );
+    const businessFailure = Error('original business assertion');
+    await assert.rejects(
+      exported.exports.withFixture(
+        '',
+        async () => {
+          counts.run++;
+          throw businessFailure;
+        },
+        {},
+        { cleanupOwnedFixture: true },
+      ),
+      (error) => {
+        if (scenario === 'business-failure')
+          assert.equal(error, businessFailure);
+        else
+          assert.match(
+            error.message,
+            /BROWSER_(?:READINESS_DEADLINE|SPAWN_FAILED|EXITED_BEFORE_READY|DEBUG_SOCKET_FAILED)/,
+          );
+        return true;
+      },
+    );
+    assert.equal(counts.spawn, 1);
+    assert.equal(counts.ready, 1);
+    assert.equal(counts.run, scenario === 'business-failure' ? 1 : 0);
+    assert.equal(
+      counts.kill,
+      ['no-port', 'socket-timeout', 'socket-error'].includes(scenario) ? 1 : 0,
+    );
+    for (const key of ['destroy', 'close', 'remove'])
+      assert.equal(counts[key], 1);
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0].elapsedMs <= 30000);
+    if (scenario === 'socket-timeout') assert.equal(errors[0].elapsedMs, 30000);
+    assert.equal(
+      child.listenerCount('exit'),
+      scenario === 'spawn-failed' ? 1 : 0,
+    );
+  }
+});

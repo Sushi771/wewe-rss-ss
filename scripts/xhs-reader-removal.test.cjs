@@ -21,8 +21,8 @@ const service = read('apps/server/src/collection/xiaohongshu.service.ts');
 
 test('generation admission changes cannot hide behind the reviewed recovery seam', () => {
   const changed = router.replace(
-    'confirmUnknown:z.literal(true)',
-    'confirmUnknown:z.literal(false)',
+    'confirmUnknown: z.literal(true)',
+    'confirmUnknown: z.literal(false)',
   );
   assert.notEqual(changed, router);
   assert.throws(
@@ -80,13 +80,15 @@ test('changing a native download gate cannot hide behind the deleted reader seam
 });
 
 test('limited recovery compatibility rejects changed authorization, identity and response privacy seams', () => {
+  // Restore reviewed middleware additions before checking the older PC-link layer.
+  const reviewedRouter = restorePreReviewedRecoveryRouter(ts, router);
   const fixture = require('./fixtures/xhs-original-link-router-seams.json');
   const reviewed = fixture[2].after;
   const routeStart = reviewed.indexOf('    recoverSingleNote:');
   assert.ok(routeStart > 0);
   const route = reviewed.slice(routeStart);
-  assert.equal(router.split(route).length, 2);
-  assert.equal(router.split(fixture[5].after).length, 2);
+  assert.equal(reviewedRouter.split(route).length, 2);
+  assert.equal(reviewedRouter.split(fixture[5].after).length, 2);
   for (const [before, after] of [
     [
       'this.requireLocalXhsConnection(ctx);',
@@ -108,8 +110,8 @@ test('limited recovery compatibility rejects changed authorization, identity and
     ],
   ]) {
     assert.equal(route.split(before).length, 2);
-    const changed = router.replace(route, route.replace(before, after));
-    assert.notEqual(changed, router);
+    const changed = reviewedRouter.replace(route, route.replace(before, after));
+    assert.notEqual(changed, reviewedRouter);
     assert.throws(
       () => restorePreOriginalLinkRouter(changed),
       /exact PC-link router seam/,
@@ -128,8 +130,11 @@ test('limited recovery compatibility rejects changed authorization, identity and
   ]) {
     const headers = fixture[5].after;
     assert.equal(headers.split(before).length, 2);
-    const changed = router.replace(headers, headers.replace(before, after));
-    assert.notEqual(changed, router);
+    const changed = reviewedRouter.replace(
+      headers,
+      headers.replace(before, after),
+    );
+    assert.notEqual(changed, reviewedRouter);
     assert.throws(
       () => restorePreOriginalLinkRouter(changed),
       /exact PC-link router seam/,
@@ -174,11 +179,10 @@ test('whole history grants require explicit confirmation and local access at the
       assert.equal(route.split(before).length, 2);
       const changed = router.replace(route, route.replace(before, after));
       assert.throws(
-        () =>
-          restorePreOriginalLinkRouter(
-            restorePreReviewedRecoveryRouter(ts, changed),
-          ),
-        /exact (?:PC-link router seam|cache collection route)/,
+        () => restorePreReviewedRecoveryRouter(ts, changed),
+        route === revisedHistory
+          ? /exact cache collection route/
+          : /complete pre-recovery router AST preserved/,
       );
     }
   }

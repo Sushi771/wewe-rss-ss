@@ -14,6 +14,12 @@ function fixture(local = true) {
     feed: { updateDelayTime: 0 },
   });
   const whole = {
+    prepareKnownAuthProfileProbe: jest.fn(async () => ({
+      digest: 'a'.repeat(64),
+    })),
+    confirmKnownAuthProfileProbe: jest.fn(async () => ({
+      state: 'profile-saved',
+    })),
     prepareWholeCreatorFullHistory: jest.fn(async () => ({
       digest: 'a'.repeat(64),
     })),
@@ -35,6 +41,7 @@ function fixture(local = true) {
     whole as any,
   ).appRouter;
   return {
+    router,
     whole,
     api: router.createCaller({ errorMsg: null, isLocalSave: local })
       .xiaohongshu,
@@ -73,3 +80,20 @@ it('passes only the strict bound local scope and rejects client session injectio
   ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
   expect(whole.prepareWholeCreatorFullHistory).toHaveBeenCalledTimes(1);
 });
+
+it.each([
+  'prepareKnownResponseAuthReview',
+  'confirmKnownResponseAuthReview',
+  'prepareKnownAuthProfileProbe',
+  'confirmKnownAuthProfileProbe',
+])(
+  'does not expose the retired pre-verification clear/probe route: %s',
+  (name) => {
+    for (const local of [true, false]) {
+      const { router, whole } = fixture(local);
+      expect(router._def.procedures['xiaohongshu.' + name]).toBeUndefined();
+      expect(whole.prepareKnownAuthProfileProbe).not.toHaveBeenCalled();
+      expect(whole.confirmKnownAuthProfileProbe).not.toHaveBeenCalled();
+    }
+  },
+);

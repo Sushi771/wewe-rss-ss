@@ -87,71 +87,231 @@ describe('durable synthetic source risk fence', () => {
     ).rejects.toMatchObject({ reason: 'transport' });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  type OwnedFixture = {
+    db?: PrismaClient;
+    folder?: string;
+    setup: Promise<void>;
+    cleanup?: Promise<void>;
+    closing?: Promise<void>;
+    ready: boolean;
+    closed: boolean;
+  };
   let db: PrismaClient,
     folder: string,
+    fixture: OwnedFixture,
     deny: jest.SpyInstance,
     denyHttps: jest.SpyInstance;
-  // Each case owns its synthetic database, including immutable review history.
-  // Teardown destroys the fixture; it never deletes audit rows to relax guards.
-  beforeEach(async () => {
+  const fixtures = new Set<OwnedFixture>();
+
+  function startFixture(
+    migrations = path.resolve(__dirname, '../../prisma/migrations'),
+  ): OwnedFixture {
+    const owned: OwnedFixture = {
+      setup: Promise.resolve(),
+      ready: false,
+      closed: false,
+    };
+    fixtures.add(owned);
+    owned.setup = (async () => {
+      // A Jest hook timeout does not cancel this continuation. Never consult
+      // the suite's mutable db/folder while creating or migrating a fixture.
+      const localFolder = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'xhs-risk-synthetic-'),
+      );
+      owned.folder = localFolder;
+      if (owned.closed) return;
+      const localDb = new PrismaClient({
+        datasources: {
+          db: {
+            // Native BEGIN/COMMIT statements must share one connection.
+            url:
+              'file:' +
+              path.join(localFolder, 'risk.sqlite').replace(/\\/g, '/') +
+              '?connection_limit=1',
+          },
+        },
+      });
+      owned.db = localDb;
+      for (const name of (await fs.readdir(migrations)).sort()) {
+        if (owned.closed) return;
+        if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+          continue;
+        for (const sql of splitSqliteStatements(
+          await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          ),
+        )) {
+          if (owned.closed) return;
+          await localDb.$executeRawUnsafe(sql);
+        }
+      }
+      if (!owned.closed) owned.ready = true;
+    })();
+    return owned;
+  }
+
+  function closeFixture(owned: OwnedFixture): Promise<void> {
+    owned.closed = true;
+    return (owned.closing ??= (async () => {
+      // The original hook reports setup/cleanup errors. Still settle its own
+      // pending work before disconnecting, even if teardown itself times out.
+      await Promise.allSettled([owned.setup, owned.cleanup]);
+      await owned.db?.$disconnect();
+      fixtures.delete(owned);
+      // Keep every synthetic fixture directory for inspection; never remove it.
+    })());
+  }
+
+  // The network guard outlives every pending fixture, not merely a timed-out
+  // hook. Do not restore a shared spy while an earlier continuation still runs.
+  beforeAll(() => {
     deny = jest
       .spyOn(global, 'fetch')
       .mockRejectedValue(new Error('NETWORK_FORBIDDEN'));
     denyHttps = jest.spyOn(https, 'request').mockImplementation((() => {
       throw Error('NETWORK_FORBIDDEN');
     }) as any);
-    folder = await fs.mkdtemp(path.join(os.tmpdir(), 'xhs-risk-synthetic-'));
-    db = new PrismaClient({
-      datasources: {
-        db: {
-          url: 'file:' + path.join(folder, 'risk.sqlite').replace(/\\/g, '/'),
-        },
-      },
-    });
-    const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        await db.$executeRawUnsafe(sql);
+  });
+  afterAll(async () => {
+    const closed = await Promise.allSettled([...fixtures].map(closeFixture));
+    deny.mockRestore();
+    denyHttps.mockRestore();
+    for (const result of closed)
+      if (result.status === 'rejected') throw result.reason;
+  }, 40000);
+
+  // Each case owns its database, including immutable review history.
+  beforeEach(async () => {
+    const owned = startFixture();
+    fixture = owned;
+    await owned.setup;
+    if (owned.ready && !owned.closed && fixture === owned) {
+      db = owned.db!;
+      folder = owned.folder!;
     }
   }, 40000);
-  afterEach(async () => {
-    await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL,updated_at=0 WHERE id='source'`;
-    const scoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='creator-a'`;
-    if (scoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id IN ('task-a','task-a2','task-b','task-c','task-d')`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('creator-a','creator-b','creator-c','creator-d')`;
-    }
-    const mediaScoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='media-creator-a'`;
-    if (mediaScoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id IN ('media-creator-a','media-creator-b')`;
-      await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id IN ('media-creator-a','media-creator-b')`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('media-creator-a','media-creator-b')`;
-    }
-    const parseScoped = await db.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM xhs_creators WHERE id='parse-creator'`;
-    if (parseScoped.length) {
-      await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
-      await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id IN (${JSON.stringify(['xiaohongshu', 'note', 'parse-a'])},${JSON.stringify(['xiaohongshu', 'note', 'parse-b'])})`;
-      await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id='parse-creator'`;
-      await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id='parse-creator'`;
-      await db.$executeRaw`DELETE FROM xhs_creators WHERE id='parse-creator'`;
-    }
+  afterEach(() => {
+    const owned = fixture;
+    if (!owned?.ready || owned.closed) return;
+    const db = owned.db!;
+    return (owned.cleanup = (async () => {
+      await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL,updated_at=0 WHERE id='source'`;
+      const scoped = await db.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_creators WHERE id='creator-a'`;
+      if (scoped.length) {
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
+        await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE id IN ('task-a','task-a2','task-b','task-c','task-d')`;
+        await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('creator-a','creator-b','creator-c','creator-d')`;
+      }
+      const mediaScoped = await db.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_creators WHERE id='media-creator-a'`;
+      if (mediaScoped.length) {
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
+        await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id IN ('media-creator-a','media-creator-b')`;
+        await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id IN ('media-creator-a','media-creator-b')`;
+        await db.$executeRaw`DELETE FROM xhs_creators WHERE id IN ('media-creator-a','media-creator-b')`;
+      }
+      const parseScoped = await db.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_creators WHERE id='parse-creator'`;
+      if (parseScoped.length) {
+        await db.$executeRaw`DELETE FROM xhs_request_budgets WHERE id='xhs:source-total' OR id LIKE 'xhs:dispatch-pending:unknown:%'`;
+        await db.$executeRaw`DELETE FROM xhs_metric_snapshots WHERE owner_id IN (${JSON.stringify(['xiaohongshu', 'note', 'parse-a'])},${JSON.stringify(['xiaohongshu', 'note', 'parse-b'])})`;
+        await db.$executeRaw`DELETE FROM xhs_subscription_tasks WHERE creator_id='parse-creator'`;
+        await db.$executeRaw`DELETE FROM xhs_notes WHERE creator_id='parse-creator'`;
+        await db.$executeRaw`DELETE FROM xhs_creators WHERE id='parse-creator'`;
+      }
+    })());
   });
   afterEach(async () => {
-    await db.$disconnect();
-    deny.mockRestore();
-    denyHttps.mockRestore(); // Keep fixture for inspection; never remove it.
+    const owned = fixture;
+    if (owned) await closeFixture(owned);
   }, 40000);
+
+  it.each(['read', 'statement'] as const)(
+    'keeps an abandoned setup local while the next fixture migrates (pending %s)',
+    async (pending) => {
+      const roots = ['abandoned', 'next'].map((name) =>
+        path.join(folder, name),
+      );
+      for (const root of roots) {
+        await fs.mkdir(path.join(root, '001'), { recursive: true });
+        await fs.writeFile(
+          path.join(root, '001/migration.sql'),
+          'BEGIN; CREATE TABLE synthetic_owner (id TEXT); COMMIT;',
+        );
+      }
+      let release!: () => void, entered!: () => void;
+      let releaseSql!: () => void, enteredSql!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const waiting = new Promise<void>((resolve) => (entered = resolve));
+      const sqlGate = new Promise<void>((resolve) => (releaseSql = resolve));
+      const sqlWaiting = new Promise<void>((resolve) => (enteredSql = resolve));
+      const readFile = fs.readFile.bind(fs);
+      const read = jest.spyOn(fs, 'readFile').mockImplementation((async (
+        ...args: any[]
+      ) => {
+        if (args[0] === path.join(roots[0], '001/migration.sql')) {
+          entered();
+          await gate;
+        }
+        return (readFile as any)(...args);
+      }) as any);
+      const abandoned = startFixture(roots[0]);
+      let next: OwnedFixture | undefined;
+      try {
+        await waiting;
+        const execute = abandoned.db!.$executeRawUnsafe.bind(abandoned.db!);
+        const staleSql = jest
+          .spyOn(abandoned.db!, '$executeRawUnsafe')
+          .mockImplementation((async (sql: string) => {
+            enteredSql();
+            await sqlGate;
+            return execute(sql);
+          }) as any);
+        if (pending === 'statement') {
+          release();
+          await sqlWaiting;
+        }
+        const disconnect = jest.spyOn(abandoned.db!, '$disconnect');
+        // This is the teardown boundary after a hook timeout, without a wall-clock
+        // sleep: the pending operation settles only after the next setup completes.
+        const closing = closeFixture(abandoned);
+        next = startFixture(roots[1]);
+        await next.setup;
+        expect(disconnect).not.toHaveBeenCalled();
+        expect(fixtures.has(abandoned)).toBe(true);
+        release();
+        releaseSql();
+        await closing;
+        expect(abandoned.ready).toBe(false);
+        expect(staleSql).toHaveBeenCalledTimes(pending === 'statement' ? 1 : 0);
+        if (pending === 'statement')
+          expect(staleSql).toHaveBeenCalledWith('BEGIN');
+        expect(abandoned.db).not.toBe(next.db);
+        expect(disconnect).toHaveBeenCalledTimes(1);
+        expect(fixtures.has(abandoned)).toBe(false);
+        expect(next.ready).toBe(true);
+        await expect(
+          next.db!.$executeRawUnsafe(
+            "INSERT INTO synthetic_owner VALUES ('next')",
+          ),
+        ).resolves.toBe(1);
+        expect((await fs.stat(abandoned.folder!)).isDirectory()).toBe(true);
+        expect(jest.isMockFunction(global.fetch)).toBe(true);
+        expect(jest.isMockFunction(https.request)).toBe(true);
+      } finally {
+        release();
+        releaseSql();
+        read.mockRestore();
+        await closeFixture(abandoned);
+        if (next) await closeFixture(next);
+      }
+    },
+  );
 
   it.each(['parse', 'transport', 'budget'] as const)(
     'keeps source risk conservative for %s list failures',
@@ -4531,6 +4691,11 @@ describe('durable synthetic source risk fence', () => {
       body: {},
     }));
     const storage = {
+      // Loading a healthy saved session is allowed; it never clears a 461 fence.
+      policy: jest.fn(async () => ({
+        autoRestore: false,
+        needsReconnect: false,
+      })),
       status: jest.fn(async () => ({ stored: true })),
       load: jest.fn(async () => ({
         a1: 'synthetic-a1',
@@ -4580,7 +4745,23 @@ describe('durable synthetic source risk fence', () => {
     });
     expect(storage.status).not.toHaveBeenCalled();
     enabled = true;
-    await runtime.restoreSession();
+    const policyReadsBeforeRestore = storage.policy.mock.calls.length;
+    expect(await runtime.restoreSession()).toMatchObject({
+      sessionPresent: true,
+      verified: false,
+      riskCode: 'XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED',
+    });
+    expect(storage.policy).toHaveBeenCalledTimes(policyReadsBeforeRestore + 2);
+    expect(storage.load).toHaveBeenCalledTimes(1);
+    await expect(
+      runtime.resolve(
+        'https://www.xiaohongshu.com/user/profile/synthetic-author',
+      ),
+    ).rejects.toThrow('XHS_SOURCE_UNKNOWN_REJECTION_BLOCKED');
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(
+      await db.$queryRaw`SELECT state,code,http_status,endpoint,owner FROM xhs_source_risk WHERE id='source'`,
+    ).toEqual(rows);
     await runtime.disconnectSession();
     await runtime.connectSession({
       a1: 'synthetic-a1',

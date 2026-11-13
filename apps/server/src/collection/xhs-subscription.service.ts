@@ -1,9 +1,11 @@
+import { historyReviewMessage } from './xhs-task-message';
 import {
   fullHistoryContext,
   fullHistoryExcludedNoteIds,
   fullHistoryNoteExcluded,
 } from './xhs-full-history-scope';
 import { safeXhsAvatarUrl } from './xhs-profile';
+import { preserveKnownAuthTaskAudit } from './xhs-known-auth-response-review';
 import { load as loadHtml } from 'cheerio';
 import { readHistoryHandoffs } from './xhs-history-handoff';
 import {
@@ -84,6 +86,11 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  scheduledCommentAuthorization?(
+    input: { round: string; creatorId: string },
+    tx?: Prisma.TransactionClient,
+  ): Promise<'not-authorized' | undefined>;
+
   withScheduledReview?<T>(
     input: {
       round: string;
@@ -227,6 +234,7 @@ type Task = XhsSubscriptionTask & {
     outcome: 'prepared';
   };
   legacyPendingReviews?: unknown[];
+  knownResponseAuthReviews?: unknown[];
   sourceUnknowns?: Array<
     {
       marker: string;
@@ -1307,6 +1315,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     const saved = own.length
       ? (JSON.parse(own[0].document) as Task)
       : undefined;
+    // The old blocked authentication task remains frozen, including updated_at.
+    if (preserveKnownAuthTaskAudit(saved, t)) return 0;
     if (
       saved?.supersededByTaskId &&
       saved.supersededByTaskId !== t.supersededByTaskId
@@ -1320,6 +1330,8 @@ export class XhsSubscriptionService implements OnModuleInit {
       >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.resumedFromTaskId}`;
       if (!rows.length) return reject('XHS_TASK_NOT_FOUND');
       const parent = JSON.parse(rows[0].document) as Task;
+      if (parent.knownResponseAuthReviews)
+        return reject('XHS_TASK_NOT_RESUMABLE');
       if (
         parent.creatorId !== t.creatorId ||
         (parent.supersededByTaskId && parent.supersededByTaskId !== t.taskId)
@@ -1375,6 +1387,8 @@ export class XhsSubscriptionService implements OnModuleInit {
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
+    if (checkpoint?.knownResponseAuthReviews)
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     if (
@@ -1754,6 +1768,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       snapshotsSaved: t.snapshotsSaved,
       mediaSummary,
       commentSummary: t.commentSummary,
+      commentCollection: t.commentCollection,
       archiveConflicts: (t as any).scheduledArchive
         ? Object.values((t as any).scheduledArchive).filter(
             (entry: any) => entry?.state === 'conflict',
@@ -1772,11 +1787,12 @@ export class XhsSubscriptionService implements OnModuleInit {
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
         : reconciledComplete
           ? '处理完成'
-          : t.message,
+          : historyReviewMessage(t),
       resumedFromTaskId: t.resumedFromTaskId,
       supersededByTaskId: t.supersededByTaskId,
       settling: this.pending.has(t.taskId),
       resumable:
+        !t.knownResponseAuthReviews &&
         !uncertain &&
         !t.sourceActive &&
         !t.sourceUnknowns?.length &&
@@ -1865,6 +1881,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (this.uncertain.has(input.taskId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
+    if (previous.knownResponseAuthReviews)
+      return reject('XHS_TASK_NOT_RESUMABLE');
     if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
     if (
       previous.kind === 'download' &&
@@ -2987,8 +3005,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         t.message =
           t.state === 'completed' ? '处理完成' : '部分完成，请检查剩余项目。';
         if (t.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED')
-          t.message =
-            '历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。';
+          t.message = `历史待核对：${t.historyExcludedIds!.length} 篇，其余基础采集已完成。`;
         if (t.basicOnly && t.state === 'completed')
           t.message = '基础信息处理完成；缺失字段仍为未知，媒体待补。';
         if (t.kind === 'download' && (t.localFilesSaved || t.localFilesReused))

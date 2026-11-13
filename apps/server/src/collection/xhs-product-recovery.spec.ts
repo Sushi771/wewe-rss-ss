@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 jest.mock('./xhs-dispatch-owner-observation', () => ({
   observeDispatchOwner: jest.fn(() => 'dead'),
 }));
@@ -56,12 +57,17 @@ describe('reviewed recovery product chain', () => {
       },
     });
     const root = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await readdir(root)).sort())
-      if ((await stat(path.join(root, name))).isDirectory())
-        for (const sql of splitSqliteStatements(
-          await readFile(path.join(root, name, 'migration.sql'), 'utf8'),
-        ))
-          await db.$executeRawUnsafe(sql);
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 's.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await readdir(root)).sort())
+          if ((await stat(path.join(root, name))).isDirectory())
+            for (const sql of splitSqliteStatements(
+              await readFile(path.join(root, name, 'migration.sql'), 'utf8'),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+      },
+    );
   }, 40000);
   beforeEach(async () => {
     // One atomic reset/seed, instead of eleven durable autocommits per example.

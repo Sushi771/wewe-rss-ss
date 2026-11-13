@@ -168,6 +168,15 @@ createRoot(document.getElementById('root')).render(<NextUIProvider><App/></NextU
         await pause(100);
         assert.match(
           await evaluate(
+            'document.querySelector(".subscription-dialog [role=alert]").innerText',
+          ),
+          /分类保存未确认/,
+        );
+        await evaluate(
+          'document.querySelector(".subscription-dialog [role=alert] summary").click()',
+        );
+        assert.match(
+          await evaluate(
             'document.querySelector(".subscription-dialog").innerText',
           ),
           /Synthetic save failed/,

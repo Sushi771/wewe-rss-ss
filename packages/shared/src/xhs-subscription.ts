@@ -54,6 +54,11 @@ export type XhsSubscriptionTask = {
   failed: number;
   remaining: number;
   archiveConflicts?: number;
+  commentCollection?: {
+    round: string;
+    state: 'not-authorized';
+    notCollectedNotes: number;
+  };
   commentSummary?: {
     round: string;
     eligibleNotes: number;

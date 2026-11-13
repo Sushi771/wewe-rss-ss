@@ -89,6 +89,7 @@ export default function XhsSavedConnection() {
       : undefined;
     clear();
     setVisible(false);
+    let recovery = '';
     try {
       const result = await savedSessionRequest(
         {
@@ -96,6 +97,9 @@ export default function XhsSavedConnection() {
           privateMode: privateOnlineMode,
           authCode: getAuthCode,
           send: (url, init) => window.fetch(url, init),
+          onAuthenticationRecovery: (state) => {
+            recovery = state;
+          },
         },
         input,
         controller.signal,
@@ -112,14 +116,18 @@ export default function XhsSavedConnection() {
       } else if (generation.current === version) {
         setStatusVersion((value) => value + 1);
         setMessage(
-          '已加密保存并连接。凭证可能自然失效；失效后请在此更新。未自动开始采集。',
+          recovery === 'profile-verified'
+            ? '已加密保存并连接。一次资料验证和保存成功，对应认证暂停已解除；未补跑旧任务。'
+            : recovery === 'paused'
+              ? '已加密保存并连接；资料验证未确认恢复，采集仍暂停。不会自动重试，请查看连接状态。'
+              : '已加密保存并连接。未发起资料验证；已有来源限制仍按原规则保留。',
         );
       }
     } catch {
       if (generation.current === version)
         setMessage(
           save
-            ? '保存未确认。若已有保存记录，请明确勾选替换；检查本机连接状态后再操作。'
+            ? '保存或资料验证结果未确认。请先重新读取连接状态，不要重复提交凭证或重试验证。'
             : '无法读取保存记录，请检查本机服务和权限。',
         );
     } finally {
@@ -134,7 +142,7 @@ export default function XhsSavedConnection() {
     >
       <h2 className="font-semibold">小红书登录凭证</h2>
       <p className="text-default-500 text-sm">
-        仅在本机加密保存，供本机采集程序使用。登录可能失效，届时重新获取并更新凭证。
+        仅在本机加密保存，供本机采集程序使用。若存在可精确确认的认证暂停，连接后会验证一次原博主资料，保存成功后才解除该暂停；失败不重试。
       </p>
       {status?.needsReconnect && (
         <p role="alert">登录已失效，请更新小红书凭证</p>

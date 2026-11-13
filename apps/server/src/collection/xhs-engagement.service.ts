@@ -151,7 +151,11 @@ export class XhsEngagementService {
   async collectScheduled(
     round: string,
     creatorId: string,
-  ): Promise<{ pending: boolean; incomplete: boolean }> {
+  ): Promise<{
+    pending: boolean;
+    incomplete: boolean;
+    skipped?: 'not-authorized';
+  }> {
     const basicId = scheduledTaskId(round, creatorId, 'basic');
     const rows = await this.db.$queryRaw<
       Array<{ state: string; document: string }>
@@ -196,6 +200,57 @@ export class XhsEngagementService {
         ),
       ),
     ];
+    // Scope omission must be proved before restoring note contexts or sending.
+    if (
+      (await this.source?.scheduledCommentAuthorization?.(
+        { round, creatorId },
+        this.db as unknown as Prisma.TransactionClient,
+      )) === 'not-authorized'
+    ) {
+      await this.write(async (tx) => {
+        if (
+          (await this.source!.scheduledCommentAuthorization!(
+            { round, creatorId },
+            tx,
+          )) !== 'not-authorized'
+        )
+          return fail('XHS_COMMENT_SCOPE_CHANGED');
+        const current = await tx.$queryRaw<
+          Array<{ state: string; document: string }>
+        >`
+          SELECT state,document FROM xhs_subscription_tasks WHERE id=${basicId} AND creator_id=${creatorId}`;
+        if (
+          current.length !== 1 ||
+          current[0].state !== rows[0].state ||
+          current[0].document !== rows[0].document
+        )
+          return fail('XHS_COMMENT_RECEIPT_UNCERTAIN');
+        for (let offset = 0; offset < ids.length; offset += 100) {
+          const batch = ids.slice(offset, offset + 100);
+          const windows = await tx.$queryRaw<Array<{ document: string }>>`
+            SELECT document FROM xhs_comment_windows WHERE note_id IN (${Prisma.join(batch)})`;
+          for (const row of windows) {
+            const window = JSON.parse(row.document);
+            if (window.pendingDispatch || window.scheduledRound === round)
+              return fail('XHS_COMMENT_RECEIPT_UNCERTAIN');
+          }
+        }
+        const doc = JSON.parse(current[0].document);
+        if (doc.commentSummary?.round === round)
+          return fail('XHS_COMMENT_RECEIPT_UNCERTAIN');
+        doc.commentCollection = {
+          round,
+          state: 'not-authorized',
+          notCollectedNotes: ids.length,
+        };
+        if (
+          (await tx.$executeRaw`UPDATE xhs_subscription_tasks SET document=${JSON.stringify(doc)} WHERE id=${basicId} AND document=${current[0].document}`) !==
+          1
+        )
+          return fail('XHS_COMMENT_RECEIPT_UNCERTAIN');
+      });
+      return { pending: false, incomplete: true, skipped: 'not-authorized' };
+    }
     const work = async () => {
       let pending = false,
         incomplete = false;

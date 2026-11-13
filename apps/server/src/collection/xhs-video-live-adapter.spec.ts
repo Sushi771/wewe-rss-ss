@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { tmpdir } from 'node:os';
@@ -124,17 +125,23 @@ describe('isolated subscription workflow with synthetic SQLite and actual local 
       },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      const sql = await fs.readFile(
-        path.join(migrations, name, 'migration.sql'),
-        'utf8',
-      );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await db.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(root, 'synthetic.sqlite').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          const sql = await fs.readFile(
+            path.join(migrations, name, 'migration.sql'),
+            'utf8',
+          );
+          for (const statement of splitSqliteStatements(sql)
+            .map((s) => s.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await db.$executeRawUnsafe('PRAGMA synchronous = FULL');
     cache = new XiaohongshuService(db as any);
     store = new LocalArticleStore(path.join(root, 'settings.json'), root);

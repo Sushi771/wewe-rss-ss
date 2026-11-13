@@ -14,6 +14,10 @@ import { cacheSyncState } from './cache-sync-state';
 import { mediaSafetyStop } from './media-safety-stop';
 import { AutomaticMediaQueue } from './automatic-media-queue';
 import { AutomaticMediaScan } from './automatic-media-scan';
+import {
+  listLocalWechat2RssCache,
+  readLocalWechat2RssCache,
+} from '../collection/local-cache-reader';
 import { fetchAllowedImage } from '../collection/image-fetch';
 
 @Injectable()
@@ -43,6 +47,11 @@ export class CacheSyncService
   }
   private async start() {
     try {
+      if (process.env.WECHAT2RSS_LOCAL_CACHE_SYNC === '1') {
+        this.startLocalOnly();
+        this.startWatching();
+        return;
+      }
       const safety = await mediaSafetyStop(process.env.DATABASE_URL || '');
       const provider = wechat2RssProvider();
       let allowedFeeds: ReadonlySet<string> = new Set();
@@ -112,25 +121,51 @@ export class CacheSyncService
         sync: (id, page, listOnly) =>
           this.trpc.syncCachedWechat2RssPage(id, page, listOnly),
       });
-      cacheSyncState.enabled = true;
-      const database = process.env.WECHAT2RSS_CACHE_DB?.trim();
-      if (database) {
-        this.monitor = new CacheSqliteMonitor(
-          database,
-          (hashes) => {
-            this.engine?.signal(hashes);
-            this.tick();
-          },
-          () => this.engine?.signalUnavailable(),
-        );
-        void this.monitor.start();
-      }
-      this.timer = setInterval(() => this.tick(), 1000);
-      this.timer.unref();
-      this.tick();
+      this.startWatching();
     } catch {
       cacheSyncState.state = 'configuration-unavailable';
     }
+  }
+  private startLocalOnly() {
+    // No provider construction, account check, source gate or media queue.
+    // An invalid/missing local database fails closed, never falls back to HTTP.
+    this.engine = new CacheSyncEngine({
+      now: Date.now,
+      textOnly: true,
+      list: listLocalWechat2RssCache,
+      localFeeds: async () =>
+        (await this.prisma.feed.findMany({ where: { status: 1 } })).filter(
+          (feed) => resolveCollectionRoute(feed).channel === 'wechat2rss',
+        ),
+      read: (feed, name) => readLocalWechat2RssCache(feed.feedId, name),
+      syncText: (id, page) =>
+        this.trpc.syncCachedWechat2RssPage(id, page, false, {
+          fetchMedia: false,
+        }),
+      sync: (id, page, listOnly) =>
+        this.trpc.syncCachedWechat2RssPage(id, page, listOnly, {
+          fetchMedia: false,
+        }),
+    });
+    cacheSyncState.mediaPause = 'local-cache-only';
+  }
+  private startWatching() {
+    cacheSyncState.enabled = true;
+    const database = process.env.WECHAT2RSS_CACHE_DB?.trim();
+    if (database) {
+      this.monitor = new CacheSqliteMonitor(
+        database,
+        (hashes) => {
+          this.engine?.signal(hashes);
+          this.tick();
+        },
+        () => this.engine?.signalUnavailable(),
+      );
+      void this.monitor.start();
+    }
+    this.timer = setInterval(() => this.tick(), 1000);
+    this.timer.unref();
+    this.tick();
   }
   private tick() {
     if (databaseWritesAllowed())

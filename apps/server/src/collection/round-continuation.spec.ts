@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { PrismaClient } from '@prisma/client';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
@@ -28,20 +29,26 @@ it('derives only unattempted creators, preserves old unknown/budgets, rejects re
   });
   try {
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      try {
-        for (const sql of splitSqliteStatements(
-          await fs.readFile(
-            path.join(migrations, name, 'migration.sql'),
-            'utf8',
-          ),
-        ))
-          await db.$executeRawUnsafe(sql);
-      } catch (e) {
-        if ((e as any).code !== 'ENOENT') throw e;
-      }
-    }
+    await withFixtureMigrationConnection(
+      'file:' + path.join(folder, 'fixture.db').replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          try {
+            for (const sql of splitSqliteStatements(
+              await fs.readFile(
+                path.join(migrations, name, 'migration.sql'),
+                'utf8',
+              ),
+            ))
+              await migrationClient.$executeRawUnsafe(sql);
+          } catch (e) {
+            if ((e as any).code !== 'ENOENT') throw e;
+          }
+        }
+      },
+    );
     for (const id of ['a', 'b', 'c'])
       await db.xhsCreator.create({
         data: {

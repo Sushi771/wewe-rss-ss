@@ -15,6 +15,16 @@ function validatePreservingContract(policy, request) {
     new Set(spec.effects).size !== spec.effects.length
   )
     throw new Error('RELEASE_PRESERVING_CONTRACT_INVALID');
+  if (
+    spec.processFamily !== undefined &&
+    (!['install', 'restart'].includes(spec.operation) ||
+      !spec.effectScope ||
+      spec.processFamily?.format !== 1 ||
+      Object.keys(spec.processFamily).some(
+        (key) => !['format', 'consoleHost'].includes(key),
+      ))
+  )
+    throw new Error('RELEASE_PRESERVING_PROCESS_FAMILY_INVALID');
   if (spec.operation === 'build') {
     if (
       policy.phase !== 'build-only' ||

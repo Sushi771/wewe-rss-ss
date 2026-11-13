@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../test/fixture-migration-connection';
 import { Test } from '@nestjs/testing';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- Observe the test process through the existing native identity fixture.
@@ -112,13 +113,18 @@ describe('legacy opt-in transport with Wechat2RSS-only save policy, synthetic of
     // Actual AppModule now recovers its local XHS task tables at startup. Give
     // it a migrated, owned database while all platform access stays disabled.
     const migrations = resolve(__dirname, '../prisma/migrations');
-    for (const name of (await readdir(migrations)).sort()) {
-      if (name === 'migration_lock.toml') continue;
-      for (const statement of splitSqliteStatements(
-        await readFile(join(migrations, name, 'migration.sql'), 'utf8'),
-      ))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + database.replace(/\\/g, '/'),
+      async (migrationClient) => {
+        for (const name of (await readdir(migrations)).sort()) {
+          if (name === 'migration_lock.toml') continue;
+          for (const statement of splitSqliteStatements(
+            await readFile(join(migrations, name, 'migration.sql'), 'utf8'),
+          ))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await writeFile(
       join(directory, '.article-download-settings.json'),
       JSON.stringify({ directory: destination, askEveryTime: false }),

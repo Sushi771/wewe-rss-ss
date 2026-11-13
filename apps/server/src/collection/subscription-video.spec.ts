@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -202,10 +203,12 @@ describe('subscription video cache → SQLite → original saver/ZIP, offline', 
         join(migrations, name, 'migration.sql'),
         'utf8',
       );
-      for (const statement of splitSqliteStatements(sql)
-        .map((s) => s.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
+      await withFixtureMigrationConnection(url, async (migrationClient) => {
+        for (const statement of splitSqliteStatements(sql)
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await migrationClient.$executeRawUnsafe(statement);
+      });
     };
     for (const entry of (await fs.readdir(migrations, { withFileTypes: true }))
       .filter((e) => e.isDirectory())

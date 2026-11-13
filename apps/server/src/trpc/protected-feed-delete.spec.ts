@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 beforeAll(
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- CommonJS fixture exports register the existing beforeAll without changing Jest setup order.
   require('../../../../scripts/local-release/writer-self.fixture.test.cjs')
@@ -73,15 +74,20 @@ describe('protected existing deletion routes through actual router and SQLite mi
       datasources: { db: { url: 'file:' + database } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      const sql = await fs
-        .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
-        .catch(() => '');
-      for (const statement of splitSqliteStatements(sql)
-        .map((x) => x.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(statement);
-    }
+    await withFixtureMigrationConnection(
+      'file:' + database,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          const sql = await fs
+            .readFile(path.join(migrations, name, 'migration.sql'), 'utf8')
+            .catch(() => '');
+          for (const statement of splitSqliteStatements(sql)
+            .map((x) => x.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(statement);
+        }
+      },
+    );
     await prisma.managementGroup.create({
       data: {
         id: 'kept-group',

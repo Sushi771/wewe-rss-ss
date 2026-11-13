@@ -25,6 +25,16 @@ known article-local failure must leave other eligible notes in the same
 creator available. A new unknown request outcome or current source-wide
 authentication, verification, or throttling restriction still stops work.
 
+Scheduled clock observations may also read an exactly bound, settled basic
+task marked `XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED`: its row and document must
+both be partial, failed and remaining must both be zero, and historical
+exclusions must be present. This observation creates no task, session binding,
+review or request budget. It lets the runner proceed to the existing media and
+later-creator checks without reopening basic collection or retrying excluded
+notes. Active or new unknown source work and other failure protections remain
+unchanged. The round remains incomplete, and synthetic observation regressions
+do not establish complete live collection or cross-session continuation.
+
 Cancellation acceptance must exercise the subscription task's `cancelTask`
 entry point. A test of the legacy whole-job cancellation method alone does
 not establish cancellation safety for the full-history child task. Interrupted
@@ -216,3 +226,74 @@ legacy schemas retain their original conditional subscription-table access.
 Successful single-request checkpointing preserves any longer existing cooldown
 and applies at least a full interval after the received response. Unknown or
 failed requests retain their consumed permit, charge and unresolved marker.
+
+### Settled scheduled media observations
+
+Scheduled media can settle with `needs-review` when existing local images have
+no matching durable saved receipts. This is not a completed download and must
+not be silently retried, assigned fabricated receipts or treated as verified.
+The existing adoption, media dispatch, unknown-outcome and source-risk gates
+remain unchanged.
+
+The review reader now permits read-only observation of an exactly bound,
+exhausted media partial task. It requires unique nonempty note IDs, matching
+per-note results and item states, consistent totals, zero failed/remaining
+items and an allowed code matching the results. Empty or malformed results,
+unknown/failed states, wrong bindings and new unresolved evidence stay closed.
+Observation creates no review, source request, budget or session binding; new
+work still passes the existing round-session and authorization checks.
+
+Synthetic migrated SQLite regression coverage includes both allowed partial
+codes, repeated runner observations reaching later creators while retaining
+an incomplete round, unchanged persisted tasks and unchanged
+review/request/budget rows. Negative cases cover malformed results, inconsistent
+counts and codes, wrong task/creator/round/batch, source fences/unknowns and
+cross-session new-work rejection. This is offline control-flow verification,
+not evidence of live media recovery or later creators completing collection.
+
+The runner still stops when the comments or local-archive stage reports an
+incomplete outcome. The recurring policy currently grants profile, list,
+detail and media phases only; a comment capability flag is not an approved
+comment/reply request budget. This observation fix does not extend that policy
+or claim end-to-end continuation through those later stages.
+
+### Comments omitted by the approved recurring scope
+
+The recurring scope explicitly excludes comments and replies. Before any
+comment context restoration or source request, the runtime can prove that
+omission using the active policy, exact round/basic-task review, current
+session, creator bindings, retained baseline and clear risk state. Missing or
+changed evidence is not an omission grant. The policy and its budgets remain
+unchanged.
+
+For that proved case only, the task records a separate `commentCollection`
+status of `not-authorized` and the number of notes not collected. Existing
+comment summaries, windows and saved content are not converted into success.
+Pending dispatches and any existing current-round window or summary still
+stop the lane; an omission must not relabel an earlier collection receipt.
+Prior-round summaries remain visible as historical information. The interface states that comments/replies were not authorized or
+collected and retains archive conflict information.
+
+The runner can continue the other authorized creators and perform the existing
+local archive step. Only a full safe traversal with this explicit omission can
+return `settled-incomplete`; the clock records that outcome and advances the
+round once. Pending work, archive failures, changed authorization and unknown
+source outcomes still retain the pending round. A settled-incomplete round is
+not full comment, media or archive acceptance. Synthetic integration tests
+cover repeat ticks, restart observation, the next scheduled slot, unchanged
+review/request/budget evidence and refusal cases with no source traffic.
+
+Component rendering checks cover the omission alone, archive conflicts,
+historical summaries, unknown state, explicit zero and partial results.
+These checks are not desktop or narrow-screen visual acceptance; that visual
+verification remains pending. No live comment collection or production
+installation is established by the offline checks.
+
+### History review count display
+
+History-review task messages show the actual number of excluded notes. A read-only
+view corrects the exact legacy placeholder message when the task remains a
+history-review partial and has a valid nonempty exclusion list. Stored task
+records, counters, review status and source permissions are unchanged. Synthetic
+checks cover new messages, legacy task projection, visible recovery-card text and
+unrelated or malformed states; this does not establish production deployment.

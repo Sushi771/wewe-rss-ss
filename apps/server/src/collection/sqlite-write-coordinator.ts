@@ -154,6 +154,25 @@ export class SqliteWriteCoordinator {
       release();
     }
   }
+
+  /** Exact control-metadata review: exclusion without a full-snapshot contract.
+   * The caller must use incrementalWrite + a durable SQLite transaction and
+   * preserve original values in its audit. This does not authorize source work. */
+  async knownAuthMetadataWrite<T>(operation: () => Promise<T>): Promise<T> {
+    if (
+      this.context.getStore()?.active ||
+      this.protectedContext.getStore()?.active
+    )
+      throw new Error('Nested metadata SQLite operation refused');
+    const release = await this.acquire('backup');
+    const permit = { active: true };
+    try {
+      return await this.protectedContext.run(permit, operation);
+    } finally {
+      permit.active = false;
+      release();
+    }
+  }
 }
 
 // One configured application database. External maintenance writers are outside

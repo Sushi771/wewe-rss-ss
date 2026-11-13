@@ -1,3 +1,4 @@
+import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -323,15 +324,24 @@ describe('directory replay through protected SQLite persistence', () => {
       datasources: { db: { url: process.env.DATABASE_URL } },
     });
     const migrations = path.resolve(__dirname, '../../prisma/migrations');
-    for (const name of (await fs.readdir(migrations)).sort()) {
-      if (!(await fs.stat(path.join(migrations, name))).isDirectory()) continue;
-      for (const sql of splitSqliteStatements(
-        await fs.readFile(path.join(migrations, name, 'migration.sql'), 'utf8'),
-      )
-        .map((v) => v.trim())
-        .filter(Boolean))
-        await prisma.$executeRawUnsafe(sql);
-    }
+    await withFixtureMigrationConnection(
+      process.env.DATABASE_URL!,
+      async (migrationClient) => {
+        for (const name of (await fs.readdir(migrations)).sort()) {
+          if (!(await fs.stat(path.join(migrations, name))).isDirectory())
+            continue;
+          for (const sql of splitSqliteStatements(
+            await fs.readFile(
+              path.join(migrations, name, 'migration.sql'),
+              'utf8',
+            ),
+          )
+            .map((v) => v.trim())
+            .filter(Boolean))
+            await migrationClient.$executeRawUnsafe(sql);
+        }
+      },
+    );
     const source = path.join(dir, 'source.db');
     await fs.writeFile(source, 'source marker');
     await fs.writeFile(

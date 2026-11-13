@@ -1,0 +1,41 @@
+{
+  "apps/server/src/trpc/trpc.service.ts": {
+    "baseCommit": "9221b62c0757ce5c45fcd78ba94b5addc211949a",
+    "beforeSha256": "f8318433986bab485fb155fbd8b652df64f06ed3a730505c95e9fbc0b1022dc4",
+    "afterSha256": "8667ff9d06f82587d9425339ef8a647d795b6c5109a469b81ae7163b95cb092a",
+    "hunks": [
+      {
+        "before": "import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\nimport { refreshCacheFailure } from '../collection/refresh-cache-failure';\nimport { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';\nimport {\n  saveRefreshResponseReceipt,\n",
+        "after": "import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\nimport { refreshCacheFailure } from '../collection/refresh-cache-failure';\nimport {\n  refreshPreparationFailure,\n  refreshPreparationOutcome,\n  RefreshPreparationStage,\n} from '../collection/refresh-preparation-failure';\nimport { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';\nimport {\n  saveRefreshResponseReceipt,\n"
+      },
+      {
+        "before": "        stopBatch: false,\n        message: 'Existing work holds collection admission; update not sent.',\n      });\n    const feed = await this.prismaService.feed.findUnique({\n      where: { id: feedId },\n    });\n    if (\n      !feed ||\n      feed.status !== 1 ||\n",
+        "after": "        stopBatch: false,\n        message: 'Existing work holds collection admission; update not sent.',\n      });\n    let feed: Feed | null;\n    try {\n      feed = await this.prismaService.feed.findUnique({\n        where: { id: feedId },\n      });\n    } catch (error) {\n      return noRequest(refreshPreparationOutcome(error, 'feed-lookup'));\n    }\n    if (\n      !feed ||\n      feed.status !== 1 ||\n"
+      },
+      {
+        "before": "        this.activeSubscriptionAdds.delete('wechat2rss:add');\n      }\n    };\n    try {\n      const claimKey = waveKey.split('/')[0];\n      const prior = await readRefreshSubmission(\n",
+        "after": "        this.activeSubscriptionAdds.delete('wechat2rss:add');\n      }\n    };\n    let preparationStage: RefreshPreparationStage = 'claim-read';\n    try {\n      const claimKey = waveKey.split('/')[0];\n      const prior = await readRefreshSubmission(\n"
+      },
+      {
+        "before": "        release();\n        return noRequest(prior);\n      }\n      const provider = wechat2RssProvider();\n      const account = await provider.checkAccountStatus();\n      if (account.challenged || !account.available) {\n        release();\n",
+        "after": "        release();\n        return noRequest(prior);\n      }\n      preparationStage = 'provider-config';\n      const provider = wechat2RssProvider();\n      preparationStage = 'account-status';\n      const account = await provider.checkAccountStatus();\n      if (account.challenged || !account.available) {\n        release();\n"
+      },
+      {
+        "before": "          message: 'Account restricted; prepared wave will not be submitted.',\n        });\n      }\n      const submit = await provider.prepareRefreshSubscription(\n        feedId,\n        automatic,\n        (response) => saveRefreshResponseReceipt(ticket, response),\n      );\n      const now = Math.floor(Date.now() / 1000);\n      const reserved = await reserveRefreshSubmission(\n        this.prismaService,\n        feed,\n",
+        "after": "          message: 'Account restricted; prepared wave will not be submitted.',\n        });\n      }\n      preparationStage = 'subscription-check';\n      const submit = await provider.prepareRefreshSubscription(\n        feedId,\n        automatic,\n        (response) => saveRefreshResponseReceipt(ticket, response),\n      );\n      const now = Math.floor(Date.now() / 1000);\n      preparationStage = 'reservation';\n      const reserved = await reserveRefreshSubmission(\n        this.prismaService,\n        feed,\n"
+      },
+      {
+        "before": "      };\n    } catch (error) {\n      release();\n      const code = (error as Error)?.message;\n      if (\n        [\n          'WECHAT2RSS_SUBSCRIPTION_PAUSED',\n",
+        "after": "      };\n    } catch (error) {\n      release();\n      const preparationFailure = refreshPreparationFailure(\n        error,\n        preparationStage,\n      );\n      const code = preparationFailure.code;\n      if (\n        [\n          'WECHAT2RSS_SUBSCRIPTION_PAUSED',\n"
+      },
+      {
+        "before": "          submissionUnknown: false,\n          stopBatch: false,\n          code: 'SUBSCRIPTION_PAUSED',\n          message: 'Upstream subscription paused or removed; update not sent.',\n        });\n      if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED')\n",
+        "after": "          submissionUnknown: false,\n          stopBatch: false,\n          code: 'SUBSCRIPTION_PAUSED',\n          preparationFailure,\n          message: 'Upstream subscription paused or removed; update not sent.',\n        });\n      if (code === 'WECHAT2RSS_AUTOMATIC_WINDOW_CLOSED')\n"
+      },
+      {
+        "before": "          accepted: false,\n          submissionUnknown: false,\n          stopBatch: false,\n          message: 'Automatic window closed; update not sent.',\n        });\n      return noRequest({\n        state: code === 'WECHAT2RSS_RATE_LIMITED' ? 'blocked' : 'failed',\n        accepted: false,\n        submissionUnknown: false,\n        retryable: code !== 'WECHAT2RSS_RATE_LIMITED',\n        stopBatch: code === 'WECHAT2RSS_RATE_LIMITED',\n        sharedRestriction: code === 'WECHAT2RSS_RATE_LIMITED',\n        restrictionKind:\n          code === 'WECHAT2RSS_RATE_LIMITED' ? 'rate-limit' : undefined,\n        message: 'Preparation failed before update request.',\n      });\n    }\n  }\n  private async reconcileUnreservedRefresh(\n",
+        "after": "          accepted: false,\n          submissionUnknown: false,\n          stopBatch: false,\n          preparationFailure,\n          message: 'Automatic window closed; update not sent.',\n        });\n      return noRequest(refreshPreparationOutcome(error, preparationStage));\n    }\n  }\n  private async reconcileUnreservedRefresh(\n"
+      }
+    ]
+  }
+}

@@ -12,6 +12,11 @@ import {
   validRefreshSubmissionFailure,
   RefreshSubmissionFailure,
 } from './refresh-response-receipt';
+import {
+  refreshPreparationOutcome,
+  validRefreshPreparationFailure,
+  RefreshPreparationFailure,
+} from './refresh-preparation-failure';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { subscriptionArticleUrl } from './subscription-add';
@@ -65,6 +70,7 @@ export type BatchOutcome = {
   failurePoint?: RefreshCacheFailurePoint;
   submissionFailure?: RefreshSubmissionFailure;
   reconciliationFailure?: RefreshSubmissionFailure;
+  preparationFailure?: RefreshPreparationFailure;
 };
 export type PreparedRefresh = {
   outcome?: BatchOutcome;
@@ -242,6 +248,7 @@ const itemFields = new Set([
   'failurePoint',
   'submissionFailure',
   'reconciliationFailure',
+  'preparationFailure',
   'occupancyRelease',
   'releaseSourceSha256',
 ]);
@@ -534,6 +541,7 @@ const view = (b: Batch, records: Batch[] = [b], now = Date.now()) => ({
     failurePoint: item.failurePoint,
     submissionFailure: item.submissionFailure,
     reconciliationFailure: item.reconciliationFailure,
+    preparationFailure: item.preparationFailure,
     coverageReviewRequired: item.coverageReviewRequired,
     waitingForReceipt: item.waitingForReceipt,
     supersededBy: item.supersededBy,
@@ -970,6 +978,8 @@ export class Wechat2RssSubscriptionBatches {
             !validRefreshSubmissionFailure(item.submissionFailure)) ||
           (item.reconciliationFailure !== undefined &&
             !validRefreshSubmissionFailure(item.reconciliationFailure)) ||
+          (item.preparationFailure !== undefined &&
+            !validRefreshPreparationFailure(item.preparationFailure)) ||
           (item.sharedRestriction !== undefined &&
             typeof item.sharedRestriction !== 'boolean') ||
           (item.submissionUnknown !== undefined &&
@@ -2655,15 +2665,9 @@ export class Wechat2RssSubscriptionBatches {
                 item.releaseSourceSha256,
               )
             : await this.prepareRefresh!(item.feedId!, automatic, waveKey);
-        } catch {
+        } catch (error) {
           job = {
-            outcome: {
-              state: 'failed',
-              accepted: false,
-              retryable: true,
-              stopBatch: false,
-              message: 'Serial preparation failed; update not sent.',
-            },
+            outcome: refreshPreparationOutcome(error, 'prepare-callback'),
             release: () => {},
           };
         }
@@ -2837,6 +2841,14 @@ export class Wechat2RssSubscriptionBatches {
     if (!current) return true;
     const target = current.items[item.index];
     Object.assign(target, result);
+    // A preparation diagnostic describes an unsent attempt, not the later
+    // accepted/uncertain submission. Do not attach stale safe-to-retry evidence.
+    if (
+      stage === 'submit' &&
+      (result.accepted === true || result.submissionUnknown === true) &&
+      result.preparationFailure === undefined
+    )
+      delete target.preparationFailure;
     if (
       current.state === 'stopped' &&
       target.state === 'queued' &&

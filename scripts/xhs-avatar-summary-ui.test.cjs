@@ -59,6 +59,25 @@ test('summary missing is unknown and zero is explicit', () => {
     m = { exports: {} };
   new Function('require', 'exports', 'module', out)(r, m.exports, m);
   const C = m.exports.XhsCommentSummary;
+  const omitted = renderToStaticMarkup(
+    React.createElement(C, {
+      task: {
+        commentCollection: {
+          round: '2026-11-11/14:00',
+          state: 'not-authorized',
+          notCollectedNotes: 131,
+        },
+        archiveConflicts: 2,
+      },
+    }),
+  );
+  assert.match(omitted, /未获调度授权/);
+  assert.match(omitted, /131/);
+  assert.match(omitted, /篇未采集/);
+  assert.match(omitted, /不代表评论或全链归档完整/);
+  assert.match(omitted, /归档待核/);
+  assert.doesNotMatch(omitted, /完成 131|结果未知 0/);
+
   assert.match(
     renderToStaticMarkup(React.createElement(C, { task: {} })),
     /待统计/,

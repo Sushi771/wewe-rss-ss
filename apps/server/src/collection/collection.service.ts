@@ -703,7 +703,8 @@ export class CollectionService {
       });
       if (feed.mpName !== input.mpName)
         throw new Error('订阅名称已变化，本次未写入');
-      const provider = wechat2RssProvider();
+      // A validated local page needs no provider configuration or source access.
+      const provider = input.cachedPage ? undefined : wechat2RssProvider();
       // Cache reads do not submit upstream work. A collection-account state
       // cannot invalidate already cached identities/body bytes; the cache
       // endpoint still enforces its own access and response validation.
@@ -711,18 +712,18 @@ export class CollectionService {
       // explicit new-subscription action; /add also updates already subscribed feeds.
       const feedAvatar = input.cachedPage
         ? undefined
-        : await this.readWechat2RssAvatar(feed, provider);
+        : await this.readWechat2RssAvatar(feed, provider!);
       const supplementAvatar = (tx: Pick<typeof this.prisma, 'feed'>) =>
         this.writeWechat2RssAvatar(tx, input.mpId, feedAvatar);
       const accepted = false;
       const fetched =
         input.cachedPage ||
         (input.acceptedFeedPath
-          ? await provider.fetchAcceptedArticles(
+          ? await provider!.fetchAcceptedArticles(
               input.acceptedFeedPath,
               input.mpId,
             )
-          : await provider.fetchArticles(input.mpId, input.mpName));
+          : await provider!.fetchArticles(input.mpId, input.mpName));
       if (
         !fetched ||
         !Array.isArray(fetched.articles) ||
@@ -768,7 +769,7 @@ export class CollectionService {
       // The first visible list contains real identities/times, with no false body
       // readiness. Full body/image archiving follows in the durable task.
       const safety =
-        input.cachedPage && !input.listOnly
+        input.cachedPage && !input.listOnly && input.fetchMedia !== false
           ? await mediaSafetyStop(process.env.DATABASE_URL || '')
           : undefined;
       const page = input.listOnly

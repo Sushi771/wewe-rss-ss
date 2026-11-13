@@ -202,6 +202,128 @@ async function assertBaseline(tx: RoundTx, scope: any, operation?: string) {
     'SCHEDULED_CREATOR_BINDING_CHANGED',
   );
 }
+/** Read-only proof for the isolated known-response authentication review.
+ * No grant, budget, baseline exclusion or scheduled admission is created here. */
+export async function readScheduledKnownAuthProof(
+  tx: RoundTx,
+  taskId: string,
+  reviewId: string,
+  policyId: string,
+) {
+  const policy = await activePolicy(tx);
+  check(policy?.id === policyId, 'SCHEDULED_POLICY_CHANGED');
+  const approved = JSON.parse(policy.scope_json);
+  await assertBaseline(tx, approved);
+  check(
+    hash(approved.baseline) === approved.baselineDigest,
+    'REVIEW_STATE_CHANGED',
+  );
+  const review = (await reviews(tx)).find((r) => r.id === reviewId);
+  check(review, 'SCHEDULED_REVIEW_REQUIRED');
+  const scope = JSON.parse(review.scope_json);
+  check(
+    scope.reviewKind === SCHEDULED_REVIEW_KIND &&
+      scope.policyId === policy.id &&
+      scope.taskBinding?.taskId === taskId &&
+      scope.taskBinding.phase === 'basic' &&
+      scope.taskBinding.batch === 0 &&
+      taskId ===
+        scheduledTaskId(scope.round, scope.taskBinding.creatorId, 'basic') &&
+      review.id ===
+        'scheduled-task-' + hash([policy.id, scope.round, taskId]) &&
+      review.plan_digest === hash(scope) &&
+      pack(scope) ===
+        pack({
+          ...approved,
+          reviewKind: SCHEDULED_REVIEW_KIND,
+          round: scope.round,
+          taskBinding: scope.taskBinding,
+          sessionBinding: scope.sessionBinding,
+          budgetId: fullHistoryBudgetId(reviewId, taskId),
+        }),
+    'SCHEDULED_REVIEW_BINDING_CHANGED',
+  );
+  return { policy, review, scope, baseline: approved.baseline };
+}
+/** Prove an omission, never grant comment requests or extend a phase budget. */
+export async function readScheduledCommentOmission(
+  tx: RoundTx,
+  input: { round: string; creatorId: string; sessionBinding: string },
+): Promise<'not-authorized' | undefined> {
+  const policy = await activePolicy(tx);
+  if (!policy) {
+    check(
+      !(await reviews(tx)).some((row) =>
+        [
+          SCHEDULED_POLICY_KIND,
+          SCHEDULED_REVIEW_KIND,
+          SCHEDULED_REVOKE_KIND,
+        ].includes(JSON.parse(row.scope_json).reviewKind),
+      ),
+      'SCHEDULED_POLICY_UNAVAILABLE',
+    );
+    return undefined;
+  }
+  const taskId = scheduledTaskId(input.round, input.creatorId, 'basic');
+  const reviewId = 'scheduled-task-' + hash([policy.id, input.round, taskId]);
+  const { scope } = await readScheduledKnownAuthProof(
+    tx,
+    taskId,
+    reviewId,
+    policy.id,
+  );
+  check(
+    scope.round === input.round &&
+      scope.taskBinding.creatorId === input.creatorId &&
+      scope.sessionBinding === input.sessionBinding,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  check(
+    Object.keys(scope.phaseLimits ?? {})
+      .sort()
+      .join(',') === 'detail,list,media,profile' &&
+      scope.comments === false &&
+      scope.replies === false,
+    'SCHEDULED_POLICY_LIMIT_INVALID',
+  );
+  const risk = await rows(
+    tx,
+    "SELECT * FROM xhs_source_risk WHERE id='source'",
+  );
+  check(
+    risk.length === 1 &&
+      risk[0].state === 'clear' &&
+      ['code', 'owner', 'http_status', 'endpoint'].every(
+        (key) => risk[0][key] === null,
+      ),
+    'SCHEDULED_SOURCE_RISK_CHANGED',
+  );
+  const tasks = await rows(
+    tx,
+    'SELECT creator_id,state,document FROM xhs_subscription_tasks WHERE id=?',
+    taskId,
+  );
+  check(
+    tasks.length === 1 && tasks[0].creator_id === input.creatorId,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  const doc = JSON.parse(tasks[0].document);
+  check(
+    ['completed', 'partial'].includes(tasks[0].state) &&
+      doc.state === tasks[0].state &&
+      doc.taskId === taskId &&
+      doc.creatorId === input.creatorId &&
+      doc.schedule?.round === input.round &&
+      doc.schedule?.phase === 'basic' &&
+      (doc.schedule?.batch ?? 0) === 0 &&
+      doc.remaining === 0 &&
+      !doc.sourceActive &&
+      !doc.sourceUnknowns?.length,
+    'SCHEDULED_TASK_BINDING_CHANGED',
+  );
+  return 'not-authorized';
+}
+
 export async function prepareScheduledPolicy(
   tx: RoundTx,
   input: ScheduledPolicyInput,
@@ -365,6 +487,55 @@ export type ScheduledTaskReviewInput = {
   sessionBinding: string;
   authorId: string;
 };
+/** A settled media lane may be observed without replaying its reviewed items.
+ * Require per-note terminal evidence, not only aggregate zero counters. */
+function settledMediaPartial(doc: any): boolean {
+  const ids = doc.noteIds;
+  const results = doc.scheduledMediaResults;
+  const items = doc.items;
+  if (
+    doc.state !== 'partial' ||
+    doc.failed !== 0 ||
+    doc.remaining !== 0 ||
+    !Array.isArray(ids) ||
+    !ids.length ||
+    ids.length > 1000 ||
+    ids.some((id: unknown) => typeof id !== 'string' || !id.length) ||
+    new Set(ids).size !== ids.length ||
+    doc.total !== ids.length ||
+    !results ||
+    typeof results !== 'object' ||
+    Array.isArray(results) ||
+    !items ||
+    typeof items !== 'object' ||
+    Array.isArray(items) ||
+    Object.keys(results).length !== ids.length ||
+    Object.keys(items).length !== ids.length
+  )
+    return false;
+  let completed = 0,
+    skipped = 0,
+    review = false;
+  for (const id of ids) {
+    const result = results[id];
+    if (result === 'complete' && items[id] === 'completed') completed++;
+    else if (
+      ['needs-review', 'needs-detail-refresh'].includes(result) &&
+      items[id] === 'skipped'
+    ) {
+      skipped++;
+      if (result === 'needs-review') review = true;
+    } else return false;
+  }
+  return (
+    skipped > 0 &&
+    doc.completed === completed &&
+    doc.skipped === skipped &&
+    doc.code ===
+      (review ? 'XHS_MEDIA_REVIEW_REQUIRED' : 'XHS_MEDIA_NEEDS_DETAIL_REFRESH')
+  );
+}
+
 export async function prepareScheduledTaskReview(
   tx: RoundTx,
   input: ScheduledTaskReviewInput,
@@ -433,14 +604,32 @@ export async function prepareScheduledTaskReview(
         Number.isSafeInteger(doc.failed) &&
         doc.failed > 0 &&
         doc.remaining === 0;
+      const historyPartial =
+        input.phase === 'basic' &&
+        task[0].state === 'partial' &&
+        doc.state === 'partial' &&
+        doc.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' &&
+        doc.failed === 0 &&
+        doc.remaining === 0 &&
+        Array.isArray(doc.historyExcludedIds) &&
+        doc.historyExcludedIds.length > 0 &&
+        doc.historyExcludedIds.every(
+          (id: unknown) => typeof id === 'string' && id.length > 0,
+        );
       check(
-        (completed || localPartial) &&
+        (completed ||
+          localPartial ||
+          historyPartial ||
+          (input.phase === 'media' &&
+            task[0].state === 'partial' &&
+            settledMediaPartial(doc))) &&
           !doc.sourceActive &&
           !doc.sourceUnknowns?.length,
         'SCHEDULED_TASK_BINDING_CHANGED',
       );
       // A clock observation of this exact settled task grants no new work,
-      // session binding, review or request budget. Failed/unknown tasks stay closed.
+      // session binding, review or request budget. Historical exclusions remain
+      // excluded; other failed/unknown tasks stay closed.
       return undefined;
     }
   }
@@ -670,7 +859,7 @@ function assertContext(reviewId: string, scope: any) {
     'SCHEDULED_CONTEXT_CHANGED',
   );
 }
-export async function scheduledReviewedMarkers(
+export async function scheduledReviewedEvidence(
   tx: RoundTx,
   input: Omit<ScheduledTaskReviewInput, 'sessionBinding' | 'authorId'>,
 ) {
@@ -690,7 +879,18 @@ export async function scheduledReviewedMarkers(
     'SCHEDULED_TASK_BINDING_CHANGED',
   );
   await assertBaseline(tx, s);
-  return s.baseline.fences.map((f: any) => f.id) as string[];
+  check(hash(s.baseline) === s.baselineDigest, 'REVIEW_STATE_CHANGED');
+  // Both views come from the same exact, live-verified retained baseline.
+  // This preserves old unknown receipts without treating them as new work or
+  // exempting a new/changed source request from the global admission fence.
+  return {
+    markers: s.baseline.fences.map((f: any) => f.id) as string[],
+    sourceActives: s.baseline.unknowns.filter((u: any) => u.sourceActive) as {
+      id: string;
+      creatorId: string;
+      sourceActive: unknown;
+    }[],
+  };
 }
 export async function assertScheduledDispatch(
   tx: RoundTx,

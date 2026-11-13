@@ -6,6 +6,70 @@ const test = require('node:test'),
   crypto = require('node:crypto');
 const scope = require('./release-scope.cjs');
 const { fileHash } = require('./lib.cjs');
+test('prior-boot scope validates cold eligibility, then binds the new family without reopening the archived lease', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      helper = require('./normal-start-claim-rebind.cjs');
+    const originalRead = helper.readPriorBootEvidence,
+      originalValidate = helper.validatePriorBootEmpty;
+    const oldFacts = structuredClone(f.facts);
+    let archived = false,
+      reads = 0;
+    f.policy.preservingUpdate.priorBootExit = {
+      helperSha256: fileHash(
+        path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+      ),
+    };
+    c.set([]);
+    f.save();
+    helper.readPriorBootEvidence = () => {
+      assert.equal(
+        archived,
+        false,
+        'archived original lease must not be reread after transition',
+      );
+      reads++;
+      return { oldFacts };
+    };
+    helper.validatePriorBootEmpty = ({ facts }) => {
+      assert.equal(
+        facts.records.filter((r) => r.kind === 'processes').length,
+        0,
+      );
+    };
+    try {
+      scope.within(
+        c.request,
+        (lease) => {
+          lease.preparePriorBootExit();
+          const before = reads;
+          archived = true;
+          lease.check(true);
+          const next = c.make('candidate', process.pid + 10000);
+          c.set(next.rows);
+          lease.bindPreservingChild(
+            next.snapshot,
+            'candidate',
+            next.snapshot.commandLine,
+          );
+          assert.equal(
+            lease.sealPreservingProcessFamily(
+              next.snapshot,
+              'candidate',
+              next.snapshot.commandLine,
+            ),
+            true,
+          );
+          lease.check(true);
+          assert.equal(reads, before);
+        },
+        f.options(),
+      );
+    } finally {
+      helper.readPriorBootEvidence = originalRead;
+      helper.validatePriorBootEmpty = originalValidate;
+    }
+  }));
 test('legacy boundary observes only twice and its repeated lease checks never query complete references', () =>
   fixture((f) => {
     const request = preservingRestart(f),
@@ -315,6 +379,513 @@ function effectRestart(f) {
   f.save();
   return s;
 }
+function familyRestart(f) {
+  const s = effectRestart(f),
+    hash = (value) =>
+      crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  f.policy.preservingUpdate.processFamily = { format: 1 };
+  f.policy.windowsReferences.launchers = [];
+  for (const pkg of f.policy.windowsReferences.packages) {
+    fs.mkdirSync(path.join(pkg.path, 'runtime'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pkg.path, 'runtime/node.exe'),
+      'inert family runtime',
+    );
+    const entry = path.join(pkg.path, 'runtime.cjs');
+    for (const name of ['runtime.cjs', 'watch.py', 'guard.py']) {
+      const file = path.join(pkg.path, name),
+        executable = path.join(pkg.path, 'runtime/node.exe');
+      fs.writeFileSync(file, '// inert family entry');
+      f.policy.windowsReferences.launchers.push({
+        packageId: pkg.id,
+        entry: file,
+        ...(name === 'runtime.cjs' ? {} : { parentEntry: entry }),
+        argv: [executable, file, '--database', 'synthetic-only'],
+        executable: { path: executable, sha256: fileHash(executable) },
+        files: [{ path: file, sha256: fileHash(file) }],
+        workingDirectory: pkg.path,
+        cwdIndependent: true,
+      });
+    }
+  }
+  const make = (id, pid) => {
+    const launchers = f.policy.windowsReferences.launchers.filter(
+      (l) => l.packageId === id,
+    );
+    const snapshots = launchers.map((l, index) => ({
+      pid: pid + index,
+      parentPid: index ? pid : 1,
+      startUtc: '2026-01-01T00:00:00Z',
+      executable: l.executable.path,
+      commandLine: l.argv.join(' '),
+    }));
+    const rows = snapshots.map((snapshot, i) => ({
+      kind: 'processes',
+      packageId: id,
+      packagePath: path.dirname(path.dirname(snapshot.executable)),
+      pid: snapshot.pid,
+      parentPid: snapshot.parentPid,
+      startUtc: snapshot.startUtc,
+      executableSha256: fileHash(snapshot.executable),
+      identity: hash([
+        snapshot.pid,
+        snapshot.parentPid,
+        snapshot.startUtc,
+        snapshot.executable,
+        fileHash(snapshot.executable),
+        snapshot.commandLine,
+      ]),
+      invocationSha256: hash(launchers[i]),
+      parentInvocationSha256: i ? hash(launchers[0]) : null,
+    }));
+    return { rows, snapshot: snapshots[0] };
+  };
+  const set = (rows, topology = rows) => {
+    f.facts.records = [
+      ...f.facts.records.filter((r) => r.kind !== 'processes'),
+      ...structuredClone(rows),
+    ];
+    f.facts.processTopology = [0, 1].flatMap((phase) =>
+      topology.map(({ pid, parentPid }) => ({
+        pid,
+        parentPid,
+        phase,
+      })),
+    );
+  };
+  const old = make('current', process.pid);
+  set(old.rows);
+  f.policy.preservingUpdate.active.oldProcess.executableSha256 =
+    old.rows[0].executableSha256;
+  Object.assign(
+    f.policy,
+    scope.inspect([f.installed, f.build], {
+      privateAccounting: 'private-names-v1',
+      preservingUpdate: f.policy.preservingUpdate,
+    }),
+  );
+  f.save();
+  return { ...s, old, make, set };
+}
+test('family parent creation order keeps sub-millisecond precision for helper and console ownership', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      families = require('./preserving-process-family.cjs');
+    const rows = structuredClone(c.old.rows);
+    rows[0].startUtc = '2026-01-01T00:00:00.0000002Z';
+    rows[1].startUtc = '2026-01-01T00:00:00.0000001Z';
+    rows[2].startUtc = '2026-01-01T00:00:00.0000003Z';
+    assert.throws(
+      () => families.family(rows, rows[0].pid, 'current', f.policy, true),
+      /FAMILY_CHANGED/,
+    );
+    rows[1].startUtc = '2026-01-01T00:00:00.0000002Z';
+    families.family(rows, rows[0].pid, 'current', f.policy, true);
+    const spec = { synthetic: 'console' };
+    f.policy.preservingUpdate.processFamily.consoleHost = spec;
+    const host = {
+      ...rows[1],
+      pid: 987999,
+      parentPid: rows[1].pid,
+      consoleHost: true,
+      invocationSha256: crypto
+        .createHash('sha256')
+        .update(JSON.stringify(spec))
+        .digest('hex'),
+      parentInvocationSha256: rows[1].invocationSha256,
+      startUtc: '2026-01-01T00:00:00.0000001Z',
+    };
+    assert.throws(
+      () =>
+        families.family(
+          [...rows, host],
+          rows[0].pid,
+          'current',
+          f.policy,
+          true,
+        ),
+      /FAMILY_CHANGED/,
+    );
+    host.startUtc = rows[1].startUtc;
+    families.family([...rows, host], rows[0].pid, 'current', f.policy, true);
+  }));
+test('family lease confirms staggered exits and admits children only until sealed across candidate and fallback', () =>
+  fixture((f) => {
+    const c = familyRestart(f);
+    scope.within(
+      c.request,
+      (lease) => {
+        lease.preparePreservingProcessFamily(c.old.snapshot);
+        const stopped = { ...c.old.snapshot, stopped: true };
+        c.set(c.old.rows.slice(1));
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          false,
+        );
+        c.set(c.old.rows.slice(2));
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          false,
+        );
+        c.set([]);
+        assert.equal(
+          lease.confirmPreservingProcessExit(stopped.pid, stopped),
+          true,
+        );
+        lease.assertLegacyMaintenanceQuiescent(c.old.snapshot);
+        for (const [id, pid] of [
+          ['candidate', 987641],
+          ['current', 987651],
+        ]) {
+          const family = c.make(id, pid);
+          for (let n = 1; n <= 3; n++) {
+            c.set(family.rows.slice(0, n));
+            lease.bindPreservingChild(
+              family.snapshot,
+              id,
+              family.snapshot.commandLine,
+            );
+          }
+          lease.sealPreservingProcessFamily(
+            family.snapshot,
+            id,
+            family.snapshot.commandLine,
+          );
+          lease.check(true);
+          c.set([]);
+          assert.equal(
+            lease.confirmPreservingProcessExit(pid, {
+              ...family.snapshot,
+              stopped: true,
+            }),
+            true,
+          );
+        }
+      },
+      f.options(),
+    );
+  }));
+for (const mutation of [
+  'unknown-child',
+  'missing-child',
+  'parent',
+  'duplicate',
+  'start',
+  'argv',
+  'child-predates-parent',
+])
+  test('family admission fails before output or callback on ' + mutation, () =>
+    fixture((f) => {
+      const c = familyRestart(f),
+        rows = structuredClone(c.old.rows);
+      if (mutation === 'unknown-child')
+        rows.push({
+          ...rows[1],
+          pid: 987666,
+          invocationSha256: 'f'.repeat(64),
+        });
+      if (mutation === 'missing-child') rows.pop();
+      if (mutation === 'parent') rows[1].parentPid = 987777;
+      if (mutation === 'child-predates-parent')
+        rows[1].startUtc = '2025-12-31T23:59:59.9999999Z';
+      if (mutation === 'duplicate') rows.push({ ...rows[1], pid: 987666 });
+      if (mutation === 'start') rows[0].startUtc += '-changed';
+      if (mutation === 'argv') rows[0].invocationSha256 = 'f'.repeat(64);
+      c.set(rows);
+      let called = false;
+      assert.throws(() =>
+        scope.within(
+          c.request,
+          () => {
+            called = true;
+          },
+          f.options(),
+        ),
+      );
+      assert.equal(called, false);
+      assert.deepEqual(fs.readdirSync(f.build), []);
+    }),
+  );
+for (const mutation of [
+  'pid-reuse',
+  'unknown-orphan',
+  'parent-change',
+  'resurrection',
+])
+  test('family exit refuses ' + mutation, () =>
+    fixture((f) => {
+      const c = familyRestart(f);
+      assert.throws(
+        () =>
+          scope.within(
+            c.request,
+            (lease) => {
+              const receipt = { ...c.old.snapshot, stopped: true };
+              c.set(c.old.rows.slice(1));
+              assert.equal(
+                lease.confirmPreservingProcessExit(receipt.pid, receipt),
+                false,
+              );
+              if (mutation === 'pid-reuse')
+                c.set([], [{ pid: receipt.pid, parentPid: 0 }]);
+              if (mutation === 'unknown-orphan')
+                c.set([], [{ pid: 987888, parentPid: receipt.pid }]);
+              if (mutation === 'parent-change')
+                c.set(
+                  c.old.rows.slice(1).map((r) => ({ ...r, parentPid: 987888 })),
+                );
+              if (mutation === 'resurrection') c.set(c.old.rows);
+              lease.confirmPreservingProcessExit(receipt.pid, receipt);
+            },
+            f.options(),
+          ),
+        mutation === 'resurrection'
+          ? /EXIT_UNCONFIRMED/
+          : /FAMILY_CHANGED|REFERENCES_CHANGED/,
+      );
+    }),
+  );
+test('family startup waits only for absent reviewed helpers and refuses replaced or sealed additions', () =>
+  fixture((f) => {
+    const c = familyRestart(f);
+    scope.within(
+      c.request,
+      (lease) => {
+        c.set([]);
+        lease.confirmPreservingProcessExit(c.old.snapshot.pid, {
+          ...c.old.snapshot,
+          stopped: true,
+        });
+        const next = c.make('candidate', 987641),
+          command = next.snapshot.commandLine;
+        c.set(next.rows.slice(0, 1));
+        lease.bindPreservingChild(next.snapshot, 'candidate', command);
+        assert.equal(
+          lease.sealPreservingProcessFamily(
+            next.snapshot,
+            'candidate',
+            command,
+          ),
+          false,
+        );
+        c.set(next.rows.slice(0, 2));
+        lease.bindPreservingChild(next.snapshot, 'candidate', command);
+        c.set([next.rows[0], { ...next.rows[1], pid: 987999 }]);
+        assert.throws(
+          () => lease.bindPreservingChild(next.snapshot, 'candidate', command),
+          /FAMILY_CHANGED/,
+        );
+        c.set(next.rows);
+        assert.equal(
+          lease.sealPreservingProcessFamily(
+            next.snapshot,
+            'candidate',
+            command,
+          ),
+          true,
+        );
+        c.set([...next.rows, { ...next.rows[1], pid: 987999 }]);
+        assert.throws(
+          () => lease.bindPreservingChild(next.snapshot, 'candidate', command),
+          /FAMILY_CHANGED/,
+        );
+        c.set(next.rows);
+      },
+      f.options(),
+    );
+  }));
+for (const observation of [
+  'late',
+  'missing',
+  'unknown',
+  'reused',
+  'exited',
+  'incomplete',
+])
+  test(
+    'family seal after HTTP readiness handles only reviewed absence: ' +
+      observation,
+    () =>
+      fixture(async (f) => {
+        const c = familyRestart(f),
+          { sealFamily } = require('./restart.cjs');
+        const consoleSpec = {
+          path: 'synthetic-console',
+          sha256: 'a'.repeat(64),
+          identity: ['synthetic'],
+          argv: ['synthetic', '0x4'],
+        };
+        f.policy.preservingUpdate.processFamily.consoleHost = consoleSpec;
+        f.save();
+        await scope.within(
+          c.request,
+          async (lease) => {
+            c.set([]);
+            lease.confirmPreservingProcessExit(c.old.snapshot.pid, {
+              ...c.old.snapshot,
+              stopped: true,
+            });
+            const next = c.make('candidate', 987641),
+              command = next.snapshot.commandLine,
+              partial = next.rows.slice(0, 2);
+            c.set(partial);
+            lease.bindPreservingChild(next.snapshot, 'candidate', command);
+            let clock = 0,
+              waits = 0,
+              calls = 0;
+            const sealed = {
+              sealPreservingProcessFamily(...args) {
+                calls++;
+                return lease.sealPreservingProcessFamily(...args);
+              },
+            };
+            const promise = sealFamily(
+              sealed,
+              next.snapshot,
+              'candidate',
+              command,
+              {
+                now: () => clock,
+                timeoutMs: 250,
+                wait: async (ms) => {
+                  waits++;
+                  clock += ms;
+                  if (observation === 'late') c.set(next.rows);
+                  if (observation === 'unknown')
+                    c.set([
+                      ...partial,
+                      { ...next.rows[2], invocationSha256: 'f'.repeat(64) },
+                    ]);
+                  if (observation === 'reused')
+                    c.set([
+                      next.rows[0],
+                      {
+                        ...next.rows[1],
+                        startUtc: '2026-01-02T00:00:00Z',
+                        identity: 'reused',
+                      },
+                    ]);
+                  if (observation === 'exited') c.set(next.rows.slice(0, 1));
+                  if (observation === 'incomplete')
+                    f.facts.observationComplete = false;
+                },
+              },
+            );
+            if (observation === 'late') {
+              await promise;
+              assert.equal(calls, 2);
+              assert.equal(waits, 1);
+              c.set([...next.rows, { ...next.rows[1], pid: 987999 }]);
+              assert.throws(
+                () =>
+                  lease.sealPreservingProcessFamily(
+                    next.snapshot,
+                    'candidate',
+                    command,
+                  ),
+                /FAMILY_CHANGED/,
+              );
+              // Even an otherwise valid optional console cannot join after seal.
+              const host = {
+                pid: 987998,
+                parentPid: next.rows[1].pid,
+                startUtc: next.rows[1].startUtc,
+                executableSha256: consoleSpec.sha256,
+                consoleHost: true,
+                identity: 'synthetic-console-identity',
+                invocationSha256: crypto
+                  .createHash('sha256')
+                  .update(JSON.stringify(consoleSpec))
+                  .digest('hex'),
+              };
+              c.set(next.rows, [...next.rows, host]);
+              f.facts.consoleProcesses = [host];
+              assert.throws(
+                () =>
+                  lease.sealPreservingProcessFamily(
+                    next.snapshot,
+                    'candidate',
+                    command,
+                  ),
+                /FAMILY_CHANGED/,
+              );
+              f.facts.consoleProcesses = [];
+              c.set(next.rows);
+            } else {
+              await assert.rejects(
+                promise,
+                observation === 'missing'
+                  ? /SEAL_TIMEOUT/
+                  : /FAMILY_CHANGED|REFERENCE/,
+              );
+              assert.equal(waits, observation === 'missing' ? 3 : 1);
+              assert.equal(calls, observation === 'missing' ? 3 : 2);
+              assert.equal(clock, observation === 'missing' ? 250 : 100);
+              c.set(partial);
+              f.facts.observationComplete = true;
+            }
+          },
+          f.options(),
+        );
+      }),
+  );
+test('family lease preserves console ownership after parents exit and validates cross-frame identities', () =>
+  fixture((f) => {
+    const c = familyRestart(f),
+      hash = (value) =>
+        crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const spec = {
+      path: 'synthetic-system-console',
+      sha256: 'a'.repeat(64),
+      identity: ['synthetic'],
+      argv: ['synthetic', '0x4'],
+    };
+    f.policy.preservingUpdate.processFamily.consoleHost = spec;
+    const hosts = c.old.rows.slice(1).map((row, i) => ({
+      pid: 987881 + i,
+      parentPid: row.pid,
+      startUtc: row.startUtc,
+      executableSha256: spec.sha256,
+      consoleHost: true,
+      invocationSha256: hash(spec),
+      identity: hash(['synthetic-console', i]),
+    }));
+    c.set(c.old.rows, [...c.old.rows, ...hosts]);
+    f.facts.consoleProcesses = hosts;
+    f.save();
+    scope.within(
+      c.request,
+      (lease) => {
+        lease.preparePreservingProcessFamily(c.old.snapshot);
+        const receipt = { ...c.old.snapshot, stopped: true };
+        c.set(c.old.rows.slice(2), [...c.old.rows.slice(2), ...hosts]);
+        f.facts.exitedProcesses = [c.old.rows[1]];
+        f.facts.processTopology.push({
+          pid: c.old.rows[1].pid,
+          parentPid: receipt.pid,
+          phase: 0,
+        });
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          false,
+        );
+        f.facts.exitedProcesses = [];
+        c.set([], [hosts[1]]);
+        f.facts.consoleProcesses = [hosts[1]];
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          false,
+        );
+        c.set([]);
+        f.facts.consoleProcesses = [];
+        assert.equal(
+          lease.confirmPreservingProcessExit(receipt.pid, receipt),
+          true,
+        );
+      },
+      f.options(),
+    );
+  }));
 test('effect restart accounts real audit outputs and rejects old-file or unapproved pointer writes', () =>
   fixture((f) => {
     const s = effectRestart(f),
@@ -1200,6 +1771,49 @@ test('L3: intent before mkdir and a failed partial output remain a held claim on
     assert.throws(() => f.open(), /INTERRUPTED_CLAIM/);
     assert(fs.existsSync(path.join(f.build, 'candidate/runtime')));
   }));
+for (const asynchronous of [false, true])
+  test(
+    'failed output retains the original error chain and held claim, async=' +
+      asynchronous,
+    () =>
+      fixture(async (f) => {
+        const origin = new Error('synthetic original cause');
+        const original = new assert.AssertionError({
+          message: 'PRIOR_BOOT_REBIND_PROJECT_PROCESS_EXITED',
+        });
+        original.cause = origin;
+        const stack = original.stack;
+        const request = { kind: 'build', root: f.build, reserveBytes: 4096 };
+        const run = () =>
+          scope.within(
+            request,
+            (lease) => {
+              output(f, lease);
+              if (asynchronous) return Promise.reject(original);
+              throw original;
+            },
+            f.options(),
+          );
+        const check = (error) => {
+          assert.equal(
+            error.message,
+            'RELEASE_SCOPE_FAILED_OUTPUT_HELD_REQUIRES_REVIEW',
+          );
+          assert.equal(error.cause, original);
+          assert.equal(error.cause.stack, stack);
+          assert.equal(error.cause.cause, origin);
+          return true;
+        };
+        if (asynchronous) await assert.rejects(run, check);
+        else assert.throws(run, check);
+        const state = path.join(f.base, f.policy.scopeId + '.state.json');
+        const before = fs.readFileSync(state);
+        assert.throws(() => f.open(), /INTERRUPTED_CLAIM/);
+        assert.deepEqual(fs.readFileSync(state), before);
+        assert(fs.existsSync(path.join(f.build, 'candidate/runtime')));
+      }),
+  );
+
 test('L3: confirmed inactive owned cleanup can finish without deleting any historical file', () =>
   fixture((f) => {
     const lease = f.open(),
@@ -2618,3 +3232,675 @@ test('install caller repair: unknown reference remains refused after binding', (
     assert.equal(state.claim, null);
     assert.deepEqual(state.outputs, []);
   }));
+
+function emptyInstallRecoveryFixture(run, priorBoot = false) {
+  return fixture((f) => {
+    const e = effectInstallScope(f),
+      tool = fs.realpathSync.native(path.join(__dirname, 'release-scope.cjs')),
+      writer = path.join(__dirname, 'install-lifecycle.cjs'),
+      hash = (v) =>
+        crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
+    e.request.reserveBytes = 64 * 1024;
+    for (const p of f.policy.windowsReferences.packages) {
+      fs.mkdirSync(path.join(p.path, 'runtime'), { recursive: true });
+      fs.writeFileSync(
+        path.join(p.path, 'runtime/node.exe'),
+        'inert synthetic runtime',
+      );
+      const manifestPath = path.join(p.path, 'release.json'),
+        manifest = JSON.parse(fs.readFileSync(manifestPath));
+      Object.assign(
+        manifest,
+        {
+          sourceHash: 'e'.repeat(64),
+          platform: process.platform,
+          arch: process.arch,
+        },
+        require('./lib.cjs').fingerprint(p.path),
+      );
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+      f.policy.packageProofs[p.id] = fileHash(manifestPath);
+      f.policy.preservingUpdate.active[p.id + 'ManifestSha256'] =
+        fileHash(manifestPath);
+    }
+    f.policy.windowsReferences.launchers = [
+      {
+        entry: path.join(f.base, 'synthetic-launcher.cjs'),
+        argv: ['synthetic', 'start'],
+        pointerPath: f.policy.preservingUpdate.active.pointer,
+        files: [
+          { path: tool, sha256: 'a'.repeat(64) },
+          { path: writer, sha256: fileHash(writer) },
+        ],
+      },
+    ];
+    const oldLauncher = f.policy.windowsReferences.launchers[0];
+    if (priorBoot)
+      oldLauncher.files.push({
+        path: path.join(__dirname, 'restart.cjs'),
+        sha256: 'c'.repeat(64),
+      });
+    const probePath = path.join(__dirname, 'windows-release-references.cjs'),
+      probeStat = fs.lstatSync(probePath, { bigint: true });
+    f.policy.probe = {
+      path: probePath,
+      sha256: 'd'.repeat(64),
+      identity: ['old'],
+    };
+    f.facts.records.push({
+      kind: 'tasks',
+      packageId: 'current',
+      packagePath: f.current,
+      identity: 'synthetic-startup-task',
+      viaPointer: {
+        path: oldLauncher.pointerPath,
+        launcherSha256: hash(oldLauncher.files),
+      },
+    });
+    f.save();
+    const priorBootFacts = structuredClone(f.facts);
+    const old = structuredClone(f.policy),
+      oldFile = path.join(f.base, 'interrupted-policy.json');
+    fs.copyFileSync(f.config, oldFile);
+    let now = 0;
+    const clock = test.mock.method(performance, 'now', () => now);
+    const lock = path.join(f.installed, '.build-budget.lock');
+    fs.writeFileSync(
+      lock,
+      JSON.stringify({ pid: 12345, token: crypto.randomUUID() }),
+    );
+    assert.equal(fs.statSync(lock).size, 60);
+    try {
+      const lease = scope.open(e.request, f.options());
+      now = 31000;
+      assert.throws(() => lease.check(), /SCAN_TIME_BUDGET/);
+      assert.throws(
+        () => lease.close(Error('original-timeout')),
+        /SCAN_TIME_BUDGET/,
+      );
+    } finally {
+      clock.mock.restore();
+      fs.unlinkSync(lock);
+    }
+    const ledger = path.join(f.base, old.scopeId + '.state.json'),
+      adopted = ledger + '.adopted',
+      prior = JSON.parse(fs.readFileSync(ledger));
+    prior.payload.futureCounter = {
+      used: 7,
+      history: ['failed attempt retained'],
+    };
+    prior.digest = hash(prior.payload);
+    fs.writeFileSync(ledger, JSON.stringify(prior));
+    const original = fs.readFileSync(ledger),
+      origin = fs.readFileSync(adopted),
+      failure = path.join(f.base, 'synthetic-failure.json');
+    fs.writeFileSync(
+      failure,
+      JSON.stringify({
+        outcome: 'UNKNOWN',
+        error: 'RELEASE_SCOPE_SCAN_TIME_BUDGET',
+      }),
+    );
+    const next = structuredClone(old);
+    next.probe = {
+      path: probePath,
+      sha256: fileHash(probePath),
+      identity: [
+        probeStat.dev,
+        probeStat.ino,
+        probeStat.size,
+        probeStat.mtimeNs,
+        probeStat.ctimeNs,
+      ].map(String),
+    };
+    next.scanBudget = {
+      profile: 'legacy-stream-v1',
+      checkpointMode: 'full',
+      scanEntries: 100000,
+      operationEntries: 1000000,
+      scanReadBytes: 1073741824,
+      operationReadBytes: 2147483648,
+      durationMs: 300000,
+    };
+    next.windowsReferences.launchers[0].files[0].sha256 = fileHash(tool);
+    if (priorBoot) {
+      const restart = path.join(__dirname, 'restart.cjs');
+      next.windowsReferences.launchers[0].files[2].sha256 = fileHash(restart);
+      next.preservingUpdate.priorBootExit = {
+        helperSha256: fileHash(
+          path.join(__dirname, 'normal-start-claim-rebind.cjs'),
+        ),
+        oldReferences: prior.payload.claim.refs,
+        restartBinding: {
+          path: restart,
+          oldSha256: 'c'.repeat(64),
+          newSha256: fileHash(restart),
+        },
+        launcherTransition: {
+          pointer: oldLauncher.pointerPath,
+          oldSha256: hash(oldLauncher.files),
+          newSha256: hash(next.windowsReferences.launchers[0].files),
+        },
+      };
+    }
+    f.facts.records.at(-1).viaPointer.launcherSha256 = hash(
+      next.windowsReferences.launchers[0].files,
+    );
+    const approval = path.join(f.base, 'empty-install-approval.json'),
+      st = fs.lstatSync(ledger, { bigint: true }),
+      receipt = {
+        format: 1,
+        kind: 'interrupted-empty-install-claim-recovery',
+        scopeId: old.scopeId,
+        registryDirectory: old.registryDirectory,
+        registryIdentity: old.registryIdentity,
+        oldPolicyPath: oldFile,
+        oldPolicySha256: fileHash(oldFile),
+        newPolicySha256: '',
+        priorLedgerSha256: fileHash(ledger),
+        priorPayloadDigest: prior.digest,
+        priorLedgerIdentity: [st.dev, st.ino, st.birthtimeNs].map(String),
+        adoptionSha256: fileHash(adopted),
+        auditedSourceIdentity: fileHash(tool),
+        reviewEvidence: 'synthetic exact empty-claim review',
+        claimId: prior.payload.claim.id,
+        claimSha256: hash(prior.payload.claim),
+        failureCode: 'RELEASE_SCOPE_SCAN_TIME_BUDGET',
+        failureEvidencePath: failure,
+        failureEvidenceSha256: fileHash(failure),
+        releasedBuildLock: {
+          ownerPidDigits: 5,
+          writerSha256: fileHash(writer),
+        },
+        allowedDifferences: [
+          'scanBudget',
+          'windowsReferences.launchers.0.files.0.sha256',
+          'probe.sha256',
+          'probe.identity',
+          ...(priorBoot
+            ? [
+                'windowsReferences.launchers.0.files.2.sha256',
+                'preservingUpdate.priorBootExit',
+              ]
+            : []),
+        ],
+        probeBinding: { old: old.probe, new: next.probe },
+        toolBinding: {
+          path: tool,
+          oldSha256: 'a'.repeat(64),
+          newSha256: fileHash(tool),
+        },
+      };
+    const save = () => {
+      fs.writeFileSync(f.config, JSON.stringify(next));
+      receipt.newPolicySha256 = fileHash(f.config);
+      fs.writeFileSync(approval, JSON.stringify(receipt));
+    };
+    save();
+    const options = () => ({
+      ...f.options(),
+      bindingRepairFile: approval,
+      bindingRepairSha256: fileHash(approval),
+    });
+    run({
+      f,
+      e,
+      old,
+      priorBootFacts,
+      next,
+      oldFile,
+      receipt,
+      save,
+      options,
+      ledger,
+      adopted,
+      approval,
+      original,
+      origin,
+      prior,
+      failure,
+      hash,
+      open: (extra) => scope.open(e.request, { ...options(), ...extra }),
+    });
+  });
+}
+for (const mutation of ['none', 'restart-pin', 'extra-leaf'])
+  test('prior-boot empty claim: exact six-leaf CAS ' + mutation, () =>
+    emptyInstallRecoveryFixture((x) => {
+      const helper = require('./normal-start-claim-rebind.cjs');
+      const originalRead = helper.readPriorBootEvidence,
+        originalValidate = helper.validatePriorBootEmpty;
+      assert.equal(
+        helper.referenceDigest(x.priorBootFacts),
+        x.prior.payload.claim.refs,
+      );
+      x.f.facts.records = x.f.facts.records.filter(
+        (r) => r.kind !== 'processes',
+      );
+      helper.readPriorBootEvidence = () => ({ oldFacts: x.priorBootFacts });
+      helper.validatePriorBootEmpty = ({ facts }) =>
+        assert(!facts.records.some((r) => r.kind === 'processes'));
+      if (mutation === 'restart-pin')
+        x.next.preservingUpdate.priorBootExit.restartBinding.oldSha256 =
+          'f'.repeat(64);
+      if (mutation === 'extra-leaf') x.next.maxGrowthBytes++;
+      x.save();
+      try {
+        if (mutation === 'none') {
+          x.open().close();
+          const result = JSON.parse(fs.readFileSync(x.ledger)).payload;
+          assert.equal(result.claim, null);
+          assert.equal(result.bindingRepair.claimSha256, x.receipt.claimSha256);
+          assert(fs.readFileSync(x.adopted).equals(x.origin));
+        } else {
+          assert.throws(() => x.open(), /BINDING_REPAIR/);
+          assert(fs.readFileSync(x.ledger).equals(x.original));
+        }
+      } finally {
+        helper.readPriorBootEvidence = originalRead;
+        helper.validatePriorBootEmpty = originalValidate;
+      }
+    }, true),
+  );
+test('empty install recovery: real timeout keeps original claim and reviewed recovery preserves evidence', () =>
+  emptyInstallRecoveryFixture((x) => {
+    assert.throws(() =>
+      scope.open(x.e.request, {
+        ...x.options(),
+        bindingRepairFile: '',
+        bindingRepairSha256: '',
+      }),
+    );
+    x.open().close();
+    const d = JSON.parse(fs.readFileSync(x.ledger)).payload,
+      snapshot = JSON.parse(
+        fs.readFileSync(
+          x.ledger + '.binding-repair-' + fileHash(x.approval) + '.json',
+        ),
+      );
+    assert.equal(d.claim, null);
+    assert.deepEqual(d.outputs, []);
+    assert.deepEqual(d.futureCounter, x.prior.payload.futureCounter);
+    assert.equal(d.bindingRepair.claimId, x.prior.payload.claim.id);
+    assert(Buffer.from(snapshot.ledgerBase64, 'base64').equals(x.original));
+    assert(
+      Buffer.from(snapshot.oldPolicyBase64, 'base64').equals(
+        fs.readFileSync(x.oldFile),
+      ),
+    );
+    assert(
+      Buffer.from(snapshot.failureEvidenceBase64, 'base64').equals(
+        fs.readFileSync(x.failure),
+      ),
+    );
+    assert(fs.readFileSync(x.adopted).equals(x.origin));
+    const saved = fs.readFileSync(x.ledger);
+    x.open().close();
+    assert(fs.readFileSync(x.ledger).equals(saved));
+  }));
+for (const mutation of [
+  'unknown claim',
+  'claim output',
+  'ledger output',
+  'claim kind',
+  'claim root',
+  'claim reserve',
+  'claim runtime',
+  'claim start',
+  'prior repair',
+  'ledger identity',
+  'adoption',
+  'evidence',
+  'allocation',
+  'active lock',
+  'build lock',
+  'unknown references',
+  'process tick',
+  'task identity',
+  'pointer reference',
+  'unrelated launcher hash',
+  'tool pin',
+  'other launcher field',
+  'probe',
+  'budget bytes',
+  'budget entries',
+  'budget duration',
+  'metadata checkpoint',
+  'implicit profile limits',
+  'missing lock accounting',
+  'wrong lock width',
+  'unbounded lock width',
+  'changed lock writer',
+])
+  test('empty install recovery: rejects ' + mutation, () =>
+    emptyInstallRecoveryFixture((x) => {
+      if (
+        mutation.startsWith('claim ') ||
+        mutation === 'ledger output' ||
+        mutation === 'unknown claim' ||
+        mutation === 'prior repair'
+      ) {
+        const d = JSON.parse(fs.readFileSync(x.ledger));
+        if (mutation === 'unknown claim')
+          d.payload.claim.id = crypto.randomUUID();
+        if (mutation === 'claim output')
+          d.payload.claim.outputs.push(x.e.target);
+        if (mutation === 'ledger output')
+          d.payload.outputs.push({ path: x.e.target });
+        if (mutation === 'claim kind') d.payload.claim.kind = 'build';
+        if (mutation === 'claim root') d.payload.claim.root = x.f.build;
+        if (mutation === 'claim reserve') d.payload.claim.reserveBytes++;
+        if (mutation === 'claim runtime') d.payload.claim.runtimeCopies++;
+        if (mutation === 'claim start') d.payload.claim.startBytes++;
+        if (mutation === 'prior repair')
+          d.payload.bindingRepair = { unknown: true };
+        d.digest = x.hash(d.payload);
+        fs.writeFileSync(x.ledger, JSON.stringify(d));
+        x.receipt.priorLedgerSha256 = fileHash(x.ledger);
+        x.receipt.priorPayloadDigest = d.digest;
+        // Even reviewing changed bytes cannot admit a nonempty or wrong-kind claim.
+        if (mutation !== 'unknown claim')
+          x.receipt.claimSha256 = x.hash(d.payload.claim);
+      }
+      if (mutation === 'ledger identity')
+        x.receipt.priorLedgerIdentity[1] = '999';
+      if (mutation === 'adoption') fs.writeFileSync(x.adopted, '0'.repeat(64));
+      if (mutation === 'evidence') fs.appendFileSync(x.failure, 'changed');
+      if (mutation === 'allocation') fs.mkdirSync(x.e.target);
+      if (mutation === 'active lock')
+        fs.writeFileSync(
+          path.join(path.dirname(x.f.installed), '.active-release.lock'),
+          'busy',
+        );
+      if (mutation === 'build lock')
+        fs.writeFileSync(
+          path.join(x.f.installed, '.build-budget.lock'),
+          'busy',
+        );
+      if (mutation === 'unknown references')
+        x.f.facts.observationComplete = false;
+      if (mutation === 'process tick')
+        x.f.facts.records[0].startUtc += 'changed';
+      if (mutation === 'task identity')
+        x.f.facts.records.at(-1).identity += 'changed';
+      if (mutation === 'pointer reference')
+        x.f.facts.records.at(-1).viaPointer.path = x.f.config;
+      if (mutation === 'unrelated launcher hash')
+        x.f.facts.records.at(-1).viaPointer.launcherSha256 = 'c'.repeat(64);
+      if (mutation === 'tool pin')
+        x.next.windowsReferences.launchers[0].files[0].sha256 = 'c'.repeat(64);
+      if (mutation === 'other launcher field')
+        x.next.windowsReferences.launchers[0].argv.push('extra');
+      if (mutation === 'probe') x.next.probe = { path: 'different' };
+      if (mutation === 'budget bytes') x.next.scanBudget.scanReadBytes++;
+      if (mutation === 'budget entries') x.next.scanBudget.operationEntries++;
+      if (mutation === 'budget duration') x.next.scanBudget.durationMs++;
+      if (mutation === 'metadata checkpoint')
+        x.next.scanBudget.checkpointMode = 'identity-times-v1';
+      if (mutation === 'implicit profile limits')
+        delete x.next.scanBudget.operationReadBytes;
+      if (mutation === 'missing lock accounting')
+        delete x.receipt.releasedBuildLock;
+      if (mutation === 'wrong lock width')
+        x.receipt.releasedBuildLock.ownerPidDigits = 4;
+      if (mutation === 'unbounded lock width')
+        x.receipt.releasedBuildLock.ownerPidDigits = 11;
+      if (mutation === 'changed lock writer')
+        x.receipt.releasedBuildLock.writerSha256 = 'c'.repeat(64);
+      x.save();
+      const before = fs.readFileSync(x.ledger);
+      assert.throws(() => x.open());
+      assert(fs.readFileSync(x.ledger).equals(before));
+    }),
+  );
+for (const stage of ['before-snapshot', 'before-commit', 'after-commit'])
+  test('empty install recovery: interruption ' + stage, () =>
+    emptyInstallRecoveryFixture((x) => {
+      assert.throws(
+        () =>
+          x.open({
+            onBindingRepairStep: (s) => {
+              if (s === stage) throw Error('interrupted');
+            },
+          }),
+        /BINDING_REPAIR/,
+      );
+      const d = JSON.parse(fs.readFileSync(x.ledger));
+      assert.equal(d.digest, x.hash(d.payload));
+      if (stage !== 'after-commit')
+        assert(fs.readFileSync(x.ledger).equals(x.original));
+      else assert.equal(d.payload.claim, null);
+      x.open().close();
+      assert(fs.readFileSync(x.adopted).equals(x.origin));
+    }),
+  );
+test('empty install recovery: concurrent owner refused and late new output remains held', () =>
+  emptyInstallRecoveryFixture((x) => {
+    assert.throws(() =>
+      x.open({
+        onBindingRepairStep: (s) => {
+          if (s !== 'before-commit') return;
+          assert.throws(() => x.open(), /EEXIST/);
+          fs.mkdirSync(x.e.target);
+        },
+      }),
+    );
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+    assert(fs.existsSync(x.e.target));
+  }));
+test('empty install recovery: same receipt cannot recover a newly interrupted install', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const lease = x.open();
+    const nextClaim = JSON.parse(fs.readFileSync(x.ledger)).payload.claim.id;
+    assert.notEqual(nextClaim, x.receipt.claimId);
+    x.f.facts.observationComplete = false;
+    assert.throws(() => lease.close(Error('new failure')));
+    x.f.facts.observationComplete = true;
+    const held = fs.readFileSync(x.ledger);
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert(fs.readFileSync(x.ledger).equals(held));
+  }));
+for (const mutation of ['ledger', 'active lock', 'build lock', 'allocation'])
+  test(
+    'empty install recovery: rejects late ' +
+      mutation +
+      ' during precommit query',
+    () =>
+      emptyInstallRecoveryFixture((x) => {
+        let queries = 0,
+          lateLedger;
+        assert.throws(() =>
+          x.open({
+            query: () => {
+              if (++queries === 2) {
+                if (mutation === 'ledger') {
+                  const d = JSON.parse(fs.readFileSync(x.ledger));
+                  d.payload.futureCounter.used++;
+                  d.digest = x.hash(d.payload);
+                  fs.writeFileSync(x.ledger, JSON.stringify(d));
+                  lateLedger = fs.readFileSync(x.ledger);
+                }
+                if (mutation === 'active lock')
+                  fs.writeFileSync(
+                    path.join(
+                      path.dirname(x.f.installed),
+                      '.active-release.lock',
+                    ),
+                    'busy',
+                  );
+                if (mutation === 'build lock')
+                  fs.writeFileSync(
+                    path.join(x.f.installed, '.build-budget.lock'),
+                    'busy',
+                  );
+                if (mutation === 'allocation') fs.mkdirSync(x.e.target);
+              }
+              return structuredClone(x.f.facts);
+            },
+          }),
+        );
+        assert.equal(queries, 2);
+        assert(fs.readFileSync(x.ledger).equals(lateLedger || x.original));
+        assert(fs.readFileSync(x.adopted).equals(x.origin));
+      }),
+  );
+test('empty install recovery: partial snapshot is held, never overwritten or replayed', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const at = x.ledger + '.binding-repair-' + fileHash(x.approval) + '.json';
+    fs.writeFileSync(at, 'incomplete snapshot');
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert.equal(fs.readFileSync(at, 'utf8'), 'incomplete snapshot');
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+  }));
+test('empty install recovery: normal output registration resumes without a second copy allowance', () =>
+  emptyInstallRecoveryFixture((x) => {
+    const lease = x.open();
+    lease.registerOutput(x.e.target);
+    fs.mkdirSync(x.e.target);
+    lease.createdOutput(x.e.target);
+    fs.writeFileSync(path.join(x.e.target, 'node.exe'), 'inert runtime');
+    lease.close();
+    const state = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    assert.equal(state.claim, null);
+    assert.equal(state.outputs.length, 1);
+    assert(state.outputs[0].complete);
+    const saved = fs.readFileSync(x.ledger);
+    assert.throws(() => x.open(), /BINDING_REPAIR/);
+    assert(fs.readFileSync(x.ledger).equals(saved));
+  }));
+test('empty install recovery: explicit lease feeds normal installPair with nine complete queries', () =>
+  emptyInstallRecoveryFixture((x) => {
+    let queries = 0;
+    const lease = x.open({
+      query: () => {
+        queries++;
+        return structuredClone(x.f.facts);
+      },
+    });
+    const candidate = path.join(x.f.build, 'candidate'),
+      proof = (root) => ({
+        sourceCommit: JSON.parse(
+          fs.readFileSync(path.join(root, 'release.json')),
+        ).sourceCommit,
+        manifestSha256: fileHash(path.join(root, 'release.json')),
+      });
+    const result = require('./install-lifecycle.cjs').installPair(
+      x.f.installed,
+      {
+        current: 'current',
+        candidate,
+        rollback: x.f.current,
+        proofs: {
+          current: proof(x.f.current),
+          candidate: proof(candidate),
+          rollback: proof(x.f.current),
+        },
+      },
+      { scope: lease },
+    );
+    assert.deepEqual(result.installedIds, ['candidate']);
+    assert.equal(queries, 9);
+    assert(!fs.existsSync(path.join(x.f.installed, '.build-budget.lock')));
+    const saved = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    assert.equal(saved.claim, null);
+    assert(saved.outputs[0].complete);
+    assert(fs.readFileSync(x.adopted).equals(x.origin));
+  }));
+
+for (const asynchronous of [false, true]) {
+  for (const failure of ['none', 'body', 'close', 'both']) {
+    test(`within preserves failures: async=${asynchronous}, failure=${failure}`, () =>
+      fixture(async (f) => {
+        const bodyError = new Error('synthetic-body');
+        const closeError = new Error('synthetic-close');
+        const run = () =>
+          scope.within(
+            { kind: 'build', root: f.build, reserveBytes: 4096 },
+            (lease) => {
+              const close = lease.close.bind(lease);
+              lease.close = (...args) => {
+                close(...args);
+                if (['close', 'both'].includes(failure)) throw closeError;
+              };
+              if (['body', 'both'].includes(failure)) {
+                if (asynchronous) return Promise.reject(bodyError);
+                throw bodyError;
+              }
+              return asynchronous ? Promise.resolve(42) : 42;
+            },
+            f.options(),
+          );
+        if (failure === 'none') assert.equal(await run(), 42);
+        else {
+          const check = (error) => {
+            if (failure === 'both') {
+              assert(error instanceof AggregateError);
+              assert.deepEqual(error.errors, [bodyError, closeError]);
+              assert.equal(error.cause, bodyError);
+            } else
+              assert.equal(error, failure === 'body' ? bodyError : closeError);
+            return true;
+          };
+          if (asynchronous) await assert.rejects(run, check);
+          else assert.throws(run, check);
+        }
+      }));
+  }
+}
+
+test('close check and owned-lock cleanup failures both remain visible', () =>
+  fixture((f) => {
+    const lease = f.open();
+    f.facts.complete = false;
+    const originalUnlink = fs.unlinkSync;
+    const cleanupError = new Error('synthetic-unlink');
+    fs.unlinkSync = () => {
+      throw cleanupError;
+    };
+    try {
+      assert.throws(
+        () => lease.close(),
+        (error) => {
+          assert(error instanceof AggregateError);
+          assert.match(error.errors[0].message, /REFERENCE_QUERY_INCOMPLETE/);
+          assert.equal(error.errors[1], cleanupError);
+          assert.equal(error.cause, error.errors[0]);
+          return true;
+        },
+      );
+    } finally {
+      fs.unlinkSync = originalUnlink;
+    }
+  }));
+
+for (const cleanup of [null, undefined, 'primitive', 0]) {
+  for (const asynchronous of [false, true]) {
+    test(`within preserves non-Error cleanup: ${String(cleanup)}, async=${asynchronous}`, () =>
+      fixture(async (f) => {
+        const primary = new Error('synthetic-primary');
+        const run = () =>
+          scope.within(
+            { kind: 'build', root: f.build, reserveBytes: 4096 },
+            (lease) => {
+              const close = lease.close.bind(lease);
+              lease.close = (...args) => {
+                close(...args);
+                throw cleanup;
+              };
+              if (asynchronous) return Promise.reject(primary);
+              throw primary;
+            },
+            f.options(),
+          );
+        const check = (error) => {
+          assert(error instanceof AggregateError);
+          assert.deepEqual(error.errors, [primary, cleanup]);
+          assert.equal(error.cause, primary);
+          assert.equal(error.message, 'RELEASE_SCOPE_FAILED');
+          return true;
+        };
+        if (asynchronous) await assert.rejects(run, check);
+        else assert.throws(run, check);
+      }));
+  }
+}
