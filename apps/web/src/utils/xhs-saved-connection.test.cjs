@@ -211,3 +211,45 @@ test('lost save or verification response clears input and does not resubmit cred
   assert.equal(input.webSession, '');
   assert.deepEqual(seen, []);
 });
+
+test('only allowlisted diagnostics reach the display callback', async () => {
+  for (const [diagnostic, expected] of [
+    [
+      {
+        stage: 'prepare',
+        code: 'SOURCE_WORK_NOT_IDLE',
+        privateExtra: 'secret',
+      },
+      { stage: 'prepare', code: 'SOURCE_WORK_NOT_IDLE' },
+    ],
+    [{ stage: 'prepare', code: 'secret' }, undefined],
+    [{ stage: 'secret', code: 'UNKNOWN' }, undefined],
+  ]) {
+    let seen;
+    await savedSessionRequest(
+      {
+        ...host(async () => ({
+          ok: true,
+          json: async () => ({
+            result: {
+              data: {
+                connected: true,
+                authenticationRecovery: { state: 'paused', diagnostic },
+              },
+            },
+          }),
+        })),
+        onAuthenticationRecovery: (_state, detail) => {
+          seen = detail;
+        },
+      },
+      {
+        a1: 'synthetic-a',
+        webSession: 'synthetic-b',
+        autoRestore: true,
+        replaceSaved: true,
+      },
+    );
+    assert.deepEqual(seen, expected);
+  }
+});
