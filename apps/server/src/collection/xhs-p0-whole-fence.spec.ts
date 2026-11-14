@@ -2523,6 +2523,16 @@ describe('whole creator generation through real runtime, policy and SQLite', () 
         selectedIds: [safe],
       });
       await drain();
+      // The worker catches failures and persists a safe state/code. Assert that
+      // checkpoint here so a later fence rejection retains the actual cause.
+      const generationRows = await db.$queryRaw<
+        Array<{ state: string; document: string }>
+      >`SELECT state,document FROM xhs_whole_creator_jobs WHERE id='job'`;
+      const generationResult = generationRows[0];
+      expect({
+        state: generationResult?.state,
+        code: generationResult && JSON.parse(generationResult.document).code,
+      }).toMatchObject({ state: 'partial' });
       if (mode === 'profile-rebuild' || mode === 'profile-wrong')
         await db.$executeRaw`UPDATE xhs_whole_creator_jobs SET document=json_remove(document,'$.generation.profile') WHERE id='job'`;
       if (mode !== 'cached') (runtime as any).adapter.clearAccessContext();

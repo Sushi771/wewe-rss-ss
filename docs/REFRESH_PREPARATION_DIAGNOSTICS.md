@@ -25,3 +25,7 @@ that this rejection occurs before fetch, backup or reservation, not that a real
 production pending row or the original hidden exception has been reconstructed.
 Batch regressions use only temporary synthetic files. Production data, source
 requests, installed releases and the nine-backup ceiling are unchanged.
+
+The exact installed schema35 manifest e24a1b70ea81017c177f4087ef757ae8d8ea5841340d540ed8f395b1feca9377 is admitted in both root and installer role and prewrite gates. Admission still requires the identical rollback manifest and unchanged schema, migration history and Prisma engine. Validate the actual installed artifact and manifest with same-schema35.test.cjs before preparing an installed update; this synthetic test does not replace full installer and rollback acceptance.
+
+The baseline admission is limited to the existing installed manifest; a different installed artifact requires its own verification and must not inherit this allowance.

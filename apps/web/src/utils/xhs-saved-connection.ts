@@ -5,7 +5,10 @@ type Host = {
   privateMode: boolean;
   authCode: () => string | null;
   send: typeof fetch;
-  onAuthenticationRecovery?: (state: string) => void;
+  onAuthenticationRecovery?: (
+    state: string,
+    diagnostic?: { stage: string; code: string },
+  ) => void;
 };
 /** Never use a query cache for secret-bearing responses. */
 export async function savedSessionRequest(
@@ -73,8 +76,43 @@ export async function savedSessionRequest(
     if (input) {
       if (data?.connected !== true) throw new Error('unconfirmed');
       const recovery = data.authenticationRecovery?.state;
-      if (['profile-verified', 'paused', 'not-applicable'].includes(recovery))
-        host.onAuthenticationRecovery?.(recovery);
+      if (['profile-verified', 'paused', 'not-applicable'].includes(recovery)) {
+        const d = data.authenticationRecovery?.diagnostic;
+        const stages = [
+          'readiness',
+          'session',
+          'candidate',
+          'prepare',
+          'profile',
+          'refresh',
+        ];
+        const codes = [
+          'UNKNOWN',
+          'CANDIDATE_COUNT',
+          'SOURCE_WORK_NOT_IDLE',
+          'FRESH_RUNTIME_SESSION_REQUIRED',
+          'RESTORED_POLICY_PROOF_REQUIRED',
+          'KNOWN_AUTH_RISK_REQUIRED',
+          'KNOWN_AUTH_TASK_REQUIRED',
+          'KNOWN_AUTH_TASK_EVIDENCE_REQUIRED',
+          'KNOWN_AUTH_REVIEW_BINDING_CHANGED',
+          'KNOWN_AUTH_TIME_INVALID',
+          'KNOWN_AUTH_ALREADY_REVIEWED',
+          'KNOWN_PROFILE_ALREADY_CONSUMED',
+          'CREATOR_BINDING_CHANGED',
+          'XHS_SESSION_CHANGED',
+          'SOURCE_BUDGET_REQUIRED',
+          'UNRESOLVED_LEGACY_SOURCE',
+          'UNRESOLVED_LEGACY_RECOVERY',
+          'OTHER_PLATFORM_RESTRICTION',
+        ];
+        host.onAuthenticationRecovery?.(
+          recovery,
+          stages.includes(d?.stage) && codes.includes(d?.code)
+            ? { stage: d.stage, code: d.code }
+            : undefined,
+        );
+      }
       return null;
     }
     if (typeof data?.a1 !== 'string' || typeof data?.webSession !== 'string')
