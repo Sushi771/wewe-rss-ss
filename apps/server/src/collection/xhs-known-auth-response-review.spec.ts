@@ -2141,6 +2141,25 @@ describe('connection verification before AUTH clear', () => {
     );
     return service;
   }
+  it.each([
+    ['SOURCE_WORK_NOT_IDLE', 'SOURCE_WORK_NOT_IDLE'],
+    ['synthetic-secret-do-not-return', 'UNKNOWN'],
+  ])('returns only a safe preflight diagnostic: %s', async (message, code) => {
+    const service = await fixture();
+    service.readyForMutation = async () => {
+      throw Error(message);
+    };
+    const result = await service.verifyKnownAuthenticationAfterConnection();
+    expect(result.authenticationRecovery).toMatchObject({
+      state: 'paused',
+      diagnostic: { stage: 'readiness', code },
+      automaticRetry: false,
+    });
+    expect(JSON.stringify(result)).not.toContain(
+      'synthetic-secret-do-not-return',
+    );
+    expect(api).not.toHaveBeenCalled();
+  });
   it('gives only known-auth verification writes a bounded native-vault transaction budget', async () => {
     const service = await fixture();
     api.mockImplementation(async (request: any) => ({
@@ -2548,6 +2567,10 @@ describe('connection verification before AUTH clear', () => {
           .mockRejectedValueOnce(Error('synthetic-refresh'));
       const result = await service.verifyKnownAuthenticationAfterConnection();
       expect(result.authenticationRecovery.state).toBe('paused');
+      expect(result.authenticationRecovery.diagnostic.stage).toMatch(
+        /^(profile|refresh)$/,
+      );
+      expect(JSON.stringify(result)).not.toContain('synthetic-timeout');
       expect(api).toHaveBeenCalledTimes(1);
       const committed = ['ack-lost', 'refresh-failed'].includes(mode);
       const afterTask = (await taskRows()).find((r) => r.id === target.taskId);

@@ -1814,8 +1814,17 @@ export class XhsWholeCreatorService implements OnModuleInit {
   async verifyKnownAuthenticationAfterConnection() {
     let verification: 'not-applicable' | 'profile-verified' | 'paused' =
       'not-applicable';
+    let stage:
+      | 'readiness'
+      | 'session'
+      | 'candidate'
+      | 'prepare'
+      | 'profile'
+      | 'refresh' = 'readiness';
+    let diagnosticCode = 'UNKNOWN';
     try {
       await this.readyForMutation();
+      stage = 'session';
       const binding = this.runtime.knownAuthSessionForReview().binding;
       this.assertKnownAuthIdle(binding);
       if (this.starting.size || this.running.size || this.reviewing.size)
@@ -1824,6 +1833,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
       try {
         verification = await sqliteWrites.knownAuthMetadataWrite(async () => {
           this.assertKnownAuthIdle(binding, true);
+          stage = 'candidate';
           const risk = await this.db.$queryRawUnsafe<any[]>(
             "SELECT state,code,CAST(updated_at AS TEXT) AS updated_at FROM xhs_source_risk WHERE id='source'",
           );
@@ -1845,17 +1855,22 @@ export class XhsWholeCreatorService implements OnModuleInit {
               JSON.parse(t.document).code ===
               'XHS_SOURCE_AUTHENTICATION_BLOCKED',
           );
-          if (matching.length !== 1) return 'paused' as const;
+          if (matching.length !== 1) {
+            diagnosticCode = 'CANDIDATE_COUNT';
+            return 'paused' as const;
+          }
           const input = {
             taskId: matching[0].id,
             creatorId: matching[0].creator_id,
             authReviewId: '',
             authDigest: '',
           };
+          stage = 'prepare';
           const plan = await this.db.$transaction((tx) =>
             prepareKnownAuthProfile(tx, input, this.runtime, false, true),
           );
           this.runtime.holdKnownAuthPause(binding);
+          stage = 'profile';
           const result = await runKnownAuthProfile(
             // Native vault checks start Windows helpers inside the atomic
             // checkpoint. Keep every check, with a bounded budget for this path
@@ -1871,6 +1886,7 @@ export class XhsWholeCreatorService implements OnModuleInit {
             return 'paused' as const;
           // All durable profile/audit/clear facts committed; last step clears memory.
           // The same exclusive coordinator remains held until this returns.
+          stage = 'refresh';
           await this.runtime.refreshKnownAuthSession(
             binding,
             result.verifiedCommit.riskClearedAt,
@@ -1881,7 +1897,27 @@ export class XhsWholeCreatorService implements OnModuleInit {
       } finally {
         this.starting.delete('known-auth-connection-verification');
       }
-    } catch {
+    } catch (error) {
+      const allowed = new Set([
+        'SOURCE_WORK_NOT_IDLE',
+        'FRESH_RUNTIME_SESSION_REQUIRED',
+        'RESTORED_POLICY_PROOF_REQUIRED',
+        'KNOWN_AUTH_RISK_REQUIRED',
+        'KNOWN_AUTH_TASK_REQUIRED',
+        'KNOWN_AUTH_TASK_EVIDENCE_REQUIRED',
+        'KNOWN_AUTH_REVIEW_BINDING_CHANGED',
+        'KNOWN_AUTH_TIME_INVALID',
+        'KNOWN_AUTH_ALREADY_REVIEWED',
+        'KNOWN_PROFILE_ALREADY_CONSUMED',
+        'CREATOR_BINDING_CHANGED',
+        'XHS_SESSION_CHANGED',
+        'SOURCE_BUDGET_REQUIRED',
+        'UNRESOLVED_LEGACY_SOURCE',
+        'UNRESOLVED_LEGACY_RECOVERY',
+        'OTHER_PLATFORM_RESTRICTION',
+      ]);
+      const code = error instanceof Error ? error.message : '';
+      diagnosticCode = allowed.has(code) ? code : 'UNKNOWN';
       // A connection/save may have succeeded. Never ask the client to retry a
       // possibly consumed request or misreport it as a credential-save failure.
       verification = 'paused';
@@ -1890,6 +1926,9 @@ export class XhsWholeCreatorService implements OnModuleInit {
       ...(await this.runtime.connectionStatus()),
       authenticationRecovery: {
         state: verification,
+        ...(verification === 'paused'
+          ? { diagnostic: { stage, code: diagnosticCode } }
+          : {}),
         automaticRetry: false,
         notesCollected: 0,
         imagesCollected: 0,
