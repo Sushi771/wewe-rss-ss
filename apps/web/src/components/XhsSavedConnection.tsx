@@ -90,6 +90,7 @@ export default function XhsSavedConnection() {
     clear();
     setVisible(false);
     let recovery = '';
+    let diagnostic: { stage: string; code: string } | undefined;
     try {
       const result = await savedSessionRequest(
         {
@@ -97,8 +98,9 @@ export default function XhsSavedConnection() {
           privateMode: privateOnlineMode,
           authCode: getAuthCode,
           send: (url, init) => window.fetch(url, init),
-          onAuthenticationRecovery: (state) => {
+          onAuthenticationRecovery: (state, detail) => {
             recovery = state;
+            diagnostic = detail;
           },
         },
         input,
@@ -119,7 +121,7 @@ export default function XhsSavedConnection() {
           recovery === 'profile-verified'
             ? '已加密保存并连接。一次资料验证和保存成功，对应认证暂停已解除；未补跑旧任务。'
             : recovery === 'paused'
-              ? '已加密保存并连接；资料验证未确认恢复，采集仍暂停。不会自动重试，请查看连接状态。'
+              ? `已加密保存并连接；资料验证未确认恢复，采集仍暂停。不会自动重试。${diagnostic ? `诊断阶段：${diagnostic.stage}；代码：${diagnostic.code}。` : ''}`
               : '已加密保存并连接。未发起资料验证；已有来源限制仍按原规则保留。',
         );
       }
