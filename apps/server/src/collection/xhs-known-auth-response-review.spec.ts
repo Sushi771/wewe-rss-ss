@@ -292,6 +292,67 @@ beforeEach(async () => {
 });
 
 it.each([
+  ['earlier exact response', 'accept'],
+  ['same-time response', 'newer'],
+  ['later response', 'later'],
+  ['other platform restriction', 'other'],
+  ['unknown response', 'unknown'],
+  ['additional request', 'extra'],
+])(
+  'recognizes only a proven earlier AUTH failure: %s',
+  async (_label, mode) => {
+    const id = 'earlier-auth';
+    const doc = {
+      ...original,
+      taskId: id,
+      creatorId: 'b',
+      ...(mode === 'other' ? { extra: { httpStatus: 429 } } : {}),
+    };
+    await db.$executeRawUnsafe(
+      'INSERT INTO xhs_subscription_tasks VALUES(?,?,?,?,?)',
+      id,
+      'b',
+      'blocked',
+      JSON.stringify(doc),
+      mode === 'newer' ? 100n : mode === 'later' ? 101n : 50n,
+    );
+    await db.$executeRawUnsafe(
+      `INSERT INTO xhs_unbound_owner_reviews
+     SELECT ?,?,original_risk_json,original_outcome,old_task_ids_json,old_job_ids_json,creator_bindings_json,budget_snapshot_json,scope_json,backup_sha256,approved_at
+     FROM xhs_unbound_owner_reviews WHERE id=?`,
+      'earlier-review',
+      'e'.repeat(64),
+      context.reviewId,
+    );
+    await db.$executeRawUnsafe(
+      'INSERT INTO xhs_unbound_owner_requests VALUES(?,?,?,?,?,?,?,NULL)',
+      randomUUID(),
+      'earlier-review',
+      id,
+      'b',
+      'profile',
+      'profile:1',
+      mode === 'unknown' ? 'unknown' : 'response-received',
+    );
+    if (mode === 'extra')
+      await db.$executeRawUnsafe(
+        'INSERT INTO xhs_unbound_owner_requests VALUES(?,?,?,?,?,?,?,NULL)',
+        randomUUID(),
+        'earlier-review',
+        id,
+        'b',
+        'list',
+        'list:1',
+        'response-received',
+      );
+    const before = await snapshot();
+    if (mode === 'accept') await expect(prep()).resolves.toBeDefined();
+    else await expect(prep()).rejects.toThrow();
+    expect(await snapshot()).toBe(before);
+  },
+);
+
+it.each([
   'success',
   'rollback',
   'ack-lost',

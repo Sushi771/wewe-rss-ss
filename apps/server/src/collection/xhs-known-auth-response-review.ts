@@ -136,6 +136,54 @@ function restriction(v: any): boolean {
   // unknown nested fields. Historical review records are evidence, not live stops.
   return Object.values(v).some(restriction);
 }
+/** Recognize only an earlier, fully settled basic-profile authentication stop. */
+function earlierKnownAuthentication(
+  row: any,
+  live: any,
+  requests: any[],
+  riskAt: bigint,
+) {
+  const ledger = requests.filter((r) => r.task_id === row.id);
+  const failure = live.taskFailure;
+  return (
+    row.state === 'blocked' &&
+    BigInt(row.updated_at) < riskAt &&
+    live.creatorId === row.creator_id &&
+    live.code === AUTH &&
+    live.kind === 'list' &&
+    live.collectionStage === 'listing' &&
+    live.schedule?.phase === 'basic' &&
+    (live.schedule.batch ?? 0) === 0 &&
+    ['total', 'completed', 'skipped', 'failed', 'remaining'].every(
+      (k) => live[k] === 0,
+    ) &&
+    ['snapshotsSaved', 'archiveConflicts', 'pages'].every(
+      (k) => live[k] === undefined || live[k] === 0,
+    ) &&
+    list(live.noteIds) &&
+    list(live.listedIds ?? []) &&
+    live.items &&
+    typeof live.items === 'object' &&
+    !Array.isArray(live.items) &&
+    Object.keys(live.items).length === 0 &&
+    !live.sourceActive &&
+    !live.sourceFence &&
+    list(live.sourceUnknowns ?? []) &&
+    failure &&
+    pack(Object.keys(failure).sort()) ===
+      pack(['code', 'dispatched', 'errorKind', 'phase']) &&
+    failure.code === AUTH &&
+    failure.phase === 'listing' &&
+    failure.errorKind === 'Error' &&
+    failure.dispatched === 'transport-entered' &&
+    ledger.length === 1 &&
+    ledger[0].creator_id === row.creator_id &&
+    ledger[0].phase === 'profile' &&
+    ledger[0].logical_target === 'profile:1' &&
+    ledger[0].outcome === 'response-received' &&
+    ledger[0].listed_note_ids_json === null
+  );
+}
 async function build(
   tx: RoundTx,
   target: KnownAuthTarget,
@@ -326,6 +374,19 @@ async function build(
     if (row === task) {
       delete live.code;
       delete live.taskFailure;
+    } else if (
+      tasks.includes(row) &&
+      earlierKnownAuthentication(
+        row,
+        live,
+        d.xhs_unbound_owner_requests,
+        riskAt,
+      )
+    ) {
+      // Keep the original row and ledger; only remove these two matching codes
+      // from the temporary restriction scan. Other nested stops remain visible.
+      delete live.code;
+      delete live.taskFailure.code;
     } else if (
       historical.some((h) => h.fingerprint === hash(restrictionRows([row])[0]))
     ) {
