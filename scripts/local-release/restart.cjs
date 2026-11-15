@@ -208,6 +208,11 @@ async function controlledRestartInner(options) {
       ),
     };
   }
+  if (options.wechatRecordDir !== undefined) {
+    if (options.legacyJobId !== undefined || options.legacyMaintenanceCheckpoint !== undefined || options.mode !== 'restart')
+      throw Error('WECHAT_MAINTENANCE_UNSUPPORTED');
+    options = { ...options, legacyMaintenanceCheckpoint: require('./wechat-maintenance-loader.cjs').loadWechatMaintenance(release, manifest, options.wechatRecordDir) };
+  }
   let schemaProof;
   const preserving = require('./release-scope.cjs').session()?.policy
     ?.preservingUpdate;
@@ -1055,6 +1060,7 @@ async function main() {
       'prepared-rehearsal': { type: 'boolean', default: false },
       'cold-launch-rehearsal': { type: 'boolean', default: false },
       'legacy-job-id': { type: 'string' },
+      'wechat-record-dir': { type: 'string' },
     },
   });
   if (!values.release || (values.production && !values.database))
@@ -1074,6 +1080,7 @@ async function main() {
     preparedRehearsal: values['prepared-rehearsal'],
     coldLaunchRehearsal: values['cold-launch-rehearsal'],
     legacyJobId: values['legacy-job-id'],
+    wechatRecordDir: values['wechat-record-dir'],
     expected:
       values.production && values.mode === 'restart'
         ? {

@@ -46,6 +46,7 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'installed-startup-gate.cjs',
   'project-writer-gate.cjs',
   'legacy-maintenance-loader.cjs',
+  'wechat-maintenance-loader.cjs',
   'inspect-sqlite.py',
   'prepare-start.py',
   'startup-sqlite.cjs',
@@ -123,6 +124,7 @@ function copyRuntimeClosure(sourceRoot, release, { legacy = false } = {}) {
       `server/scripts/${name}`,
     ]),
     ...RUNTIME_WRAPPERS.map((name) => [`scripts/local-release/${name}`, name]),
+    ['scripts/local-release/wechat-gate-checkpoint.cjs', 'server/wechat-gate-checkpoint.cjs'],
     ...updaterEntries,
   ];
   const copied = {};
