@@ -7,7 +7,7 @@ const fs = require('node:fs'),
   crypto = require('node:crypto');
 const hash = (p) =>
   crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-async function startCurrent({ root, release, database }) {
+async function startCurrent({ root, release, database, recoveryRelease = release }) {
   const lib = require(path.join(root, 'scripts/local-release/lib.cjs')),
     ctl = require(path.join(root, 'scripts/local-release/switch.cjs')),
     restart = require(path.join(root, 'scripts/local-release/restart.cjs'));
@@ -48,6 +48,8 @@ async function startCurrent({ root, release, database }) {
         process.env.WEWE_ACCEPTANCE_MODE !== '1',
       'NORMAL_START_MODE_REQUIRES_REVIEW',
     );
+    const recoveryManifest = recoveryRelease === release ? manifest : lib.verifyRelease(recoveryRelease);
+    const recoveryCommand = restart.commandLine(recoveryRelease, database, 4000, recoveryManifest);
     const gateFile = path.join(release, 'project-writer-gate.cjs');
     assert.equal(hash(gateFile), manifest.files['project-writer-gate.cjs']);
     const gate = require(gateFile);
@@ -69,8 +71,8 @@ async function startCurrent({ root, release, database }) {
       gate,
       sessions: [a, b],
       expected: {
-        executableHash: manifest.files['runtime/node.exe'],
-        commandHash: crypto.createHash('sha256').update(command).digest('hex'),
+        executableHash: recoveryManifest.files['runtime/node.exe'],
+        commandHash: crypto.createHash('sha256').update(recoveryCommand).digest('hex'),
       },
       probe(record) {
         own();
