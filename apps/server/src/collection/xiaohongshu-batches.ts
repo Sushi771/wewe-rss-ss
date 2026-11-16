@@ -254,16 +254,21 @@ export class XiaohongshuBatches {
         const item = reserved[0];
         if (!item.operation_id) throw new Error('XHS_BATCH_CORRUPT');
         const op = item.operation_id;
-        const changed =
-          await tx.$executeRaw`UPDATE xhs_refresh_jobs SET state='stopped' WHERE creator_id=${item.creator_id} AND owner=${op} AND state='running'`;
-        if (!changed) {
-          const existing = await tx.$queryRaw<
-            Array<{ state: string }>
-          >`SELECT state FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id} AND owner=${op}`;
-          if (!existing.length)
-            await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state) SELECT ${item.creator_id},COALESCE(MAX(generation),0)+1,${op},${Date.now()},'stopped' FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id}`;
-          else if (!['stopped', 'complete'].includes(existing[0].state))
-            throw new Error('XHS_BATCH_STOP_UNCONFIRMED');
+        const task = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_subscription_tasks WHERE id=${op} AND creator_id=${item.creator_id}`;
+        // A task reservation is not a legacy source request. Preserve its own
+        // checkpoint/fence; never manufacture a stopped legacy job for it.
+        if (!task.length) {
+          const changed =
+            await tx.$executeRaw`UPDATE xhs_refresh_jobs SET state='stopped' WHERE creator_id=${item.creator_id} AND owner=${op} AND state='running'`;
+          if (!changed) {
+            const existing = await tx.$queryRaw<
+              Array<{ state: string }>
+            >`SELECT state FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id} AND owner=${op}`;
+            if (!existing.length)
+              await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state) SELECT ${item.creator_id},COALESCE(MAX(generation),0)+1,${op},${Date.now()},'stopped' FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id}`;
+            else if (!['stopped', 'complete'].includes(existing[0].state))
+              throw new Error('XHS_BATCH_STOP_UNCONFIRMED');
+          }
         }
       }
       await tx.$executeRaw`UPDATE xhs_refresh_batches SET state='stopped' WHERE id=${id}`;

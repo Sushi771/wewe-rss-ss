@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import {
+  assertScheduledLocalStops,
+  confirmScheduledLocalCancellation,
+  prepareScheduledLocalCancellation,
+  verifyScheduledLocalCancellation,
+  SCHEDULED_LOCAL_CANCELLATION,
+  type ScheduledCancellationReceipt,
+} from './xhs-scheduled-local-cancellation';
 
 /** Proven local rejection before the resumed task INSERT, not an unknown commit. */
 export class XhsBatchOperationCancelledError extends XhsSubscriptionError {
@@ -10,6 +18,7 @@ export class XhsBatchOperationCancelledError extends XhsSubscriptionError {
 
 type Reader = {
   $queryRaw<T>(sql: TemplateStringsArray, ...values: any[]): Promise<T>;
+  $queryRawUnsafe?: <T>(sql: string, ...values: any[]) => Promise<T>;
 };
 type Tx = Reader & {
   $executeRaw(sql: TemplateStringsArray, ...values: any[]): Promise<number>;
@@ -135,7 +144,7 @@ async function noOperationEvidence(db: Reader, operationId: string) {
       !budgets.length,
   );
 }
-export type BatchCancellationReceipt = {
+type LegacyBatchCancellationReceipt = {
   kind: typeof BATCH_LOCAL_CANCELLATION;
   decision: 'cancelled-not-dispatched';
   batchId: string;
@@ -150,6 +159,7 @@ export type BatchCancellationReceipt = {
   originalBatch: Batch;
   originalItems: Item[];
 };
+export type BatchCancellationReceipt = LegacyBatchCancellationReceipt | ScheduledCancellationReceipt;
 
 /** Used by the source fence as well as idempotent confirmation. No source grant. */
 export async function verifyBatchLocalCancellation(
@@ -165,6 +175,8 @@ export async function verifyBatchLocalCancellation(
       item.outcome.length <= 65536,
   );
   const r = JSON.parse(item.outcome);
+  if (r.kind === SCHEDULED_LOCAL_CANCELLATION)
+    return verifyScheduledLocalCancellation(db, item, batchState);
   check(pack(r) === item.outcome);
   const keys = [
     'kind',
@@ -300,10 +312,7 @@ async function sourceSnapshot(db: Reader) {
         !['queued', 'running'].includes(row.state),
     ) && !requests.some((row) => row.outcome === 'started'),
   );
-  const activeLegacy = await db.$queryRaw<
-    any[]
-  >`SELECT owner FROM xhs_refresh_jobs WHERE state IN ('running','stopped') LIMIT 1`;
-  check(!activeLegacy.length);
+  await assertScheduledLocalStops(db);
   const creators = await db.$queryRaw<
     any[]
   >`SELECT id,external_author_id,enabled FROM xhs_creators ORDER BY id LIMIT 10001`;
@@ -321,6 +330,8 @@ export async function prepareBatchLocalCancellation(
   db: Reader,
   batchId: string,
 ) {
+  const scheduled = await prepareScheduledLocalCancellation(db, batchId);
+  if (scheduled) return scheduled;
   check(uuid(batchId));
   const batches = await db.$queryRaw<
     Batch[]
@@ -405,8 +416,10 @@ export async function confirmBatchLocalCancellation(
   check(plan.digest === input.digest);
   if (plan.state === 'cancelled')
     return { receipt: plan.receipt, alreadyCancelled: true };
+  if ('scheduledProof' in plan.snapshot)
+    return confirmScheduledLocalCancellation(db, input, backupSha256, now);
   check(sha(backupSha256) && Number.isSafeInteger(now) && now > 0);
-  const audit: Omit<BatchCancellationReceipt, 'auditDigest'> = {
+  const audit: Omit<LegacyBatchCancellationReceipt, 'auditDigest'> = {
     kind: BATCH_LOCAL_CANCELLATION,
     decision: 'cancelled-not-dispatched',
     batchId: input.batchId,

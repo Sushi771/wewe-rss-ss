@@ -2049,7 +2049,7 @@ export default function Xiaohongshu() {
               刷新全部
             </Button>
             {batch &&
-              ['running', 'paused'].includes(batch.state) &&
+              ['running', 'paused', 'stopped'].includes(batch.state) &&
               batch.items.some((item) => item.state === 'reserved') && (
                 <XhsBatchLocalCancellation
                   key={batch.id}

@@ -1,6 +1,7 @@
 import { verifyBatchLocalCancellation } from './xhs-batch-local-cancellation';
 import { TextDecoder } from 'node:util';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
+import { matchesScheduledLocalStop, SCHEDULED_LOCAL_CANCELLATION } from './xhs-scheduled-local-cancellation';
 
 export type LegacyXhsQuery = {
   $queryRaw<T>(sql: TemplateStringsArray, ...values: any[]): Promise<T>;
@@ -307,6 +308,16 @@ export async function readLegacyXhsSourceFence(
     const byOwner = new Map<string, any>(),
       byBatch = new Map<string, any>();
     let unresolved = false;
+    const localStops = new Set<string>();
+    for (const item of items.filter(i => i.state === 'cancelled' && i.operation_id)) {
+      try {
+        const batch = batches.find(b => b.id === item.batch_id);
+        const audit = await verifyBatchLocalCancellation(db, item, batch?.state);
+        const job = jobs.find(j => j.owner === item.operation_id);
+        if (audit.kind === SCHEDULED_LOCAL_CANCELLATION && job && matchesScheduledLocalStop(audit, job))
+          localStops.add(job.owner);
+      } catch { return blocked('receipt'); }
+    }
     for (const job of jobs) {
       if (
         !identity(job.creator_id) ||
@@ -319,6 +330,7 @@ export async function readLegacyXhsSourceFence(
       )
         return blocked('state');
       byOwner.set(job.owner, job);
+      if (localStops.has(job.owner)) continue;
       if (job.state !== 'complete') {
         unresolved = true;
         if (job.outcome !== null && !receipt(job)) return blocked('receipt');

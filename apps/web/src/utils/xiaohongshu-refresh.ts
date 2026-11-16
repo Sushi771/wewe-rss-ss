@@ -29,7 +29,8 @@ function localCancellationReceipt(
     !!r &&
     typeof r === 'object' &&
     !Array.isArray(r) &&
-    r.kind === 'xhs-batch-local-cancellation-v1' &&
+    (r.kind === 'xhs-batch-local-cancellation-v1' ||
+      (r.kind === 'xhs-batch-local-cancellation-v2' && scheduledCancellationProof(r.scheduledProof, item))) &&
     r.decision === 'cancelled-not-dispatched' &&
     r.batchId === batchId &&
     r.position === item.position &&
@@ -43,6 +44,22 @@ function localCancellationReceipt(
     Number.isSafeInteger(r.confirmedAt) &&
     (r.confirmedAt as number) > 0
   );
+}
+
+function scheduledCancellationProof(value: unknown, item: Record<string, unknown>) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const p = value as Record<string, unknown>;
+  const s = p.legacyStop as Record<string, unknown> | null;
+  return Object.keys(p).length === 6 &&
+    ['scheduled-list-prepare-v1', 'scheduled-list-admission-v1'].includes(p.kind as string) &&
+    typeof p.reviewId === 'string' && p.reviewId.startsWith('scheduled-task-') &&
+    typeof p.budgetId === 'string' && p.budgetId.includes(item.operationId as string) &&
+    ['reviewDigest', 'budgetDigest'].every(k => typeof p[k] === 'string' && /^[a-f0-9]{64}$/.test(p[k] as string)) &&
+    (s === null || (!!s && typeof s === 'object' && !Array.isArray(s) &&
+      s.owner === item.operationId && s.creator_id === item.creatorId &&
+      Number.isSafeInteger(s.generation) && (s.generation as number) > 0 &&
+      typeof s.started_at === 'string' && /^\d+$/.test(s.started_at) &&
+      s.state === 'stopped' && s.outcome === null));
 }
 
 /** Validate API enum values before they can drive persistent batch actions. */
