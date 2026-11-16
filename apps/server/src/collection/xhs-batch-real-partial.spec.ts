@@ -1,3 +1,4 @@
+import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -40,6 +41,7 @@ it('preserves a first page and pauses on a restricted second request with real w
     await runtime.connectSession({ a1: 'synthetic-a1', webSession: 'synthetic-session' });
     (runtime as any).adapter.restoreDefaultAuthorAccess('a');
     const service = new XhsSubscriptionService(db as any, runtime);
+    new XhsWholeCreatorService(db as any, service, runtime, {} as any);
     const batch = new XiaohongshuBatches(db, service);
     const id = randomUUID(); await batch.create(id, ['a']);
     await batch.advance(id); await (service as any).lane; await batch.advance(id);

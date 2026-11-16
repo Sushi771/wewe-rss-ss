@@ -882,12 +882,35 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_SUBSCRIPTION_REQUIRED');
     return c;
   }
-  /** Reserve a queued batch item and persist its task under one transaction. */
-  async startBatchItem(input: { batchId: string; position: number; creatorId: string }) {
-    await this.creator(input.creatorId);
-    return this.enqueue('list', input.creatorId, [], undefined, undefined,
-      undefined, false, undefined, undefined, undefined, undefined, undefined,
-      undefined, undefined, input);
+  /** Reuse the recurring review lane; the durable batch id is the round identity. */
+  async startBatchItem(input: {
+    batchId: string;
+    position: number;
+    creatorId: string;
+  }) {
+    if (
+      !/^[a-f0-9-]{36}$/.test(input.batchId) ||
+      !Number.isSafeInteger(input.position) ||
+      input.position < 0
+    )
+      return reject('XHS_TASK_STATE_CHANGED');
+    // Observing an existing reservation never prepares a review or sends work,
+    // including blocked/unknown tasks and reservations made by an older version.
+    const observed = await this.db.$queryRaw<
+      Array<{ operation_id: string | null; state: string }>
+    >`SELECT operation_id,state FROM xhs_refresh_batch_items WHERE batch_id=${input.batchId} AND position=${input.position} AND creator_id=${input.creatorId}`;
+    if (observed.length !== 1) return reject('XHS_TASK_STATE_CHANGED');
+    if (observed[0].operation_id)
+      return {
+        taskId: observed[0].operation_id,
+        creatorId: input.creatorId,
+        scheduledState: 'existing' as const,
+      };
+    if (observed[0].state !== 'queued') return reject('XHS_TASK_STATE_CHANGED');
+    return this.scheduleCreatorList(
+      { round: `batch/${input.batchId}`, creatorId: input.creatorId },
+      input,
+    );
   }
   async refresh(input: { id: string; maxPages?: number }) {
     if (
@@ -980,6 +1003,37 @@ export class XhsSubscriptionService implements OnModuleInit {
       input.basicOnly,
       input.carriedBasicResults,
     );
+  }
+  /** A scheduled list-only task uses the existing basic round identity. */
+  async scheduleCreatorList(
+    input: { round: string; creatorId: string },
+    batchItem?: { batchId: string; position: number; creatorId: string },
+  ) {
+    const creator = await this.creator(input.creatorId);
+    const enqueue = () =>
+      this.enqueue(
+        'list',
+        input.creatorId,
+        [],
+        undefined,
+        undefined,
+        batchItem ? undefined : 1,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { round: input.round, phase: 'basic' },
+        batchItem,
+      );
+    return this.source?.withScheduledReview
+      ? this.source.withScheduledReview(
+          { ...input, authorId: creator.externalAuthorId!, phase: 'basic' },
+          enqueue,
+        )
+      : enqueue();
   }
   /** One phase per round and creator; existing task ids are never re-enqueued. */
   async scheduleCreatorPhase(input: {
@@ -1470,16 +1524,54 @@ export class XhsSubscriptionService implements OnModuleInit {
       resumedFromTaskId: checkpoint?.taskId,
       supersededByTaskId: undefined,
     };
+    if (
+      batchItem &&
+      (!scheduled ||
+        scheduled.round !== `batch/${batchItem.batchId}` ||
+        scheduled.phase !== 'basic' ||
+        batchItem.creatorId !== creatorId ||
+        kind !== 'list' ||
+        collectDetails)
+    )
+      return reject('XHS_TASK_STATE_CHANGED');
     if (scheduled) {
       const admitted = await this.write(
         Buffer.byteLength(JSON.stringify(t)) + 4096,
-        (tx) =>
-          admitScheduledXhs(tx, {
+        async (tx) => {
+          if (batchItem) {
+            const candidate = await tx.$queryRaw<
+              Array<{ state: string; operation_id: string | null }>
+            >`SELECT state,operation_id FROM xhs_refresh_batch_items WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND creator_id=${creatorId}`;
+            const reserved =
+              candidate.length === 1 &&
+              candidate[0].operation_id === t.taskId &&
+              candidate[0].state === 'reserved';
+            if (!reserved) {
+              const changed =
+                await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${t.taskId} WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND creator_id=${creatorId} AND state='queued' AND operation_id IS NULL AND EXISTS(SELECT 1 FROM xhs_refresh_batches WHERE id=${batchItem.batchId} AND state='running') AND NOT EXISTS(SELECT 1 FROM xhs_refresh_batch_items WHERE batch_id=${batchItem.batchId} AND state='reserved')`;
+              if (changed !== 1)
+                throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+            } else {
+              const existing = await tx.$queryRaw<
+                Array<{ id: string }>
+              >`SELECT id FROM xhs_subscription_tasks WHERE id=${t.taskId} AND creator_id=${creatorId}`;
+              if (existing.length !== 1)
+                throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+            }
+          }
+          const result = await admitScheduledXhs(tx, {
             ...scheduled,
             creatorId,
             task: t,
             now: Date.now(),
-          }),
+            ...(batchItem ? { batchCandidate: true as const } : {}),
+          });
+          if (batchItem && result.kind === 'deferred')
+            await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='queued',operation_id=NULL WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND state='reserved' AND operation_id=${t.taskId}`;
+          if (batchItem && result.kind === 'blocked')
+            await tx.$executeRaw`UPDATE xhs_refresh_batches SET state='paused' WHERE id=${batchItem.batchId} AND state='running'`;
+          return result;
+        },
       );
       if (admitted.kind === 'deferred')
         return { taskId: t.taskId, creatorId, state: 'deferred' as const };
@@ -1495,15 +1587,6 @@ export class XhsSubscriptionService implements OnModuleInit {
         return { taskId: t.taskId, creatorId, scheduledState: admitted.kind };
       if (scheduled.phase === 'basic')
         t.historyExcludedIds = admitted.historyExcludedIds;
-    }
-    if (batchItem) {
-      if (scheduled || batchItem.creatorId !== creatorId)
-        throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
-      await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, async (tx) => {
-        const changed = await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${t.taskId} WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND creator_id=${creatorId} AND state='queued' AND operation_id IS NULL AND EXISTS(SELECT 1 FROM xhs_refresh_batches WHERE id=${batchItem.batchId} AND state='running') AND NOT EXISTS(SELECT 1 FROM xhs_refresh_batch_items WHERE batch_id=${batchItem.batchId} AND state='reserved')`;
-        if (changed !== 1) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
-        await this.persistIn(tx, t);
-      });
     }
     this.pending.set(t.taskId, t);
     try {
@@ -2111,7 +2194,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         !t.reuseCompleteCache
       )
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
-      if (t.schedule?.phase === 'basic')
+      if (t.schedule?.phase === 'basic' && t.collectDetails)
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
       if (t.kind === 'list' && t.collectionStage !== 'details') {
         await this.updateList(t, creator);

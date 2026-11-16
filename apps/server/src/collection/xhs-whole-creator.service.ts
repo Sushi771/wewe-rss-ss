@@ -238,8 +238,8 @@ export class XhsWholeCreatorService implements OnModuleInit {
     this.runtime.bindFullHistoryReader((work) =>
       this.db.$transaction((tx) => work(tx)),
     );
-    this.runtime.bindFullHistoryLegacyGuard(() =>
-      assertLegacyXhsSourceReady(this.db),
+    this.runtime.bindFullHistoryLegacyGuard((candidate) =>
+      assertLegacyXhsSourceReady(this.db, candidate),
     );
   }
   private write<T>(

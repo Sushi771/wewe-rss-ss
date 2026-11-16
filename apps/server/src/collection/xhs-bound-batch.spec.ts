@@ -1,3 +1,4 @@
+import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -58,6 +59,7 @@ describe('bound refresh batches, synthetic SQLite', () => {
     const real = new XhsSubscriptionService(db as any, runtime);
     (real as any).readyForMutation = async () => {};
     (real as any).write = (_bytes: number, fn: any) => db.$transaction(fn);
+    new XhsWholeCreatorService(db as any, real, runtime, {} as any);
     const actual = new XiaohongshuBatches(db, real);
     const id = randomUUID(); await actual.create(id, ['a']);
     await actual.advance(id); await (real as any).lane; await actual.advance(id);
@@ -74,11 +76,12 @@ describe('bound refresh batches, synthetic SQLite', () => {
   });
   it('rolls back item reservation if task persistence fails', async () => {
     const id = randomUUID(); await batch.create(id, ['a']);
-    jest.spyOn(service as any, 'persistIn').mockRejectedValueOnce(new Error('synthetic rollback'));
+    await db.$executeRawUnsafe("CREATE TRIGGER synthetic_batch_insert_failure BEFORE INSERT ON xhs_subscription_tasks BEGIN SELECT RAISE(ABORT,'synthetic rollback'); END");
     await expect(batch.advance(id)).rejects.toMatchObject({ code: 'XHS_LOCAL_OPERATION_FAILED' });
     expect((await batch.status(id)).items[0]).toMatchObject({state:'queued', operationId:null});
     expect(await db.$queryRaw`SELECT id FROM xhs_subscription_tasks`).toEqual([]);
     expect(calls).toEqual([]);
+    await db.$executeRawUnsafe('DROP TRIGGER synthetic_batch_insert_failure');
   });
   it('stops a bound task and keeps queued work stopped after reopening', async () => {
     const id = randomUUID(); await batch.create(id, ['a', 'b']);

@@ -150,6 +150,7 @@ export class XiaohongshuBatches {
     if (reservation.fresh) {
       try {
         const started = await this.xhs.startBatchItem({ batchId: id, position: item.position, creatorId: item.creator_id });
+        if ('state' in started && started.state === 'deferred') return this.status(id);
         item = { ...item, operation_id: started.taskId, state: 'reserved' };
       } catch (error) {
         // Inspect durable state before reporting a failure. A committed or

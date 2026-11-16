@@ -663,8 +663,13 @@ export class XhsSubscriptionRuntime
   bindFullHistoryReader(reader: FullHistoryWriter) {
     this.fullHistoryReader ??= reader;
   }
-  private fullHistoryLegacyGuard?: () => Promise<void>;
-  bindFullHistoryLegacyGuard(guard: () => Promise<void>) {
+  private fullHistoryLegacyGuard?: (candidate?: {
+    taskId: string;
+    creatorId: string;
+  }) => Promise<void>;
+  bindFullHistoryLegacyGuard(
+    guard: (candidate?: { taskId: string; creatorId: string }) => Promise<void>,
+  ) {
     this.fullHistoryLegacyGuard ??= guard;
   }
   private readonly fullHistoryInstance = randomUUID();
@@ -1434,7 +1439,10 @@ export class XhsSubscriptionRuntime
               send: async () => {
                 try {
                   await this.riskStore?.assertUnboundRoundAdmission();
-                  await this.fullHistoryLegacyGuard!();
+                  await this.fullHistoryLegacyGuard!({
+                    taskId: full.jobId,
+                    creatorId: full.creatorId,
+                  });
                   this.assertFullScopeSession(full.sessionBinding);
                 } catch (error) {
                   throw new XhsPreDispatchError(
@@ -2011,7 +2019,9 @@ export class XhsSubscriptionRuntime
       !fullHistoryContext.getStore()
     ) {
       try {
-        riskOwner = await this.riskStore.begin(this.taskSourceContext.getStore());
+        riskOwner = await this.riskStore.begin(
+          this.taskSourceContext.getStore(),
+        );
       } catch (error) {
         const code =
           error instanceof XhsSubscriptionError

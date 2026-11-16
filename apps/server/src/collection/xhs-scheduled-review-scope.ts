@@ -742,6 +742,10 @@ export async function assertScheduledRoundAdmission(
   );
   await assertBaseline(tx, scope);
   assertContext(reviewId, scope);
+  check(
+    !scope.round.startsWith('batch/') || ['profile', 'list'].includes(r.phase),
+    'SCHEDULED_PHASE_BINDING_CHANGED',
+  );
   const binding = scope.taskBinding;
   check(
     binding.creatorId === r.creatorId &&
@@ -902,6 +906,10 @@ export async function assertScheduledDispatch(
   const s = JSON.parse(review.scope_json);
   check(s.reviewKind === SCHEDULED_ROUND_KIND, 'SCHEDULED_REVIEW_REQUIRED');
   assertContext(reviewId, s);
+  check(
+    !s.round.startsWith('batch/') || ['profile', 'list'].includes(r.phase),
+    'SCHEDULED_PHASE_BINDING_CHANGED',
+  );
   await assertBaseline(tx, s, r.operationId);
   check(
     s.taskBinding.creatorId === r.creatorId &&

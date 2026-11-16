@@ -13,6 +13,8 @@ type Task = {
   state: string;
   noteIds?: string[];
   historyExcludedIds?: string[];
+  kind?: string;
+  collectDetails?: boolean;
 };
 type Tx = {
   $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
@@ -28,7 +30,7 @@ export type Admission = {
   historyExcludedIds?: string[];
 };
 
-/** The id is the persistent round/creator/phase binding; never derive it from a request token. */
+/** Persistent clock-round or manual-batch/creator/phase binding, never a request token. */
 export function scheduledTaskId(
   round: string,
   creatorId: string,
@@ -36,10 +38,14 @@ export function scheduledTaskId(
   batch = 0,
 ) {
   if (
-    !/^\d{4}-\d{2}-\d{2}\/(09:15|14:00|17:30)$/.test(round) ||
+    !(
+      /^\d{4}-\d{2}-\d{2}\/(09:15|14:00|17:30)$/.test(round) ||
+      /^batch\/[a-f0-9-]{36}$/.test(round)
+    ) ||
     !creatorId ||
     creatorId.length > 300 ||
-    !['basic', 'media'].includes(phase)
+    !['basic', 'media'].includes(phase) ||
+    (round.startsWith('batch/') && phase !== 'basic')
   )
     throw Error('XHS_SCHEDULE_ID_INVALID');
   if (
@@ -72,6 +78,7 @@ export async function admitScheduledXhs(
     task: Task;
     now: number;
     batch?: number;
+    batchCandidate?: true;
     preBlocked?:
       | 'XHS_SCHEDULE_SELECTION_LIMIT'
       | 'XHS_SCHEDULE_MEDIA_BINDING_REQUIRED';
@@ -87,9 +94,17 @@ export async function admitScheduledXhs(
     !Number.isSafeInteger(now)
   )
     throw Error('XHS_SCHEDULE_TASK_INVALID');
+  if (
+    input.batchCandidate &&
+    (!round.startsWith('batch/') ||
+      phase !== 'basic' ||
+      task.kind !== 'list' ||
+      task.collectDetails)
+  )
+    throw Error('XHS_SCHEDULE_TASK_INVALID');
   const existing = await tx.$queryRaw<
-    Array<{ document: string }>
-  >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+    Array<{ creator_id: string; state: string; document: string }>
+  >`SELECT creator_id,state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
   if (existing.length) {
     let old: any;
     try {
@@ -100,6 +115,11 @@ export async function admitScheduledXhs(
     if (!old || typeof old !== 'object' || Array.isArray(old))
       return { kind: 'blocked', taskId, reason: 'XHS_SCHEDULE_SOURCE_BLOCKED' };
     if (
+      existing[0].creator_id !== creatorId ||
+      old.state !== existing[0].state ||
+      old.taskId !== taskId ||
+      (input.batchCandidate &&
+        (old.kind !== 'list' || old.collectDetails)) ||
       old.creatorId !== creatorId ||
       old.schedule?.round !== round ||
       old.schedule?.phase !== phase ||
@@ -110,7 +130,15 @@ export async function admitScheduledXhs(
       throw Error('XHS_SCHEDULE_BINDING_MISMATCH');
     return { kind: 'existing', taskId };
   }
-  const legacy = await readLegacyXhsSourceFence(tx);
+  // The reserved item is already bound in this same transaction. Admission
+  // inserts the task only after checking all fences, so it cannot mistake a
+  // pre-inserted candidate for an already admitted, idempotent task.
+  const legacy = await readLegacyXhsSourceFence(
+    tx,
+    input.batchCandidate
+      ? { taskId, creatorId, admitting: { batchId: round.slice(6) } }
+      : undefined,
+  );
   if (legacy.state === 'blocked') {
     const reason = 'XHS_SCHEDULE_SOURCE_BLOCKED';
     const value = {
