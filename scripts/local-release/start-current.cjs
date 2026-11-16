@@ -7,7 +7,13 @@ const fs = require('node:fs'),
   crypto = require('node:crypto');
 const hash = (p) =>
   crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex');
-async function startCurrent({ root, release, database, recoveryRelease = release }) {
+async function startCurrent({ root, release, database, recoveryRelease = release, wechatRecordDir, rehearsal }) {
+  const port = rehearsal ? Number(rehearsal.port) : 4000;
+  if (rehearsal) {
+    const base = fs.realpathSync.native(rehearsal.root);
+    const inside = (p) => { const r = path.relative(base, fs.realpathSync.native(p)); return r !== '' && r !== '..' && !r.startsWith('..' + path.sep) && !path.isAbsolute(r); };
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === 4000 || !inside(root) || !inside(database) || !inside(release) || !inside(recoveryRelease) || !inside(rehearsal.obsidianRoot) || !inside(path.dirname(rehearsal.guardReport)) || (wechatRecordDir !== undefined && !inside(wechatRecordDir))) throw Error('NORMAL_START_REHEARSAL_INVALID');
+  }
   const lib = require(path.join(root, 'scripts/local-release/lib.cjs')),
     ctl = require(path.join(root, 'scripts/local-release/switch.cjs')),
     restart = require(path.join(root, 'scripts/local-release/restart.cjs'));
@@ -29,27 +35,34 @@ async function startCurrent({ root, release, database, recoveryRelease = release
       fs.realpathSync.native(release),
       path.join(root, '.local-releases', manifest.id),
     );
-    const command = restart.commandLine(release, database, 4000, manifest),
+    const commandFor = (bundle, info) => {
+      if (!rehearsal) return restart.commandLine(bundle, database, port, info);
+      const args = [path.join(bundle, 'runtime.cjs'), 'start', '--database', database, '--port', String(port)];
+      if (info.desktopHelperIncluded) args.push('--pause-file', path.join(root, 'tools/wechat-desktop-collector/.paused'));
+      args.push('--rehearsal', '--obsidian-root', rehearsal.obsidianRoot, '--guard-report', rehearsal.guardReport);
+      return restart.launchCommandLine(path.join(bundle, 'runtime/node.exe'), args);
+    };
+    const command = commandFor(release, manifest),
       executable = path.join(release, 'runtime/node.exe');
     assert.equal(hash(executable), manifest.files['runtime/node.exe']);
-    const existing = ctl.processIdentity('Discover', undefined, 4000);
+    const existing = ctl.processIdentity('Discover', undefined, port);
     if (existing) {
       assert.equal(existing.commandLine, command);
       assert.equal(existing.executable.toLowerCase(), executable.toLowerCase());
-      const h = await fetch('http://127.0.0.1:4000/startup-status', {
+      const h = await fetch(`http://127.0.0.1:${port}/startup-status`, {
         signal: AbortSignal.timeout(8000),
       });
       assert(h.ok && (await h.json()).status === 'ready');
       return { newIdentity: existing, normalStart: true, alreadyRunning: true };
     }
-    ctl.loadProductionEnvironment();
+    if (!rehearsal) ctl.loadProductionEnvironment();
     assert(
       process.env.PRIVATE_ONLINE_MODE !== '1' &&
         process.env.WEWE_ACCEPTANCE_MODE !== '1',
       'NORMAL_START_MODE_REQUIRES_REVIEW',
     );
     const recoveryManifest = recoveryRelease === release ? manifest : lib.verifyRelease(recoveryRelease);
-    const recoveryCommand = restart.commandLine(recoveryRelease, database, 4000, recoveryManifest);
+    const recoveryCommand = commandFor(recoveryRelease, recoveryManifest);
     const gateFile = path.join(release, 'project-writer-gate.cjs');
     assert.equal(hash(gateFile), manifest.files['project-writer-gate.cjs']);
     const gate = require(gateFile);
@@ -99,14 +112,22 @@ async function startCurrent({ root, release, database, recoveryRelease = release
             },
           ),
         );
-        v.portOwners = ctl.processIdentity('Port', undefined, 4000);
+        v.portOwners = ctl.processIdentity('Port', undefined, port);
         own();
         return v;
       },
     });
     own();
     assert(fs.readFileSync(pointer).equals(pointerRaw));
-    assert.equal(ctl.processIdentity('Discover', undefined, 4000), null);
+    assert.equal(ctl.processIdentity('Discover', undefined, port), null);
+    if (wechatRecordDir !== undefined) {
+      if (!['no-lease', 'preserved-abnormal-exit-lease'].includes(recovery.status)) throw Error('WECHAT_RECOVERY_UNPROVEN');
+      const entry = path.join(release, 'server/wechat-gate-checkpoint.cjs');
+      assert.equal(hash(entry), manifest.files['server/wechat-gate-checkpoint.cjs']);
+      const lease = gate.acquireWriter(database);
+      const boundary = { check() { own(); assert(fs.readFileSync(pointer).equals(pointerRaw)); assert.equal(ctl.processIdentity('Discover', undefined, port), null); }, observe() { this.check(); } };
+      require(entry).performWechatGate(database, wechatRecordDir, lease, boundary);
+    }
     // The original configuration is loaded internally and passed only to the application child.
     const args = [
       path.join(release, 'runtime.cjs'),
@@ -114,17 +135,18 @@ async function startCurrent({ root, release, database, recoveryRelease = release
       '--database',
       database,
       '--port',
-      '4000',
+      String(port),
     ];
     if (manifest.desktopHelperIncluded)
       args.push(
         '--pause-file',
         path.join(root, 'tools/wechat-desktop-collector/.paused'),
       );
-    args.push('--production');
+    if (rehearsal) args.push('--rehearsal', '--obsidian-root', rehearsal.obsidianRoot, '--guard-report', rehearsal.guardReport);
+    else args.push('--production');
     const env = lib.cleanEnvironment({
       NODE_ENV: 'production',
-      XHS_SUBSCRIPTION_LIVE_ENABLED: '1',
+      XHS_SUBSCRIPTION_LIVE_ENABLED: rehearsal ? '0' : '1',
       XHS_COMMENT_COLLECTION_ENABLED: '0',
       PYTHONDONTWRITEBYTECODE: '1',
       LOCAL_RELEASE_CONTROLLED_START: manifest.id,
@@ -140,13 +162,13 @@ async function startCurrent({ root, release, database, recoveryRelease = release
     // Failure retains a real live/unknown writer lease; never kill or manufacture an exit receipt.
     child.on('error', () => {});
     child.unref();
-    await ctl.waitReady(4000, child);
+    await ctl.waitReady(port, child);
     own();
-    const health = await fetch('http://127.0.0.1:4000/startup-status', {
+    const health = await fetch(`http://127.0.0.1:${port}/startup-status`, {
       signal: AbortSignal.timeout(8000),
     });
     assert(health.ok && (await health.json()).status === 'ready');
-    const observed = ctl.processIdentity('Snapshot', child.pid, 4000);
+    const observed = ctl.processIdentity('Snapshot', child.pid, port);
     assert.equal(observed.commandLine, command);
     assert.equal(observed.executable.toLowerCase(), executable.toLowerCase());
     assert(fs.readFileSync(pointer).equals(pointerRaw));

@@ -13,6 +13,9 @@ function recordWechatGate(checkpoint,dir,api=globalThis[Symbol.for('wewe.project
  const boundary=scopeLease.legacyMaintenanceBoundary(identity,observeProjectWriters);
  const claim={...scopeLease,check:()=>boundary.check(),assertLegacyMaintenanceLease:()=>boundary.check()};
  const lease=api.acquireMaintenance(database,{...checkpoint,scopeLease:claim});
+ return performWechatGate(database,dir,lease,boundary,open);
+}
+function performWechatGate(database,dir,lease,boundary,open=(p,o)=>new DatabaseSync(p,o)){
  let db,committing=false,original,record,expected;
  const check=()=>{lease.check();boundary.check();boundary.observe();};
  try{
@@ -52,5 +55,5 @@ function recordWechatGate(checkpoint,dir,api=globalThis[Symbol.for('wewe.project
   throw e;
  }finally{if(db)db.close();lease.close()}
 }
-module.exports={recordWechatGate};
+module.exports={recordWechatGate,performWechatGate};
 
