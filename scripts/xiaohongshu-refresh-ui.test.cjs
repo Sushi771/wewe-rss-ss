@@ -12,6 +12,43 @@ const output = ts.transpileModule(
 const moduleObject = { exports: {} };
 new Function('exports', 'module', output)(moduleObject.exports, moduleObject);
 const { refreshCreatorBatch } = moduleObject.exports;
+test('persistent batch accepts unreserved null IDs and rejects missing reserved IDs', () => {
+  const { parsePersistentCreatorBatch } = moduleObject.exports;
+  const batch = {
+    id: 'batch',
+    state: 'running',
+    items: [
+      {
+        position: 0,
+        creatorId: 'a',
+        operationId: null,
+        state: 'queued',
+        outcome: null,
+      },
+      {
+        position: 1,
+        creatorId: 'b',
+        operationId: null,
+        state: 'cancelled',
+        outcome: null,
+      },
+    ],
+  };
+  assert.deepEqual(parsePersistentCreatorBatch(batch), batch);
+  for (const state of ['reserved', 'complete', 'partial'])
+    assert.throws(() =>
+      parsePersistentCreatorBatch({
+        ...batch,
+        items: [{ ...batch.items[0], state }],
+      }),
+    );
+  assert.throws(() =>
+    parsePersistentCreatorBatch({
+      ...batch,
+      items: [{ ...batch.items[0], operationId: '' }],
+    }),
+  );
+});
 test('complete batch and empty batch account for all requested creators', async () => {
   assert.deepEqual(
     await refreshCreatorBatch(['a', 'b'], async () => 'complete'),

@@ -11,7 +11,7 @@ export type PersistentCreatorBatch = {
   items: Array<{
     position: number;
     creatorId: string;
-    operationId: string;
+    operationId: string | null;
     state: 'queued' | 'reserved' | 'complete' | 'partial' | 'cancelled';
     outcome?: unknown;
   }>;
@@ -47,8 +47,9 @@ export function parsePersistentCreatorBatch(
         item.position < 0 ||
         typeof item.creatorId !== 'string' ||
         !item.creatorId ||
-        typeof item.operationId !== 'string' ||
-        !item.operationId ||
+        !(state === 'queued' || state === 'cancelled'
+          ? item.operationId === null
+          : typeof item.operationId === 'string' && !!item.operationId) ||
         (state !== 'queued' &&
           state !== 'reserved' &&
           state !== 'complete' &&
@@ -59,7 +60,7 @@ export function parsePersistentCreatorBatch(
       return {
         position: item.position,
         creatorId: item.creatorId,
-        operationId: item.operationId,
+        operationId: item.operationId as string | null,
         state,
         outcome: item.outcome,
       };
