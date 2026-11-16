@@ -143,6 +143,23 @@ export class XhsSubscriptionRuntime
   hasActiveSourceSessions() {
     return this.activeSourceSessions > 0;
   }
+  /** Local metadata cancellation grants no session, source budget or retry. */
+  assertBatchLocalCancellationIdle() {
+    if (
+      this.destroyed ||
+      this.changing ||
+      this.hasActiveSourceSessions() ||
+      [this.stopCode, this.persistedRisk].some(
+        (code) =>
+          code &&
+          ![
+            'XHS_SOURCE_HISTORY_REVIEW_REQUIRED',
+            'XHS_SOURCE_RISK_REVIEW_REQUIRED',
+          ].includes(code),
+      )
+    )
+      return failure('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+  }
   hasBlockingSourceState() {
     return (
       !!this.stopCode && this.stopCode !== 'XHS_SOURCE_RISK_REVIEW_REQUIRED'

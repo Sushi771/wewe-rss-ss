@@ -1,3 +1,4 @@
+import { verifyBatchLocalCancellation } from './xhs-batch-local-cancellation';
 import { TextDecoder } from 'node:util';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 
@@ -361,6 +362,14 @@ export async function readLegacyXhsSourceFence(
         )
       )
         return blocked('state');
+      if (item.state === 'cancelled' && item.operation_id !== null) {
+        try {
+          await verifyBatchLocalCancellation(db, item, batch.state);
+        } catch {
+          return blocked('receipt');
+        }
+        continue;
+      }
       if (item.state === 'queued' || item.state === 'cancelled') {
         if (
           item.operation_id !== null ||

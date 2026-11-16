@@ -2738,6 +2738,30 @@ export class TrpcRouter {
       .mutation(({ input }) =>
         this.xhs.stopRefresh(input.id, input.operationId),
       ),
+    prepareRefreshBatchLocalCancellation: this.trpcService.protectedProcedure
+      .input(z.object({ batchId: z.string().uuid() }).strict())
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx, true);
+        return this.xhsSourceOperation(() =>
+          this.xhsBatches.prepareLocalCancellation(input.batchId),
+        );
+      }),
+    confirmRefreshBatchLocalCancellation: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            batchId: z.string().uuid(),
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledgedNotDispatched: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsConnection(ctx);
+        return this.xhsSourceOperation(() =>
+          this.xhsBatches.confirmLocalCancellation(input),
+        );
+      }),
     createRefreshBatch: this.trpcService.protectedProcedure
       .input(
         z

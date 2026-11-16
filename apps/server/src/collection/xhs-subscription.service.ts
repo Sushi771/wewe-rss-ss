@@ -1,3 +1,4 @@
+import { assertBatchOperationNotCancelled, XhsBatchOperationCancelledError } from './xhs-batch-local-cancellation';
 import { historyReviewMessage } from './xhs-task-message';
 import {
   fullHistoryContext,
@@ -86,6 +87,8 @@ export type XhsListedNote = {
 };
 /** Trusted internal adapter only. Tokens/credentials remain inside the adapter. */
 export interface XhsSubscriptionSource {
+  assertBatchLocalCancellationIdle?(): void;
+  refreshAfterHistoryHandoff?(): Promise<void>;
   scheduledCommentAuthorization?(
     input: { round: string; creatorId: string },
     tx?: Prisma.TransactionClient,
@@ -387,6 +390,26 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.uncertain.size > 0 ||
       this.reconciling.size > 0
     );
+  }
+  async assertBatchLocalCancellationIdle() {
+    await this.readyForMutation();
+    if (
+      this.hasLocalSourceWork() ||
+      !this.source?.assertBatchLocalCancellationIdle
+    )
+      throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+    this.source.assertBatchLocalCancellationIdle();
+  }
+  async refreshAfterBatchLocalCancellation() {
+    if (!this.source?.refreshAfterHistoryHandoff) return false;
+    try {
+      await this.source.refreshAfterHistoryHandoff();
+      return true;
+    } catch {
+      // The local cancellation already committed; report the status-read failure
+      // without implying the cancellation needs to be repeated.
+      return false;
+    }
   }
   private startupRecovery: Promise<void> = Promise.resolve();
   private startupRecoveryStarted = false;
@@ -1348,6 +1371,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       );
       this.uncertain.delete(t.taskId);
     } catch (error) {
+      if (error instanceof XhsBatchOperationCancelledError) throw error;
       // An acknowledgement can fail after COMMIT. Read durable evidence before
       // classifying it; do not repeat a network request or local archive action.
       try {
@@ -1370,6 +1394,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     }
   }
   private async persistIn(tx: Prisma.TransactionClient, t: Task) {
+    if (t.state === 'queued' && t.resumedFromTaskId)
+      await assertBatchOperationNotCancelled(tx, t.resumedFromTaskId);
     const own = await tx.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_subscription_tasks WHERE id=${t.taskId}`;
@@ -1976,6 +2002,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     startAfter?: Promise<boolean>,
   ) {
     await this.readyForMutation();
+    await assertBatchOperationNotCancelled(this.db, input.taskId);
     if (this.pending.has(input.taskId)) return reject('XHS_TASK_SETTLING');
     await this.reconcile(input.taskId);
     if (this.uncertain.has(input.taskId))

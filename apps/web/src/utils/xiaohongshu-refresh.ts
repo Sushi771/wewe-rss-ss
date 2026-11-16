@@ -17,6 +17,34 @@ export type PersistentCreatorBatch = {
   }>;
 };
 
+/** A retained operation on a cancelled item is an audit identity, never queued work. */
+function localCancellationReceipt(
+  batchId: string,
+  batchState: unknown,
+  item: Record<string, unknown>,
+) {
+  const r = item.outcome as Record<string, unknown> | null;
+  return (
+    batchState === 'stopped' &&
+    !!r &&
+    typeof r === 'object' &&
+    !Array.isArray(r) &&
+    r.kind === 'xhs-batch-local-cancellation-v1' &&
+    r.decision === 'cancelled-not-dispatched' &&
+    r.batchId === batchId &&
+    r.position === item.position &&
+    r.creatorId === item.creatorId &&
+    r.operationId === item.operationId &&
+    typeof item.operationId === 'string' &&
+    /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.operationId) &&
+    ['digest', 'taskDigest', 'backupSha256', 'auditDigest'].every(
+      (k) => typeof r[k] === 'string' && /^[a-f0-9]{64}$/.test(r[k] as string),
+    ) &&
+    Number.isSafeInteger(r.confirmedAt) &&
+    (r.confirmedAt as number) > 0
+  );
+}
+
 /** Validate API enum values before they can drive persistent batch actions. */
 export function parsePersistentCreatorBatch(
   value: unknown,
@@ -48,7 +76,9 @@ export function parsePersistentCreatorBatch(
         typeof item.creatorId !== 'string' ||
         !item.creatorId ||
         !(state === 'queued' || state === 'cancelled'
-          ? item.operationId === null
+          ? item.operationId === null ||
+            (state === 'cancelled' &&
+              localCancellationReceipt(batch.id as string, batch.state, item))
           : typeof item.operationId === 'string' && !!item.operationId) ||
         (state !== 'queued' &&
           state !== 'reserved' &&

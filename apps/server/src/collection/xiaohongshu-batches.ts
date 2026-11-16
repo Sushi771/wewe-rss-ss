@@ -1,3 +1,17 @@
+import {
+  prepareBatchLocalCancellation,
+  confirmBatchLocalCancellation,
+} from './xhs-batch-local-cancellation';
+import { sqliteWrites } from './sqlite-write-coordinator';
+import {
+  incrementalWrite,
+  assertIncrementalWriteAdmission,
+  assertIncrementalTransaction,
+} from './incremental-write';
+import { createVerifiedSqliteBackup } from './sqlite-backup';
+import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { realpath, stat } from 'node:fs/promises';
 import { PrismaClient } from '@prisma/client';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
@@ -16,7 +30,147 @@ export class XiaohongshuBatches {
   constructor(
     private readonly db: PrismaClient,
     private readonly xhs: XhsSubscriptionService,
+    private readonly cancellationBackup: () => Promise<unknown> = createVerifiedSqliteBackup,
   ) {}
+
+  /** Read-only preview: returns only a digest and the exact cancelled scope. */
+  async prepareLocalCancellation(batchId: string) {
+    await this.xhs.assertBatchLocalCancellationIdle();
+    const plan = await this.db.$transaction((tx) =>
+      prepareBatchLocalCancellation(tx, batchId),
+    );
+    return plan.state === 'cancelled'
+      ? {
+          state: plan.state,
+          batchId,
+          digest: plan.digest,
+          position: plan.receipt.position,
+          creatorId: plan.receipt.creatorId,
+          operationId: plan.receipt.operationId,
+          cancelledCount: plan.receipt.originalItems.length,
+        }
+      : {
+          state: plan.state,
+          batchId,
+          digest: plan.digest,
+          position: plan.item.position,
+          creatorId: plan.item.creator_id,
+          operationId: plan.item.operation_id!,
+          cancelledCount: plan.snapshot.items.length,
+        };
+  }
+  /** Explicit local cancellation; never calls stop(), advance(), run() or a source. */
+  async confirmLocalCancellation(input: {
+    batchId: string;
+    digest: string;
+    acknowledgedNotDispatched: true;
+  }) {
+    await this.xhs.assertBatchLocalCancellationIdle();
+    let database = '',
+      version = '',
+      backupSha256 = '';
+    const fingerprint = async (file: string) =>
+      JSON.stringify(
+        await Promise.all(
+          [file, file + '-wal', file + '-journal'].map(async (name) => {
+            try {
+              const s = await stat(name, { bigint: true });
+              if (!s.isFile() || !s.ino) throw new Error('identity');
+              return [
+                String(s.dev),
+                String(s.ino),
+                String(s.size),
+                String(s.mtimeNs),
+                String(s.ctimeNs),
+              ];
+            } catch (error) {
+              if (
+                (error as NodeJS.ErrnoException).code === 'ENOENT' &&
+                name !== file
+              )
+                return null;
+              throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+            }
+          }),
+        ),
+      );
+    const result = await sqliteWrites.protectedWrite(
+      async () => {
+        await this.xhs.assertBatchLocalCancellationIdle();
+        const plan = await this.db.$transaction((tx) =>
+          prepareBatchLocalCancellation(tx, input.batchId),
+        );
+        if (
+          plan.digest !== input.digest ||
+          input.acknowledgedNotDispatched !== true
+        )
+          throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_CHANGED');
+        if (plan.state === 'cancelled') return;
+        const rows = await this.db.$queryRawUnsafe<
+          Array<{ name: string; file: string }>
+        >('PRAGMA database_list');
+        const main = rows.find((row) => row.name === 'main');
+        if (!main?.file)
+          throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+        database = await realpath(main.file);
+        version = await fingerprint(database);
+        const report = (await this.cancellationBackup()) as any;
+        if (
+          !report ||
+          typeof report.source !== 'string' ||
+          (await realpath(report.source)) !== database ||
+          typeof report.backup !== 'string' ||
+          (await realpath(report.backup)) === database ||
+          !/^[a-f0-9]{64}$/.test(report.sha256 ?? '') ||
+          report.integrityCheck !== 'ok' ||
+          report.recoveryOrigin?.format !== 'sqlite-recovery-origin-v1' ||
+          report.recoveryOrigin?.kind !== 'protected'
+        )
+          throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+        const digest = createHash('sha256');
+        for await (const bytes of createReadStream(report.backup))
+          digest.update(bytes);
+        if (digest.digest('hex') !== report.sha256)
+          throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
+        backupSha256 = report.sha256;
+      },
+      () =>
+        incrementalWrite(this.db, 65536, async () => {
+          await assertIncrementalWriteAdmission();
+          await this.xhs.assertBatchLocalCancellationIdle();
+          return this.db.$transaction(async (tx) => {
+            await assertIncrementalTransaction(tx);
+            if (database) {
+              const rows = await tx.$queryRawUnsafe<
+                Array<{ name: string; file: string }>
+              >('PRAGMA database_list');
+              const main = rows.find((row) => row.name === 'main');
+              if (
+                !main?.file ||
+                (await realpath(main.file)) !== database ||
+                (await fingerprint(database)) !== version
+              )
+                throw new XhsSubscriptionError(
+                  'XHS_BATCH_LOCAL_REVIEW_CHANGED',
+                );
+            }
+            return confirmBatchLocalCancellation(
+              tx,
+              input,
+              backupSha256,
+              Date.now(),
+            );
+          });
+        }),
+    );
+    const sourceStatusRefreshed =
+      await this.xhs.refreshAfterBatchLocalCancellation();
+    return {
+      batch: await this.status(input.batchId),
+      alreadyCancelled: result.alreadyCancelled,
+      sourceStatusRefreshed,
+    };
+  }
 
   async create(id: string, ids: string[]) {
     if (
@@ -149,21 +303,36 @@ export class XiaohongshuBatches {
     let { item } = reservation;
     if (reservation.fresh) {
       try {
-        const started = await this.xhs.startBatchItem({ batchId: id, position: item.position, creatorId: item.creator_id });
-        if ('state' in started && started.state === 'deferred') return this.status(id);
+        const started = await this.xhs.startBatchItem({
+          batchId: id,
+          position: item.position,
+          creatorId: item.creator_id,
+        });
+        if ('state' in started && started.state === 'deferred')
+          return this.status(id);
         item = { ...item, operation_id: started.taskId, state: 'reserved' };
       } catch (error) {
         // Inspect durable state before reporting a failure. A committed or
         // concurrent reservation is only observed, never launched again.
         const observed = await this.status(id);
-        const current = observed.items.find((entry) => entry.position === item.position);
+        const current = observed.items.find(
+          (entry) => entry.position === item.position,
+        );
         if (!current || current.state !== 'queued' || current.operationId)
           return observed;
-        throw new XhsSubscriptionError(xhsPublicCode(error, 'XHS_LOCAL_OPERATION_FAILED'));
+        throw new XhsSubscriptionError(
+          xhsPublicCode(error, 'XHS_LOCAL_OPERATION_FAILED'),
+        );
       }
     }
     if (!item.operation_id) throw new Error('XHS_BATCH_CORRUPT');
-    let receipt: { status: 'complete' | 'partial'; added: number; message: string; failureScope?: 'article'; failedCount?: number } | null = null;
+    let receipt: {
+      status: 'complete' | 'partial';
+      added: number;
+      message: string;
+      failureScope?: 'article';
+      failedCount?: number;
+    } | null = null;
     let legacyReceipt: string | undefined;
     const storedTask = await this.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_subscription_tasks WHERE id=${item.operation_id} AND creator_id=${item.creator_id}`;
     if (storedTask.length === 1) {
@@ -171,8 +340,14 @@ export class XiaohongshuBatches {
         const task = await this.xhs.task({ taskId: item.operation_id });
         if (task.creatorId !== item.creator_id || task.taskId !== item.operation_id)
           throw new Error('XHS_BATCH_CORRUPT');
-        if (task.state === 'queued' || task.state === 'running') return this.status(id);
-        if (task.state === 'completed') receipt = { status: 'complete', added: task.completed, message: task.message };
+        if (task.state === 'queued' || task.state === 'running')
+          return this.status(id);
+        if (task.state === 'completed')
+          receipt = {
+            status: 'complete',
+            added: task.completed,
+            message: task.message,
+          };
       } catch {
         return this.status(id);
       }

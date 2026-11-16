@@ -493,3 +493,8 @@ resolver 审核已完成：公开 mobile `/mp/getreviewid` 的认证和 synckey 
 
 - Exact baseline admission must cover both root and installer copies of `switch-contract.cjs` and `switch-prewrite.cjs`. Packaged dependency hashes must match.
 - Before publishing an installed-update fix, run `same-schema35.test.cjs` with the verified current artifact and manifest pin against its synthetic database, then validate the complete read-only installer preparation against the newly built candidate. Role admission alone is insufficient.
+
+
+## 2026-11-16：旧小红书批次本地取消结算（隔离实现）
+
+补充了仅针对 prepare + dispatched=false 正面证据的预览/确认入口。复用一致性备份、摘要重验及事务，取消整个旧批次但保留原 operation、任务和未知历史；不取源、不启动新批次。包含单任务恢复竞争保护和前端取消回执解析。产品使用与边界见 [说明](XHS_LOCAL_BATCH_CANCELLATION.md)，本轮文件散列、实际检查结果及安装限制见仓库根目录 XHS_LOCAL_CANCEL_HANDOFF.md。当前只交付隔离源码，未在生产执行核查、确认或来源请求。

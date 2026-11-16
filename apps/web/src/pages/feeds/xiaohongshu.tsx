@@ -1,3 +1,4 @@
+import XhsBatchLocalCancellation from '@web/components/XhsBatchLocalCancellation';
 import XhsMemoryConnection from '@web/components/XhsMemoryConnection';
 import { toast } from 'sonner';
 import XhsBatchSubscription from '@web/components/XhsBatchSubscription';
@@ -590,6 +591,10 @@ export default function Xiaohongshu() {
   const createBatch = trpc.xiaohongshu.createRefreshBatch.useMutation();
   const advanceBatch = trpc.xiaohongshu.advanceRefreshBatch.useMutation();
   const stopBatch = trpc.xiaohongshu.stopRefreshBatch.useMutation();
+  const confirmBatchLocalCancellation =
+    trpc.xiaohongshu.confirmRefreshBatchLocalCancellation.useMutation({
+      retry: false,
+    });
   const exportNotes = trpc.xiaohongshu.export.useMutation();
   const saveGroup = trpc.xiaohongshu.saveGroup.useMutation({ retry: false });
   const reorderGroups = trpc.xiaohongshu.reorderGroups.useMutation({
@@ -2043,6 +2048,45 @@ export default function Xiaohongshu() {
             >
               刷新全部
             </Button>
+            {batch &&
+              ['running', 'paused'].includes(batch.state) &&
+              batch.items.some((item) => item.state === 'reserved') && (
+                <XhsBatchLocalCancellation
+                  key={batch.id}
+                  batchId={batch.id}
+                  disabled={busy || refreshing || stopping}
+                  creatorNames={Object.fromEntries(
+                    (creators.data?.items || []).map((creator) => [
+                      creator.id,
+                      creator.displayName,
+                    ]),
+                  )}
+                  onBusyChange={setBusy}
+                  prepare={(id) =>
+                    utils.client.xiaohongshu.prepareRefreshBatchLocalCancellation.query(
+                      { batchId: id },
+                    )
+                  }
+                  confirm={async (input) => {
+                    const result =
+                      await confirmBatchLocalCancellation.mutateAsync(input);
+                    rememberBatch(parsePersistentCreatorBatch(result.batch));
+                    setMessage(
+                      result.sourceStatusRefreshed
+                        ? '旧批次已取消，历史记录保留；没有开始新采集。'
+                        : '旧批次取消已记录，来源状态读取未确认；请重新读取状态，不要重试取消。',
+                    );
+                    const reads = await Promise.allSettled([
+                      connection.refetch(),
+                      utils.xiaohongshu.capability.invalidate(),
+                    ]);
+                    if (reads.some((read) => read.status === 'rejected'))
+                      setMessage(
+                        '旧批次取消已记录，页面状态读取未确认；请重新读取状态，不要重试取消。',
+                      );
+                  }}
+                />
+              )}
             {batch && ['running', 'paused'].includes(batch.state) && (
               <Button
                 size="sm"
