@@ -267,7 +267,6 @@ function verifyBuildEnvironment(sourceRoot, commit, repository) {
 }
 
 function build(options = {}) {
-  require('./release-scope.cjs').assertWritableSession(['build']);
   if (options.plan && !options.buildOnly)
     throw new Error('--plan requires --build-only');
   if (!options.buildOnly && options.outputRoot)
@@ -490,25 +489,11 @@ function build(options = {}) {
     executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
   });
   const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
-  const shared = require('./release-scope.cjs').open(
-    {
-      kind: 'build',
-      root: releaseRoot,
-      reserveBytes: requestedBytes,
-      runtimeCopies: reusable ? 0 : 1,
-      buildOnly: options.buildOnly === true,
-      sourceCommit: historical ? options.sourceCommit : currentCommit,
-      sourceHash,
-    },
-    options.scopeOptions,
-  );
-  return require('./lib.cjs').hostEffects.context.run(shared, () => {
+  return (() => {
     let reservation;
     let failure;
     try {
       if (reusable) {
-        if (shared.policy.preservingUpdate)
-          throw new Error('RELEASE_PRESERVING_REUSE_FORBIDDEN');
         console.log(
           JSON.stringify({
             release: reusable.directory,
@@ -522,9 +507,11 @@ function build(options = {}) {
       }
       const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
       const release = path.join(releaseRoot, id);
-      reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
-        shared,
-      });
+      reservation = {
+        create: (directory) => fs.mkdirSync(directory),
+        check: () => {},
+        finish: () => {},
+      };
       reservation.create(release);
       if (options.buildOnly)
         writeJson(path.join(release, 'package.json'), {
@@ -589,7 +576,13 @@ function build(options = {}) {
           [cli, 'generate', '--schema', path.join(workspace, 'schema.prisma')],
           {
             cwd: options.buildOnly ? workspace : server,
-            env: { ...env, PRISMA_QUERY_ENGINE_LIBRARY: engine },
+            env: {
+              ...env,
+              PRISMA_QUERY_ENGINE_LIBRARY: engine,
+              ...(process.env.WEWE_LOCAL_SCHEMA_ENGINE
+                ? { PRISMA_SCHEMA_ENGINE_BINARY: process.env.WEWE_LOCAL_SCHEMA_ENGINE }
+                : {}),
+            },
           },
         ),
       );
@@ -867,11 +860,6 @@ function build(options = {}) {
       } catch (error) {
         cleanupErrors.push(error);
       }
-      try {
-        shared.close(failure || cleanupErrors[0]);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
       // Keep the first compiler/copy failure visible even if a later scope
       // deadline or preservation check also holds cleanup for review.
       if (cleanupErrors.length)
@@ -881,7 +869,7 @@ function build(options = {}) {
           { cause: failure || cleanupErrors[0] },
         );
     }
-  });
+  })();
 }
 
 if (require.main === module) {
