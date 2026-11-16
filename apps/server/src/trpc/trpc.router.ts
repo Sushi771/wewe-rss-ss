@@ -240,7 +240,7 @@ export class TrpcRouter {
   }
 
   private get xhsBatches() {
-    return new XiaohongshuBatches(this.prismaService, this.xhs);
+    return new XiaohongshuBatches(this.prismaService, this.xhsSubscriptions!);
   }
 
   private readonly logger = new Logger(this.constructor.name);

@@ -18,6 +18,8 @@ import {
 import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
 import { consumeReviewedContextPermit } from './xhs-reviewed-dispatch';
 import * as attempts from './xhs-reviewed-attempt';
+import { taskSourceFingerprint } from './xhs-task-source-fence';
+import { createHash } from 'node:crypto';
 
 // Source guards are real Prisma/SQLite queries. Storage backup/host admission is
 // injected here: this suite never represents a release writer-gate exercise.
@@ -184,6 +186,59 @@ describe('legacy XHS facts close every candidate source lane', () => {
     await job('complete', finite);
     await batch('stopped');
     expect(await readLegacyXhsSourceFence(db)).toEqual({ state: 'clear' });
+  });
+  it('retains an unstarted running batch without dispatching or changing its queued items', async () => {
+    await db.$executeRaw`INSERT INTO xhs_refresh_batches(id,state,created_at) VALUES('synthetic-batch','running',1)`;
+    await db.$executeRaw`INSERT INTO xhs_refresh_batch_items(batch_id,position,creator_id,operation_id,state,outcome) VALUES('synthetic-batch',0,'legacy-a',NULL,'queued',NULL)`;
+    const before = await oldRows();
+    const api = jest.fn();
+    const callbacks_ = callbacks();
+    expect(await readLegacyXhsSourceFence(db)).toMatchObject({ state: 'blocked', reason: 'unresolved' });
+    await expect(callbacks_.dispatch(api, async () => {})).rejects.toMatchObject({ code: LEGACY_XHS_REVIEW });
+    expect(api).not.toHaveBeenCalled();
+    expect(await oldRows()).toBe(before);
+  });
+  it('admits only the exact persisted task bound to the reserved running batch item', async () => {
+    await batch('running');
+    await db.$executeRaw`INSERT INTO xhs_refresh_batch_items(batch_id,position,creator_id,operation_id,state,outcome) VALUES('synthetic-batch',1,'legacy-b',NULL,'queued',NULL)`;
+    const document = JSON.stringify({ taskId: owner, creatorId: 'legacy-a', kind: 'list', state: 'queued' });
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${owner},'legacy-a','queued',${document},1)`;
+    const candidate = { taskId: owner, creatorId: 'legacy-a' };
+    expect(await readLegacyXhsSourceFence(db, candidate)).toEqual({ state: 'clear' });
+    expect((await readLegacyXhsSourceFence(db)).state).toBe('blocked');
+    expect((await readLegacyXhsSourceFence(db, { ...candidate, creatorId: 'legacy-b' })).state).toBe('blocked');
+    await job('stopped', null);
+    expect((await readLegacyXhsSourceFence(db, candidate)).state).toBe('blocked');
+  });
+  it('keeps genuine source restrictions and unrelated tasks blocked for a bound batch', async () => {
+    await batch('running');
+    const document = JSON.stringify({ taskId: owner, creatorId: 'legacy-a', kind: 'list', state: 'running' });
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${owner},'legacy-a','running',${document},1)`;
+    const store = new XhsSourceRiskStore(db as any);
+    expect(await store.read({ taskId: owner, creatorId: 'legacy-a' })).toBeUndefined();
+    expect(await store.read({ taskId: owner, creatorId: 'legacy-b' })).toBe(LEGACY_XHS_REVIEW);
+    await db.$executeRaw`UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_RATE_LIMIT_BLOCKED' WHERE id='source'`;
+    expect(await store.read({ taskId: owner, creatorId: 'legacy-a' })).toBe('XHS_SOURCE_RATE_LIMIT_BLOCKED');
+  });
+  it('dispatches an exactly bound task to a synthetic transport and blocks outsiders', async () => {
+    await batch('running');
+    const document = JSON.stringify({ taskId: owner, creatorId: 'legacy-a', kind: 'list', state: 'running' });
+    await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES(${owner},'legacy-a','running',${document},1)`;
+    const riskOwner = '22222222-2222-4222-8222-222222222222';
+    await db.$executeRaw`UPDATE xhs_source_risk SET state='pending',owner=${riskOwner} WHERE id='source'`;
+    await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0)`;
+    const cursorHash = createHash('sha256').update('').digest('hex');
+    const scope = { taskId: owner, creatorId: 'legacy-a', phase: 'list', target: 'synthetic-a', cursorHash, owner: riskOwner, fingerprint: taskSourceFingerprint('legacy-a', 'list', 'synthetic-a', cursorHash) };
+    const transport = jest.fn(async () => 'synthetic response');
+    const lane = callbacks();
+    await expect(lane.dispatch(transport, async () => {}, undefined, undefined, { ...scope, creatorId: 'legacy-b' })).rejects.toMatchObject({ code: LEGACY_XHS_REVIEW });
+    expect(transport).not.toHaveBeenCalled();
+    await expect(lane.dispatch(transport, async () => {}, undefined, undefined, scope)).resolves.toBe('synthetic response');
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it('keeps a reservation without its atomic task binding blocked', async () => {
+    await batch('running');
+    expect((await readLegacyXhsSourceFence(db, { taskId: owner, creatorId: 'legacy-a' })).state).toBe('blocked');
   });
   it.each(['running', 'stopped'])(
     'keeps legacy %s globally closed with candidate clear and preserves every old row',

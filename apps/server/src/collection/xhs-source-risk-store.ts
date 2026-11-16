@@ -100,10 +100,10 @@ export class XhsSourceRiskStore {
       throw new XhsSubscriptionError(code);
     }
   }
-  async read() {
+  async read(candidate?: { taskId: string; creatorId: string }) {
     try {
       const row = await this.rows(this.db);
-      if ((await readLegacyXhsSourceFence(this.db)).state === 'blocked')
+      if ((await readLegacyXhsSourceFence(this.db, candidate)).state === 'blocked')
         return LEGACY_XHS_REVIEW;
       return row.state === 'clear'
         ? undefined
@@ -125,12 +125,12 @@ export class XhsSourceRiskStore {
       }),
     );
   }
-  async begin() {
+  async begin(candidate?: { taskId: string; creatorId: string }) {
     await this.assertUnboundRoundAdmission();
     const owner = randomUUID();
     try {
       await this.write(async (tx) => {
-        await assertLegacyXhsSourceReady(tx);
+        await assertLegacyXhsSourceReady(tx, candidate);
         const row = await this.rows(tx);
         if (row.state !== 'clear')
           throw new XhsSubscriptionError(

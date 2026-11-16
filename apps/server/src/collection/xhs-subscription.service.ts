@@ -882,6 +882,13 @@ export class XhsSubscriptionService implements OnModuleInit {
       return reject('XHS_SUBSCRIPTION_REQUIRED');
     return c;
   }
+  /** Reserve a queued batch item and persist its task under one transaction. */
+  async startBatchItem(input: { batchId: string; position: number; creatorId: string }) {
+    await this.creator(input.creatorId);
+    return this.enqueue('list', input.creatorId, [], undefined, undefined,
+      undefined, false, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, input);
+  }
   async refresh(input: { id: string; maxPages?: number }) {
     if (
       input.maxPages !== undefined &&
@@ -1384,6 +1391,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         | 'XHS_SCHEDULE_SELECTION_LIMIT'
         | 'XHS_SCHEDULE_MEDIA_BINDING_REQUIRED';
     },
+    batchItem?: { batchId: string; position: number; creatorId: string },
   ) {
     await this.readyForMutation();
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
@@ -1488,9 +1496,18 @@ export class XhsSubscriptionService implements OnModuleInit {
       if (scheduled.phase === 'basic')
         t.historyExcludedIds = admitted.historyExcludedIds;
     }
+    if (batchItem) {
+      if (scheduled || batchItem.creatorId !== creatorId)
+        throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+      await this.write(Buffer.byteLength(JSON.stringify(t)) + 4096, async (tx) => {
+        const changed = await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${t.taskId} WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND creator_id=${creatorId} AND state='queued' AND operation_id IS NULL AND EXISTS(SELECT 1 FROM xhs_refresh_batches WHERE id=${batchItem.batchId} AND state='running') AND NOT EXISTS(SELECT 1 FROM xhs_refresh_batch_items WHERE batch_id=${batchItem.batchId} AND state='reserved')`;
+        if (changed !== 1) throw new XhsSubscriptionError('XHS_TASK_STATE_CHANGED');
+        await this.persistIn(tx, t);
+      });
+    }
     this.pending.set(t.taskId, t);
     try {
-      if (!scheduled) await this.persist(t);
+      if (!scheduled && !batchItem) await this.persist(t);
     } catch (e) {
       this.pending.delete(t.taskId);
       throw e;

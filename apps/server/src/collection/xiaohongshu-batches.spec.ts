@@ -19,7 +19,7 @@ describe('XHS durable batches on an isolated SQLite database', () => {
     const file = join(root, 'fixture.sqlite');
     const raw = new DatabaseSync(file);
     raw.exec(
-      "PRAGMA foreign_keys=ON; CREATE TABLE xhs_creators(id TEXT PRIMARY KEY, enabled INTEGER NOT NULL); INSERT INTO xhs_creators VALUES ('a',1),('b',1);",
+      "PRAGMA foreign_keys=ON; CREATE TABLE xhs_creators(id TEXT PRIMARY KEY, enabled INTEGER NOT NULL); INSERT INTO xhs_creators VALUES ('a',1),('b',1); CREATE TABLE xhs_subscription_tasks(id TEXT PRIMARY KEY,creator_id TEXT,state TEXT,document TEXT,updated_at INTEGER);",
     );
     for (const name of [
       '20261105000000_xhs_refresh_ledger',
@@ -58,6 +58,20 @@ describe('XHS durable batches on an isolated SQLite database', () => {
           receipt.get(op) || { state: 'missing' },
       ),
     };
+    source.startBatchItem = jest.fn(async ({ batchId, position, creatorId }: any) => {
+      const op = randomUUID();
+      await source.legacyRefresh(creatorId, op);
+      const result = receipt.get(op);
+      await db.$transaction(async (tx) => {
+        await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${op} WHERE batch_id=${batchId} AND position=${position} AND state='queued'`;
+        if (result?.state === 'complete') {
+          const rawOutcome = JSON.stringify(result.outcome);
+          await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES(${creatorId},1,${op},1,'complete',${rawOutcome})`;
+        }
+      });
+      return { taskId: op };
+    });
+    source.cancelTask = jest.fn();
     batches = new XiaohongshuBatches(db, source);
   });
   afterEach(async () => {
@@ -90,6 +104,8 @@ describe('XHS durable batches on an isolated SQLite database', () => {
       state: 'complete',
       outcome: { status: 'complete', added: 1, message: 'synthetic' },
     });
+    const rawOutcome = JSON.stringify(receipt.get(op).outcome);
+    await db.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES('a',1,${op},1,'complete',${rawOutcome})`;
     expect((await batches.advance(id)).state).toBe('running');
     expect((await batches.advance(id)).state).toBe('complete');
     expect(calls).toEqual(['b']);

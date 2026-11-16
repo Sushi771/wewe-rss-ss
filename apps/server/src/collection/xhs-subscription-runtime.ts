@@ -151,6 +151,7 @@ export class XhsSubscriptionRuntime
   private readonly taskSourceContext = new AsyncLocalStorage<{
     taskId: string;
     creatorId: string;
+    batchHistoryVerified?: boolean;
     owner?: string;
     current?: TaskSourceScope;
     mediaNoteKey?: string;
@@ -170,11 +171,13 @@ export class XhsSubscriptionRuntime
       guardCode?: string;
     } & Partial<SourceTransactionDiagnostic>;
   }>();
-  withTaskScope<T>(
+  async withTaskScope<T>(
     scope: { taskId: string; creatorId: string },
     work: () => Promise<T>,
   ): Promise<T> {
-    return this.taskSourceContext.run({ ...scope }, work);
+    const batchHistoryVerified = this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' &&
+      !!this.riskStore && !(await this.riskStore.read(scope));
+    return this.taskSourceContext.run({ ...scope, batchHistoryVerified }, work);
   }
   resetTaskDiagnostic() {
     const scope = this.taskSourceContext.getStore();
@@ -1705,7 +1708,8 @@ export class XhsSubscriptionRuntime
         (this.limitedRecoveryScope.getStore() ||
           this.wholeSourceGroup.getStore() ||
           this.reviewedSingle.getStore() ||
-          this.reviewedContext.getStore()) &&
+          this.reviewedContext.getStore() ||
+          this.taskSourceContext.getStore()?.batchHistoryVerified) &&
         this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED'
       )
     )
@@ -2007,7 +2011,7 @@ export class XhsSubscriptionRuntime
       !fullHistoryContext.getStore()
     ) {
       try {
-        riskOwner = await this.riskStore.begin();
+        riskOwner = await this.riskStore.begin(this.taskSourceContext.getStore());
       } catch (error) {
         const code =
           error instanceof XhsSubscriptionError

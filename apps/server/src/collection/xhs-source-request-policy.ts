@@ -301,8 +301,9 @@ async function reserveTotal(
   now: number,
   owned = '',
   retained: string[] = [],
+  scoped?: TaskSourceScope,
 ) {
-  await assertLegacyXhsSourceReady(tx);
+  await assertLegacyXhsSourceReady(tx, scoped);
   retained = [
     ...new Set([...retained, ...(await readHistoryHandoffs(tx)).markers]),
   ];
@@ -334,18 +335,18 @@ async function dispatchSource<T>(
   scoped?: TaskSourceScope,
 ): Promise<T> {
   const store = new XhsSqliteBudgetStore(db);
-  await assertLegacyXhsSourceReady(db);
+  await assertLegacyXhsSourceReady(db, scoped);
   await ready();
   await ensureSourceCounter(db);
   const waiting: { since?: number } = {};
   for (;;) {
-    await assertLegacyXhsSourceReady(db);
+    await assertLegacyXhsSourceReady(db, scoped);
     await ready();
     if (!(await store.read(SOURCE_TOTAL))) {
       if (group || scoped) fail('XHS_REQUEST_BUDGET_REQUIRED');
       if (await hasPendingDispatch(db, '', [], scoped))
         fail('XHS_REQUEST_RATE_PAUSED');
-      await assertLegacyXhsSourceReady(db);
+      await assertLegacyXhsSourceReady(db, scoped);
       return operation();
     }
     const marker = group?.marker ?? DISPATCH_PREFIX + randomUUID();
@@ -423,7 +424,7 @@ async function dispatchSource<T>(
           await group.mediaDispatch(tx);
           group.mediaDispatched = true;
         }
-        await assertLegacyXhsSourceReady(tx);
+        await assertLegacyXhsSourceReady(tx, scoped);
         response = operation();
         started = true;
         if (group) group.started = true;
@@ -537,7 +538,7 @@ export function bindXhsSourceTotalBudget(
     async (alreadyBudgeted, group, ready, scoped) => {
       const store = new XhsSqliteBudgetStore(db);
       runtime.assertSourceReady();
-      await assertLegacyXhsSourceReady(db);
+      await assertLegacyXhsSourceReady(db, scoped);
       await ensureSourceCounter(db);
       if (!(await store.read(SOURCE_TOTAL))) {
         if (!alreadyBudgeted) fail('XHS_REQUEST_BUDGET_REQUIRED');
@@ -560,7 +561,7 @@ export function bindXhsSourceTotalBudget(
                 reserveTotal(tx, now, group?.marker, [
                   ...(group ? await retainedGenerationMarkers(tx, group) : []),
                   ...(scoped ? await verifiedUnknownMarkers(tx, scoped) : []),
-                ]),
+                ], scoped),
               )
             ) {
               return true;

@@ -156,8 +156,11 @@ const acceptedItem = (value: Receipt) =>
  * Call again inside candidate admission/dispatch transactions. This does not make
  * unmodified legacy processes share the candidate lock: release still requires
  * every old writer to be quiescent and a verified consistent database snapshot. */
+export type LegacyBatchTask = { taskId: string; creatorId: string };
+
 export async function readLegacyXhsSourceFence(
   db: LegacyXhsQuery,
+  candidate?: LegacyBatchTask,
 ): Promise<LegacyXhsFence> {
   try {
     const schema = await db.$queryRaw<
@@ -245,6 +248,28 @@ export async function readLegacyXhsSourceFence(
     >`SELECT * FROM xhs_refresh_failures LIMIT 10001`;
     if ([jobs, batches, items, failures].some((rows) => rows.length > 10000))
       return blocked('limit');
+    // A candidate is exempt only if its persisted task and reserved item are
+    // the same operation, creator and currently running batch. No caller-supplied
+    // identity alone grants an exemption.
+    let candidateBatch: string | undefined;
+    if (candidate && operation(candidate.taskId) && identity(candidate.creatorId)) {
+      const matching = items.filter((i) => i.operation_id === candidate.taskId &&
+        i.creator_id === candidate.creatorId && i.state === 'reserved');
+      const task = await db.$queryRaw<any[]>`SELECT id,creator_id,state,document FROM xhs_subscription_tasks WHERE id=${candidate.taskId}`;
+      if (matching.length === 1 && task.length === 1 &&
+          task[0].creator_id === candidate.creatorId &&
+          ['queued', 'running'].includes(task[0].state) &&
+          batches.some((b) => b.id === matching[0].batch_id && b.state === 'running') &&
+          items.filter((i) => i.batch_id === matching[0].batch_id && i.state === 'reserved').length === 1 &&
+          !jobs.some((j) => j.owner === candidate.taskId)) {
+        try {
+          const doc = JSON.parse(task[0].document);
+          if (doc.taskId === candidate.taskId && doc.creatorId === candidate.creatorId &&
+              doc.state === task[0].state && doc.kind === 'list')
+            candidateBatch = matching[0].batch_id;
+        } catch { /* malformed task remains blocked */ }
+      }
+    }
     const byOwner = new Map<string, any>(),
       byBatch = new Map<string, any>();
     let unresolved = false;
@@ -288,7 +313,7 @@ export async function readLegacyXhsSourceFence(
       )
         return blocked('state');
       byBatch.set(batch.id, batch);
-      if (batch.state === 'running' || batch.state === 'paused')
+      if ((batch.state === 'running' || batch.state === 'paused') && batch.id !== candidateBatch)
         unresolved = true;
     }
     for (const item of items) {
@@ -311,7 +336,12 @@ export async function readLegacyXhsSourceFence(
           (item.state === 'cancelled' && batch.state !== 'stopped')
         )
           return blocked('state');
-        if (item.state === 'queued') unresolved = true;
+        if (item.state === 'queued' && item.batch_id !== candidateBatch) unresolved = true;
+        continue;
+      }
+      if (candidate && item.batch_id === candidateBatch && item.state === 'reserved' &&
+          item.operation_id === candidate.taskId && item.creator_id === candidate.creatorId) {
+        if (item.outcome !== null) return blocked('state');
         continue;
       }
       const job = byOwner.get(item.operation_id);
@@ -349,7 +379,8 @@ export async function readLegacyXhsSourceFence(
 }
 export async function assertLegacyXhsSourceReady(
   db: LegacyXhsQuery,
+  candidate?: LegacyBatchTask,
 ): Promise<void> {
-  if ((await readLegacyXhsSourceFence(db)).state === 'blocked')
+  if ((await readLegacyXhsSourceFence(db, candidate)).state === 'blocked')
     throw new XhsSubscriptionError(LEGACY_XHS_REVIEW);
 }
