@@ -2047,7 +2047,7 @@ export default function Xiaohongshu() {
               <Button
                 size="sm"
                 variant="light"
-                isDisabled={busy || !capability.data?.canRefresh}
+                isDisabled={busy}
                 onPress={handleContinueBatch}
               >
                 查看并继续批次
