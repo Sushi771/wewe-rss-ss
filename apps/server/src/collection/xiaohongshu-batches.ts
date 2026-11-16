@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { XhsSubscriptionService } from './xhs-subscription.service';
+import { XhsSubscriptionError, xhsPublicCode } from './xhs-subscription-errors';
 
 type Item = {
   position: number;
@@ -150,10 +151,14 @@ export class XiaohongshuBatches {
       try {
         const started = await this.xhs.startBatchItem({ batchId: id, position: item.position, creatorId: item.creator_id });
         item = { ...item, operation_id: started.taskId, state: 'reserved' };
-      } catch {
-        // A concurrent advance or an uncertain commit is reconciled by the
-        // persisted item on the next call; never launch a second operation.
-        return this.status(id);
+      } catch (error) {
+        // Inspect durable state before reporting a failure. A committed or
+        // concurrent reservation is only observed, never launched again.
+        const observed = await this.status(id);
+        const current = observed.items.find((entry) => entry.position === item.position);
+        if (!current || current.state !== 'queued' || current.operationId)
+          return observed;
+        throw new XhsSubscriptionError(xhsPublicCode(error, 'XHS_LOCAL_OPERATION_FAILED'));
       }
     }
     if (!item.operation_id) throw new Error('XHS_BATCH_CORRUPT');

@@ -75,7 +75,7 @@ describe('bound refresh batches, synthetic SQLite', () => {
   it('rolls back item reservation if task persistence fails', async () => {
     const id = randomUUID(); await batch.create(id, ['a']);
     jest.spyOn(service as any, 'persistIn').mockRejectedValueOnce(new Error('synthetic rollback'));
-    await batch.advance(id);
+    await expect(batch.advance(id)).rejects.toMatchObject({ code: 'XHS_LOCAL_OPERATION_FAILED' });
     expect((await batch.status(id)).items[0]).toMatchObject({state:'queued', operationId:null});
     expect(await db.$queryRaw`SELECT id FROM xhs_subscription_tasks`).toEqual([]);
     expect(calls).toEqual([]);
