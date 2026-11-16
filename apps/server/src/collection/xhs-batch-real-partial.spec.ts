@@ -1,4 +1,5 @@
 import { XhsWholeCreatorService } from './xhs-whole-creator.service';
+import { parseXhsProfile } from './xhs-profile';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -32,21 +33,22 @@ it('preserves a first page and pauses on a restricted second request with real w
     const oldList = JSON.stringify({ taskId: 'old-list', creatorId: 'b', kind: 'list', state: 'partial', code: 'XHS_DETAIL_OUTCOME_UNKNOWN', sourceFailures: { synthetic: { phase: 'detail', code: 'XHS_DETAIL_OUTCOME_UNKNOWN', dispatched: false, fenceReason: 'prior-started' } } });
     await db.$executeRaw`INSERT INTO xhs_subscription_tasks(id,creator_id,state,document,updated_at) VALUES('old-download','a','blocked',${oldDownload},1),('old-list','b','partial',${oldList},2)`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0)`;
-    const api = jest.fn(async (request: any) => api.mock.calls.length === 1
+    const api = jest.fn(async (request: any) => new URL(request.url).pathname.endsWith('/user/otherinfo')
+      ? { status: 200, url: request.url, body: { success: true, data: { result: { success: true, code: 0 }, basic_info: { user_id: 'a', nickname: 'synthetic', red_id: 'synthetic' }, interactions: [] } } }
+      : api.mock.calls.filter(([r]: any[]) => new URL(r.url).pathname.endsWith('/user_posted')).length === 1
       ? { status: 200, url: request.url, body: { success: true, data: { notes: [{ note_id: 'note-one', user: { user_id: 'a' }, xsec_token: 'synthetic', display_title: 'synthetic' }], has_more: true, cursor: 'next' } } }
       : { status: 429, url: request.url, body: { success: false } });
-    runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+    runtime = new XhsSubscriptionRuntime({ enabled: () => true, api, profileParser: parseXhsProfile });
     runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
     bindXhsSourceTotalBudget(db as any, runtime);
     await runtime.connectSession({ a1: 'synthetic-a1', webSession: 'synthetic-session' });
-    (runtime as any).adapter.restoreDefaultAuthorAccess('a');
     const service = new XhsSubscriptionService(db as any, runtime);
     new XhsWholeCreatorService(db as any, service, runtime, {} as any);
     const batch = new XiaohongshuBatches(db, service);
     const id = randomUUID(); await batch.create(id, ['a']);
     await batch.advance(id); await (service as any).lane; await batch.advance(id);
-    expect(api).toHaveBeenCalledTimes(2);
-    expect(api.mock.calls.every(([request]: any[]) => new URL(request.url).pathname.endsWith('/user_posted'))).toBe(true);
+    expect(api).toHaveBeenCalledTimes(3);
+    expect(api.mock.calls.filter(([request]: any[]) => new URL(request.url).pathname.endsWith('/user_posted'))).toHaveLength(2);
     const historical = await db.$queryRaw<Array<{ id: string; document: string }>>`SELECT id,document FROM xhs_subscription_tasks WHERE id IN ('old-download','old-list') ORDER BY id`;
     expect(historical).toEqual([{ id: 'old-download', document: oldDownload }, { id: 'old-list', document: oldList }]);
     expect((await batch.status(id)).state).toBe('paused');

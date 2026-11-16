@@ -2221,7 +2221,9 @@ export class XhsSubscriptionService implements OnModuleInit {
         !t.reuseCompleteCache
       )
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
-      if (t.schedule?.phase === 'basic' && t.collectDetails)
+      // List-only batches need the same once-per-round, durable profile reparse
+      // after restart/expiry. It remains inside the admitted task/source scope.
+      if (t.schedule?.phase === 'basic')
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
       if (t.kind === 'list' && t.collectionStage !== 'details') {
         await this.updateList(t, creator);

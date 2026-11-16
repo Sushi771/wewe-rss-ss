@@ -18,6 +18,7 @@ import {
   assertScheduledDispatch,
 } from './xhs-scheduled-review-scope';
 import { assertUnboundDispatch } from './xhs-unbound-round';
+import { parseXhsProfile } from './xhs-profile';
 
 // Real Prisma, production migrations, admission, protected writes, recurring
 // review, batch/task orchestration and runtime. Only the source is synthetic.
@@ -168,6 +169,13 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     historical = await snapshot();
     api = jest.fn(async (request: any) => {
       const u = new URL(request.url);
+      if (u.pathname.endsWith('/user/otherinfo')) {
+        const authorId = u.searchParams.get('target_user_id')!;
+        return { status: 200, url: request.url, body: { success: true, code: 0,
+          data: { result: { success: true, code: 0 }, basic_info: {
+            user_id: authorId, nickname: 'Synthetic author', red_id: 'synthetic',
+          }, interactions: [] } } };
+      }
       const authorId = u.searchParams.get('user_id')!;
       return {
         status: 200,
@@ -193,6 +201,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     runtime = new XhsSubscriptionRuntime({
       enabled: () => true,
       api,
+      profileParser: parseXhsProfile,
       requirePersistentRisk: true,
     });
     runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
@@ -203,8 +212,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       a1: 'synthetic-a1',
       webSession: 'synthetic-session',
     });
-    for (const id of ids)
-      (runtime as any).adapter.restoreDefaultAuthorAccess(authors[id]);
+    // Deliberately cold: no test-only injection of the private author map.
     batch = new XiaohongshuBatches(db, service);
     batchId = randomUUID();
     await batch.create(batchId, ids);
@@ -218,7 +226,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     // dir is the exact directory returned by mkdtemp for this test.
     await rm(dir, { recursive: true, force: true });
   });
-  it('updates all three accounts through real review and list dispatch, preserving unknowns byte-for-byte', async () => {
+  it('rebuilds cold list-only contexts through real review, preserving unknowns byte-for-byte', async () => {
     await expect(assertUnboundDispatch(db)).rejects.toThrow(
       'APPROVED_NEW_ROUND_REQUIRED',
     );
@@ -226,13 +234,18 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       await batch.advance(batchId);
       await waitForLane();
       await batch.advance(batchId);
+      const [saved] = await db.$queryRawUnsafe<any[]>(
+        'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+        scheduledTaskId('batch/' + batchId, creatorId, 'basic'),
+      );
+      expect(JSON.parse(saved.document)).toMatchObject({ state: 'completed' });
       expect(await db.xhsNote.count({ where: { creatorId } })).toBe(1);
     }
     expect((await batch.status(batchId)).state).toBe('complete');
-    expect(api).toHaveBeenCalledTimes(3);
+    expect(api).toHaveBeenCalledTimes(6);
     expect(
       api.mock.calls.every(([request]) =>
-        new URL(request.url).pathname.endsWith('/user_posted'),
+        /\/(?:user_posted|user\/otherinfo)$/.test(new URL(request.url).pathname),
       ),
     ).toBe(true);
     const tasks = await db.$queryRawUnsafe<any[]>(
@@ -243,22 +256,86 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       expect(JSON.parse(task.document)).toMatchObject({
         kind: 'list',
         state: 'completed',
+        scheduledContext: { used: 1, state: 'confirmed' },
       });
     expect(tasks.every(task => !JSON.parse(task.document).collectDetails)).toBe(true);
     const ledger = await db.$queryRawUnsafe<any[]>(
       'SELECT phase,outcome FROM xhs_unbound_owner_requests WHERE operation_id<>?',
       oldOperation,
     );
-    expect(ledger).toHaveLength(3);
+    expect(ledger).toHaveLength(6);
     expect(
       ledger.every(
-        (x) => x.phase === 'list' && x.outcome === 'response-received',
+        (x) => ['profile', 'list'].includes(x.phase) && x.outcome === 'response-received',
       ),
     ).toBe(true);
     expect(await snapshot()).toEqual(historical);
     await batch.advance(batchId);
     await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
-    expect(api).toHaveBeenCalledTimes(3);
+    expect(api).toHaveBeenCalledTimes(6);
+  });
+  it('excludes an entire retained-unknown account from an exact two-member cold batch', async () => {
+    await batch.stop(batchId);
+    batchId = randomUUID();
+    const selected = [ids[0], ids[2]];
+    await batch.create(batchId, selected);
+    for (const _creatorId of selected) {
+      await batch.advance(batchId);
+      await waitForLane();
+      await batch.advance(batchId);
+    }
+    expect((await batch.status(batchId)).state).toBe('complete');
+    expect(api).toHaveBeenCalledTimes(4);
+    expect(api.mock.calls.every(([r]) => {
+      const u = new URL(r.url);
+      return [authors[ids[0]], authors[ids[2]]].includes(
+        u.searchParams.get('target_user_id') ?? u.searchParams.get('user_id')!,
+      );
+    })).toBe(true);
+    expect(await snapshot()).toEqual(historical);
+    expect(await db.xhsNote.count({ where: { creatorId: ids[1] } })).toBe(0);
+  });
+  it('stops an author-mismatched rebuild before listing and never retries it', async () => {
+    api.mockImplementation(async (r: any) => ({ status: 200, url: r.url,
+      body: { success: true, code: 0, data: { result: { success: true, code: 0 },
+        basic_info: { user_id: 'different-author', nickname: 'synthetic', red_id: 'synthetic' }, interactions: [] } } }));
+    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
+    expect((await batch.status(batchId)).state).toBe('paused');
+    await batch.advance(batchId);
+    await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(new URL(api.mock.calls[0][0].url).pathname).toMatch(/\/user\/otherinfo$/);
+    expect(await db.xhsNote.count()).toBe(0);
+    expect(await snapshot()).toEqual(historical);
+  });
+  it('preserves a newly unknown profile request and never retries its bound task', async () => {
+    api.mockRejectedValueOnce(Error('synthetic interrupted profile transport'));
+    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
+    expect((await batch.status(batchId)).state).toBe('paused');
+    const [saved] = await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?', operation());
+    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({ used: 1, state: 'started' });
+    const unknown = await db.$queryRawUnsafe<any[]>(
+      'SELECT phase,outcome FROM xhs_unbound_owner_requests WHERE task_id=?', operation(),
+    );
+    expect(unknown).toEqual([{ phase: 'profile', outcome: 'unknown' }]);
+    await batch.advance(batchId);
+    await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(await db.xhsNote.count()).toBe(0);
+    expect(await snapshot()).toEqual(historical);
+  });
+  it('keeps a failed profile-confirmation transaction started and never repeats its source request', async () => {
+    await db.$executeRawUnsafe("CREATE TRIGGER context_confirmation_failure BEFORE UPDATE ON xhs_subscription_tasks WHEN json_extract(NEW.document,'$.scheduledContext.state')='confirmed' BEGIN SELECT RAISE(ABORT,'synthetic confirmation failure'); END");
+    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
+    const [saved] = await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?', operation());
+    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({ used: 1, state: 'started' });
+    expect((await batch.status(batchId)).state).toBe('paused');
+    await db.$executeRawUnsafe('DROP TRIGGER context_confirmation_failure');
+    await batch.advance(batchId);
+    await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
+    expect(api).toHaveBeenCalledTimes(1);
+    expect(await db.xhsNote.count()).toBe(0);
+    expect(await snapshot()).toEqual(historical);
   });
   it('reuses an existing task with a queued candidate without running it again', async () => {
     const taskId = operation();
@@ -339,7 +416,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     await db.$executeRawUnsafe('DROP TRIGGER synthetic_insert_failure');
     await batch.advance(batchId);
     await waitForLane();
-    expect(api).toHaveBeenCalledTimes(1);
+    expect(api).toHaveBeenCalledTimes(2);
     expect(await snapshot()).toEqual(historical);
   });
   it('rolls back reservation and blocked task if pausing the batch fails', async () => {
@@ -413,7 +490,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     const advanced = await Promise.all([batch.advance(batchId), batch.advance(batchId)]);
     expect(advanced.every(x => x.items[0].operationId === operation())).toBe(true);
     release!(); release = undefined; await waitForLane();
-    expect(api).toHaveBeenCalledTimes(1);
+    expect(api).toHaveBeenCalledTimes(2);
   });
   it.each([
     'XHS_SOURCE_RATE_LIMIT_BLOCKED',

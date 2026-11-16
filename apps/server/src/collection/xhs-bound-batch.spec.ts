@@ -11,6 +11,7 @@ import { XhsSubscriptionService } from './xhs-subscription.service';
 import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { bindXhsSourceTotalBudget } from './xhs-source-request-policy';
+import { parseXhsProfile } from './xhs-profile';
 
 jest.mock('./incremental-write', () => ({ incrementalWrite: (_db: unknown, _bytes: number, run: () => unknown) => run(), assertIncrementalWriteAdmission: async () => {}, assertIncrementalTransaction: async () => {}, canReuseIncrementalTransactionChecks: () => false, withIncrementalTransactionChecks: (run: () => unknown) => run() }));
 
@@ -47,12 +48,13 @@ describe('bound refresh batches, synthetic SQLite', () => {
   });
   afterAll(async () => { await db.$disconnect(); await fs.rm(folder, { recursive: true, force: true }); });
   it('runs the real batch and task into a synthetic transport', async () => {
-    const api = jest.fn(async (request: any) => ({ status: 200, url: request.url, body: { success: true, data: { notes: [], has_more: false, cursor: '' } } }));
-    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api });
+    const api = jest.fn(async (request: any) => ({ status: 200, url: request.url, body: { success: true, data: new URL(request.url).pathname.endsWith('/user/otherinfo')
+      ? { result: { success: true, code: 0 }, basic_info: { user_id: 'a', nickname: 'synthetic', red_id: 'synthetic' }, interactions: [] }
+      : { notes: [], has_more: false, cursor: '' } } }));
+    const runtime = new XhsSubscriptionRuntime({ enabled: () => true, api, profileParser: parseXhsProfile });
     runtime.bindRiskStore(new XhsSourceRiskStore(db as any));
     bindXhsSourceTotalBudget(db as any, runtime);
     await runtime.connectSession({ a1: 'synthetic-a1', webSession: 'synthetic-session' });
-    (runtime as any).adapter.restoreDefaultAuthorAccess('a');
     await db.$executeRaw`DELETE FROM xhs_request_budgets`;
     await db.$executeRaw`UPDATE xhs_source_risk SET state='clear',code=NULL,owner=NULL,http_status=NULL,endpoint=NULL WHERE id='source'`;
     await db.$executeRaw`INSERT INTO xhs_request_budgets(id,request_limit,used,next_at,interval_ms) VALUES('xhs:source-total',100,0,0,0)`;
@@ -63,7 +65,7 @@ describe('bound refresh batches, synthetic SQLite', () => {
     const actual = new XiaohongshuBatches(db, real);
     const id = randomUUID(); await actual.create(id, ['a']);
     await actual.advance(id); await (real as any).lane; await actual.advance(id);
-    expect(api).toHaveBeenCalledTimes(1);
+    expect(api).toHaveBeenCalledTimes(2);
     expect((await actual.status(id)).state).toBe('complete');
     runtime.onModuleDestroy();
   });
