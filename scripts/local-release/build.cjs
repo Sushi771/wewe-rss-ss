@@ -482,14 +482,7 @@ function build(options = {}) {
     console.log(JSON.stringify(plan));
     return plan;
   }
-  const reusable = buildBudget.findReusable(releaseRoot, {
-    sourceHash,
-    sourceCommit: historical ? options.sourceCommit : currentCommit,
-    nodeVersion: process.version,
-    runtimeSha256: fileHash(process.execPath),
-    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
-    executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
-  });
+  const reusable = null;
   const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
   return (() => {
     let reservation;
