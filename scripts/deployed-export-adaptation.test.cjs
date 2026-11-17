@@ -30,6 +30,7 @@ test('reviewed held/channel deltas preserve original blobs and reject every unkn
     'apps/server/src/trpc/trpc.router.ts',
     'apps/server/src/trpc/trpc.service.ts',
     'apps/web/src/pages/feeds/index.tsx',
+    'scripts/local-release/release-scope.cjs',
     'scripts/local-release/restart.cjs',
   ]);
   for (const [file, entry] of Object.entries(entries)) {

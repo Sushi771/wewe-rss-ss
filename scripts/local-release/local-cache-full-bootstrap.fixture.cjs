@@ -309,6 +309,30 @@
   const { splitSqliteStatements } = require(
     path.join(w, 'scripts/sqlite-statements.cjs'),
   );
+  // Only the cache engine's existing injected clock is deterministic. Keep real
+  // wall time for the writer lease, snapshot watchdog and all startup audits.
+  // The real night-window predicate still executes; this import scenario is a
+  // daytime scenario regardless of when a CI runner happens to start it.
+  const engineModule = require(
+    path.join(server, 'src/feeds/cache-sync-engine'),
+  );
+  const RealCacheSyncEngine = engineModule.CacheSyncEngine;
+  const fixtureDaytime = Date.parse('2026-11-17T04:00:00Z');
+  const fixtureStarted = performance.now();
+  assert.equal(engineModule.cacheSyncDaytime(fixtureDaytime), true);
+  assert.equal(
+    engineModule.cacheSyncDaytime(Date.parse('2026-11-17T20:00:00Z')),
+    false,
+  );
+  engineModule.CacheSyncEngine = class extends RealCacheSyncEngine {
+    constructor(deps) {
+      assert.equal(deps.textOnly, true);
+      super({
+        ...deps,
+        now: () => fixtureDaytime + performance.now() - fixtureStarted,
+      });
+    }
+  };
   const { CacheSyncService } = require(
     path.join(server, 'src/feeds/cache-sync.service'),
   );
