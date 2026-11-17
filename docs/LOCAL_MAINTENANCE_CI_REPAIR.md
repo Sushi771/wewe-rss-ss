@@ -49,3 +49,8 @@ remain fixed. Its runtime allowance includes the retained failed copy explicitly
 Repeated recovery is read-only; an interrupted precommit leaves the original
 claim intact. This local build recovery grants no production installation or
 source-collection authority. Budget refusals retain their original error cause.
+Successive failures retain and revalidate the earlier snapshots and inventories.
+For a legacy record without a PID, recovery additionally requires pinned evidence
+of an observed failed process exit and a complete native census of the entry and
+related writers; it never substitutes an invented PID. During a build, external
+inspection processes must not reference its exclusive output root.

@@ -174,7 +174,9 @@ function observeBuildRecovery(approval, registry, outputRoot) {
   for (const r of rows.values()) {
     if (ancestors.has(r.pid)) continue;
     if (
-      /^(node|python\d*|powershell|pwsh|cmd)(\.exe)?$/i.test(r.name) &&
+      /^(node|python\d*|powershell|pwsh|cmd|esbuild|schema-engine)(\.exe)?$/i.test(
+        r.name,
+      ) &&
       (!r.commandLine || !r.executable)
     )
       throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PROCESS_QUERY_INCOMPLETE');
@@ -183,6 +185,7 @@ function observeBuildRecovery(approval, registry, outputRoot) {
       .toLowerCase();
     if (
       needles.some((v) => text.includes(v)) ||
+      /^(esbuild|schema-engine)(\.exe)?$/i.test(r.name) ||
       /(?:^|[\\/\s"'])(?:build|ci-final-build-review)\.cjs(?:[\s"']|$)|[\\/](?:tsc|vite)(?:\.js)?(?:[\s"']|$)|prisma[^\n]*\bgenerate\b/i.test(
         text,
       )
@@ -191,7 +194,10 @@ function observeBuildRecovery(approval, registry, outputRoot) {
   }
   return {
     complete: true,
-    ownerAbsent: !rows.has(approval.owner.pid),
+    ownerAbsent:
+      approval.owner.pid === null
+        ? writers.length === 0
+        : !rows.has(approval.owner.pid),
     writers,
   };
 }
@@ -1885,9 +1891,16 @@ function open(request, options = {}, boundOperation) {
       a.recoveryModuleSha256 !== fileHash(__filename) ||
       !a.reviewEvidence ||
       typeof a.reviewEvidence !== 'string' ||
-      !Number.isSafeInteger(a.owner?.pid) ||
-      a.owner.pid < 1 ||
-      !/^\d{4}-\d\d-\d\dT/.test(a.owner.startUtc || '') ||
+      !a.owner ||
+      (a.owner.kind === 'complete-census-after-observed-exit'
+        ? a.owner.pid !== null ||
+          a.owner.startUtc !== null ||
+          !Number.isInteger(a.owner.exitCode) ||
+          a.owner.exitCode === 0 ||
+          hash(a.owner.exitEvidence) !== hash(a.failureLog)
+        : !Number.isSafeInteger(a.owner.pid) ||
+          a.owner.pid < 1 ||
+          !/^\d{4}-\d\d-\d\dT/.test(a.owner.startUtc || '')) ||
       !path.isAbsolute(a.owner.entry || '')
     )
       refuse();
@@ -1908,24 +1921,58 @@ function open(request, options = {}, boundOperation) {
       : recoveryBytes(a.ledger, 4 * 1024 ** 2);
     const before = JSON.parse(oldRaw);
     const adoption = recoveryBytes(a.adoption, 64);
+    const verifyOrigin = (payload, expected, depth = 0) => {
+      if (depth > 16 || payload.configSha !== expected) refuse();
+      const h = payload.failedBuildRecovery;
+      if (!h) {
+        if (expected !== adoption.toString('utf8')) refuse();
+        return;
+      }
+      const previousFile =
+        ledger + '.failed-build-' + h.approvalSha256 + '.json';
+      const previous = JSON.parse(
+        recoveryBytes(
+          {
+            path: previousFile,
+            identity: fileIdentity(previousFile),
+            sha256: h.snapshotSha256,
+          },
+          4 * 1024 ** 2,
+        ),
+      );
+      const doc = (key) => Buffer.from(previous[key], 'base64');
+      const oldLedger = JSON.parse(doc('ledgerBase64'));
+      if (
+        h.nextPolicySha256 !== expected ||
+        hashBytes(doc('nextPolicyBase64')) !== expected ||
+        hashBytes(doc('policyBase64')) !== h.oldPolicySha256 ||
+        hashBytes(doc('approvalBase64')) !== h.approvalSha256 ||
+        oldLedger.digest !== hash(oldLedger.payload) ||
+        oldLedger.payload.claim?.id !== h.claimId
+      )
+        refuse();
+      verifyOrigin(oldLedger.payload, h.oldPolicySha256, depth + 1);
+    };
+    verifyOrigin(before.payload, configSha);
+    const failedRows = before.payload.outputs.filter((o) => !o.complete);
     if (
       a.ledger.path !== ledger ||
       hashBytes(oldRaw) !== a.ledger.sha256 ||
       a.adoption.path !== ledger + '.adopted' ||
-      adoption.toString('utf8') !== configSha ||
       before.digest !== hash(before.payload) ||
       before.payload.configSha !== configSha ||
       before.payload.format !== 2 ||
       before.payload.claim?.id !== a.claimId ||
       before.payload.claim?.kind !== 'build' ||
       before.payload.claim.root !== policy.buildOnly.outputRoot ||
-      before.payload.outputs.length !== 1 ||
+      failedRows.length !== 1 ||
+      before.payload.outputs.some((o) => o.complete && !o.retainedFailure) ||
       before.payload.claim.outputs.length !== 1 ||
       before.payload.claim.outputs[0] !== a.output.path ||
-      before.payload.outputs[0].path !== a.output.path ||
-      before.payload.outputs[0].claim !== a.claimId ||
-      before.payload.outputs[0].complete !== false ||
-      hash(before.payload.outputs[0].identity) !== hash(a.output.identity) ||
+      failedRows[0].path !== a.output.path ||
+      failedRows[0].claim !== a.claimId ||
+      failedRows[0].complete !== false ||
+      hash(failedRows[0].identity) !== hash(a.output.identity) ||
       !contains(policy.buildOnly.outputRoot, a.output.path) ||
       path.dirname(a.output.path) !== policy.buildOnly.outputRoot
     )
@@ -1973,15 +2020,20 @@ function open(request, options = {}, boundOperation) {
       ...before.payload,
       configSha: a.nextPolicy.sha256,
       claim: null,
-      outputs: [
-        {
-          ...before.payload.outputs[0],
-          complete: true,
-          digest: a.output.digest,
-          metadataDigest: a.output.metadataDigest,
-          retainedFailure: { claimId: a.claimId, approvalSha256: spec.sha256 },
-        },
-      ],
+      outputs: before.payload.outputs.map((o) =>
+        o.path !== a.output.path
+          ? o
+          : {
+              ...o,
+              complete: true,
+              digest: a.output.digest,
+              metadataDigest: a.output.metadataDigest,
+              retainedFailure: {
+                claimId: a.claimId,
+                approvalSha256: spec.sha256,
+              },
+            },
+      ),
       failedBuildRecovery: {
         approvalSha256: spec.sha256,
         snapshotSha256: hashBytes(snapshot),
@@ -2024,6 +2076,17 @@ function open(request, options = {}, boundOperation) {
           .metadataDigest !== protectedSnapshot.metadataDigest
       )
         refuse(new Error('RELEASE_SCOPE_FAILED_OUTPUT_CHANGED'));
+      for (const retained of before.payload.outputs.filter((o) => o.complete)) {
+        const inventory = verifier.scan([
+          { path: retained.path, identity: retained.identity },
+        ]);
+        if (
+          inventory.privateEntries ||
+          inventory.digest !== retained.digest ||
+          inventory.metadataDigest !== retained.metadataDigest
+        )
+          refuse(new Error('RELEASE_SCOPE_RETAINED_FAILURE_CHANGED'));
+      }
       const measured = measureScope(before.payload.outputs);
       if (
         measured.digest !== policy.baseline.digest ||
@@ -2045,7 +2108,7 @@ function open(request, options = {}, boundOperation) {
         prior.configSha !== a.nextPolicy.sha256 ||
         hash(prior.failedBuildRecovery) !== hash(after.failedBuildRecovery) ||
         hash(prior.outputs.find((o) => o.path === a.output.path)) !==
-          hash(after.outputs[0]) ||
+          hash(after.outputs.find((o) => o.path === a.output.path)) ||
         !saved.equals(snapshot)
       )
         refuse();

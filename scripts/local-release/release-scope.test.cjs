@@ -1716,6 +1716,104 @@ test('failed build recovery cannot raise the existing finite profile ceiling', (
     assert(fs.readFileSync(x.ledger).equals(x.original));
   }));
 
+for (const valid of [true, false])
+  test(`failed build recovery requires an observed failed exit for entry-only census: ${valid}`, () =>
+    failedBuildFixture((x) => {
+      x.approval.owner = {
+        ...x.approval.owner,
+        kind: 'complete-census-after-observed-exit',
+        pid: null,
+        startUtc: null,
+        exitCode: valid ? 1 : 0,
+        exitEvidence: x.approval.failureLog,
+      };
+      x.save();
+      if (valid) assert.equal(x.recover().recovered, true);
+      else {
+        assert.throws(() => x.recover(), /RECOVERY/);
+        assert(fs.readFileSync(x.ledger).equals(x.original));
+      }
+    }));
+
+for (const mutation of ['none', 'earlier output', 'earlier snapshot'])
+  test(`failed build recovery preserves earlier retained history on another failure: ${mutation}`, () =>
+    failedBuildFixture((x) => {
+      x.recover();
+      const firstSnapshot =
+        x.ledger + '.failed-build-' + x.pin(x.reviewFile).sha256 + '.json';
+      const firstSnapshotBytes = fs.readFileSync(firstSnapshot);
+      const request = {
+        kind: 'build',
+        root: x.f.build,
+        reserveBytes: 4096,
+        runtimeCopies: 1,
+        buildOnly: true,
+        sourceCommit: x.next.buildOnly.sourceCommit,
+        sourceHash: x.next.buildOnly.sourceHash,
+      };
+      const opts = {
+        ...x.f.options(),
+        configPath: x.nextFile,
+        configSha256: fileHash(x.nextFile),
+      };
+      const lease = scope.open(request, opts);
+      const second = output(x.f, lease, 'second-failed');
+      fs.writeFileSync(path.join(second, 'node.exe'), 'second inert runtime');
+      assert.throws(
+        () => lease.close(new Error('second failure')),
+        /FAILED_OUTPUT/,
+      );
+      const original = fs.readFileSync(x.ledger);
+      const state = JSON.parse(original).payload;
+      const next = structuredClone(x.next);
+      next.buildOnly.sourceCommit = 'e'.repeat(40);
+      next.buildOnly.sourceHash = 'f'.repeat(64);
+      next.maxNewRuntimeCopies++;
+      const nextFile = x.nextFile + '.third';
+      fs.writeFileSync(nextFile, JSON.stringify(next));
+      const approval = {
+        ...x.approval,
+        policySha256: fileHash(x.nextFile),
+        claimId: state.claim.id,
+        ledger: x.pin(x.ledger),
+        nextPolicy: x.pin(nextFile),
+        output: {
+          path: second,
+          identity: state.outputs.find((o) => o.path === second).identity,
+          ...scope.inspect([second], { privateAccounting: 'private-names-v1' })
+            .baseline,
+        },
+      };
+      const review = x.reviewFile + '.second';
+      fs.writeFileSync(review, JSON.stringify(approval));
+      if (mutation === 'earlier output')
+        fs.appendFileSync(path.join(x.at, 'runtime'), 'late');
+      if (mutation === 'earlier snapshot')
+        fs.appendFileSync(firstSnapshot, 'late');
+      const run = () =>
+        scope.recoverFailedBuild({
+          ...opts,
+          failedBuildRecovery: x.pin(review),
+          observeBuildRecovery: () => ({
+            complete: true,
+            ownerAbsent: true,
+            writers: [],
+          }),
+        });
+      if (mutation !== 'none') {
+        assert.throws(run, /RECOVERY/);
+        assert(fs.readFileSync(x.ledger).equals(original));
+      } else {
+        assert.equal(run().recovered, true);
+        assert.equal(run().alreadyRecovered, true);
+        const retained = JSON.parse(fs.readFileSync(x.ledger)).payload;
+        assert.equal(retained.outputs.length, 2);
+        assert(retained.outputs.every((o) => o.complete && o.retainedFailure));
+        assert.equal(retained.claim, null);
+        assert(fs.readFileSync(firstSnapshot).equals(firstSnapshotBytes));
+      }
+    }));
+
 test('preserving split build rejects replaced protected root and overlapping roles', () =>
   fixture((f) => {
     const { request } = splitPreservingBuild(f);
