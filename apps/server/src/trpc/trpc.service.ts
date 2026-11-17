@@ -1,3 +1,7 @@
+import {
+  withChannelExecution,
+  taskDatabaseFor,
+} from '../collection/channel-task-control';
 import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';
 import { recoveryHoldLocalProcedure } from '../recovery-hold-http';
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
@@ -184,8 +188,10 @@ export class TrpcService {
     }
     // Match the HTTP gate without bypassing authentication or the write gate.
     // No source procedure or background recovery is released by local settlement.
-    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1' &&
-      !recoveryHoldLocalProcedure(path, type, ctx))
+    if (
+      process.env.WECHAT2RSS_RECOVERY_HOLD === '1' &&
+      !recoveryHoldLocalProcedure(path, type, ctx)
+    )
       throw new TRPCError({
         code: 'PRECONDITION_FAILED',
         message: '任务恢复检查中，操作暂不可用。',
@@ -1170,6 +1176,16 @@ export class TrpcService {
   }
 
   async refreshMpArticlesAndUpdateFeed(
+    ...input: Parameters<TrpcService['refreshMpArticlesAndUpdateFeedOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.refreshMpArticlesAndUpdateFeedOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prismaService),
+    );
+  }
+  private async refreshMpArticlesAndUpdateFeedOwned(
     mpId: string,
     page = 1,
     trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
@@ -1816,7 +1832,17 @@ export class TrpcService {
     page: 1,
   };
 
-  async getHistoryMpArticles(mpId: string) {
+  async getHistoryMpArticles(
+    ...input: Parameters<TrpcService['getHistoryMpArticlesOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.getHistoryMpArticlesOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prismaService),
+    );
+  }
+  private async getHistoryMpArticlesOwned(mpId: string) {
     return this.recordCollectionResult(
       mpId,
       (feed) => this.collectHistory(feed),
@@ -1963,6 +1989,16 @@ export class TrpcService {
   private readonly activeSubscriptionAdds = new Set<string>();
 
   async repairExistingSubscription(
+    ...input: Parameters<TrpcService['repairExistingSubscriptionOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.repairExistingSubscriptionOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prismaService),
+    );
+  }
+  private async repairExistingSubscriptionOwned(
     feedId: string,
     accountId: string,
     isLocal = false,
@@ -1999,6 +2035,16 @@ export class TrpcService {
   }
 
   async addSubscriptionFromArticle(
+    ...input: Parameters<TrpcService['addSubscriptionFromArticleOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.addSubscriptionFromArticleOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prismaService),
+    );
+  }
+  private async addSubscriptionFromArticleOwned(
     articleUrl: string,
     accountId?: string,
     isLocal = false,

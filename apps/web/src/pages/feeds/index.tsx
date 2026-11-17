@@ -1,3 +1,4 @@
+import { ChannelTaskControls } from './channel-task-controls';
 import { Modal, Tooltip } from '@web/components/AppOverlays';
 import {
   ContentExportScope,
@@ -1441,6 +1442,7 @@ const Feeds = () => {
           ) : null}
         </div>
         <div className="mac-content feed-content !min-w-0 !overflow-y-auto">
+          <ChannelTaskControls channel="wechat" />
           <SubscriptionTasks
             feeds={feedData?.items || []}
             adding={isAddingSubscriptions}

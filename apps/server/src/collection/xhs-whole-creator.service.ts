@@ -1,3 +1,4 @@
+import { visibleHistory, taskDatabaseFor } from './channel-task-control';
 import {
   prepareKnownAuthProfile,
   runKnownAuthProfile,
@@ -273,7 +274,12 @@ export class XhsWholeCreatorService implements OnModuleInit {
       void this.startupRecovery.catch(() => {});
       return;
     }
-    await this.recoverInterrupted();
+    try {
+      await this.recoverInterrupted();
+    } catch (error) {
+      if (!(error instanceof Error && /^CHANNEL_/.test(error.message)))
+        throw error;
+    }
   }
   private async readyForMutation() {
     if (this.destroyed)
@@ -289,11 +295,21 @@ export class XhsWholeCreatorService implements OnModuleInit {
     if (this.startupRecoveryStarted) await this.startupRecovery.catch(() => {});
   }
   private async recoverInterrupted() {
-    await this.write(
-      (tx) => tx.$executeRaw`UPDATE xhs_whole_creator_jobs
-      SET state='paused', document=json_set(document,'$.state','paused','$.code','XHS_TASK_INTERRUPTED')
-      WHERE state IN ('queued','running')`,
+    const rows = await this.db.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM xhs_whole_creator_jobs WHERE state IN ('queued','running')`;
+    const visible = await visibleHistory(
+      'xiaohongshu',
+      'xhs-whole',
+      rows,
+      (r) => r.id,
+      await taskDatabaseFor(this.db),
     );
+    for (const row of visible)
+      await this.write(
+        (tx) =>
+          tx.$executeRaw`UPDATE xhs_whole_creator_jobs SET state='paused', document=json_set(document,'$.state','paused','$.code','XHS_TASK_INTERRUPTED') WHERE id=${row.id} AND state IN ('queued','running')`,
+      );
   }
   private async load(
     id: string,
@@ -4154,6 +4170,13 @@ export class XhsWholeCreatorService implements OnModuleInit {
     const rows = await this.db.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_whole_creator_jobs WHERE creator_id=${creatorId} ORDER BY updated_at DESC LIMIT 20`;
-    return Promise.all(rows.map((row) => this.view(row.id)));
+    const visible = await visibleHistory(
+      'xiaohongshu',
+      'xhs-whole',
+      rows,
+      (r) => r.id,
+      await taskDatabaseFor(this.db),
+    );
+    return Promise.all(visible.map((row) => this.view(row.id)));
   }
 }

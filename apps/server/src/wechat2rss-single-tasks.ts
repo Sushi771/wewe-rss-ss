@@ -1,3 +1,9 @@
+import {
+  assertChannelRunnable,
+  visibleHistory,
+  runChannelWorker,
+  withChannelExecution,
+} from './collection/channel-task-control';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, extname, isAbsolute, join, relative } from 'node:path';
@@ -241,12 +247,25 @@ export class Wechat2RssSingleTasks {
     }
     return tasks;
   }
-  async enqueue(raw: unknown, owner: string, directory: string) {
+  async enqueue(...input: Parameters<Wechat2RssSingleTasks['enqueueOwned']>) {
+    return withChannelExecution(
+      'wechat',
+      () => this.enqueueOwned(...input),
+      undefined,
+      this.database(),
+    );
+  }
+  private async enqueueOwned(raw: unknown, owner: string, directory: string) {
     return this.mutate(async () => {
       const url = downloadArticleUrl(raw);
       if (!/^[a-f0-9]{64}$/.test(owner)) throw unavailable();
       directory = await validateLocalDirectory(directory);
       const taskId = this.id(url, owner, directory);
+      await assertChannelRunnable(
+        'wechat',
+        { kind: 'single-download', id: taskId },
+        this.database(),
+      );
       const old = await this.read(taskId);
       if (old && old.state !== 'cancelled') return view(old);
       const startedAt = this.now();
@@ -271,7 +290,14 @@ export class Wechat2RssSingleTasks {
     });
   }
   async list(owner: string) {
-    const tasks = (await this.records())
+    const visible = await visibleHistory(
+      'wechat',
+      'single-download',
+      await this.records(),
+      (t) => t.taskId,
+      this.database(),
+    );
+    const tasks = visible
       .filter((t) => t.owner === owner)
       .sort((a, b) => b.startedAt - a.startedAt)
       .slice(0, 20);
@@ -354,7 +380,15 @@ export class Wechat2RssSingleTasks {
       })),
     };
   }
-  async select(id: string, owner: string, articleId: unknown) {
+  async select(...input: Parameters<Wechat2RssSingleTasks['selectOwned']>) {
+    return withChannelExecution(
+      'wechat',
+      () => this.selectOwned(...input),
+      { kind: 'single-download', id: input[0] },
+      this.database(),
+    );
+  }
+  private async selectOwned(id: string, owner: string, articleId: unknown) {
     if (
       typeof articleId !== 'string' ||
       !/^WX_\d{5,15}_\d+_[1-9]\d*$/.test(articleId)
@@ -423,7 +457,20 @@ export class Wechat2RssSingleTasks {
       await this.queue.stopSubscriptionBatch(t.batchId);
     return view(t);
   }
-  async resume(id: string, owner: string) {
+  async resume(...input: Parameters<Wechat2RssSingleTasks['resumeOwned']>) {
+    return withChannelExecution(
+      'wechat',
+      () => this.resumeOwned(...input),
+      { kind: 'single-download', id: input[0] },
+      this.database(),
+    );
+  }
+  private async resumeOwned(id: string, owner: string) {
+    await assertChannelRunnable(
+      'wechat',
+      { kind: 'single-download', id },
+      this.database(),
+    );
     const t = await this.read(id);
     if (!t || t.owner !== owner) throw unavailable();
     if (['blocked', 'failed', 'cancelled'].includes(t.state)) {
@@ -458,9 +505,25 @@ export class Wechat2RssSingleTasks {
   }
   async runDue() {
     if (this.busy || this.stopped || !this.canRun()) return;
+    return runChannelWorker(
+      'wechat',
+      () => this.runDueOwned(),
+      this.database(),
+    );
+  }
+  private async runDueOwned() {
+    if (this.busy || this.stopped || !this.canRun()) return;
     this.busy = true;
     try {
-      let t = (await this.records())
+      let t = (
+        await visibleHistory(
+          'wechat',
+          'single-download',
+          await this.records(),
+          (t) => t.taskId,
+          this.database(),
+        )
+      )
         .filter(active)
         .sort((a, b) => a.nextCheckAt - b.nextCheckAt)
         .find((t) => t.nextCheckAt <= this.now());

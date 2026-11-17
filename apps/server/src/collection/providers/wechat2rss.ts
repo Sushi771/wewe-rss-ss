@@ -1,3 +1,4 @@
+import { withConfiguredChannelExecution } from '../channel-task-control';
 import { isIP } from 'node:net';
 import { createHash } from 'node:crypto';
 import type { ValidatedRefreshResponse } from '../refresh-response-receipt';
@@ -133,31 +134,33 @@ export class Wechat2RssProvider implements SubscriptionProvider {
         throw new Wechat2RssSourceStoppedError();
       return operation();
     }
-    return sourceOperations.run(
-      { requestFailed: false, gate: this.sourceGate },
-      async () => {
-        const context = sourceOperations.getStore()!;
-        try {
-          const result = await operation();
-          context.closing = true;
-          await context.pending?.catch(() => undefined);
-          await context.inFlightDone;
-          if (context.requestFailed) {
-            if (context.restriction)
-              throw new Wechat2RssRestrictionError(context.restriction);
-            throw new Wechat2RssSourceStoppedError();
+    return withConfiguredChannelExecution('wechat', () =>
+      sourceOperations.run(
+        { requestFailed: false, gate: this.sourceGate },
+        async () => {
+          const context = sourceOperations.getStore()!;
+          try {
+            const result = await operation();
+            context.closing = true;
+            await context.pending?.catch(() => undefined);
+            await context.inFlightDone;
+            if (context.requestFailed) {
+              if (context.restriction)
+                throw new Wechat2RssRestrictionError(context.restriction);
+              throw new Wechat2RssSourceStoppedError();
+            }
+            if (context.token) await this.sourceGate.finish(context.token, 200);
+            return result;
+          } catch (error) {
+            context.closing = true;
+            await context.pending?.catch(() => undefined);
+            await context.inFlightDone;
+            if (context.token && context.restriction)
+              await this.sourceGate.finish(context.token, context.restriction);
+            throw error;
           }
-          if (context.token) await this.sourceGate.finish(context.token, 200);
-          return result;
-        } catch (error) {
-          context.closing = true;
-          await context.pending?.catch(() => undefined);
-          await context.inFlightDone;
-          if (context.token && context.restriction)
-            await this.sourceGate.finish(context.token, context.restriction);
-          throw error;
-        }
-      },
+        },
+      ),
     );
   }
 

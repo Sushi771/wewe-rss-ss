@@ -1,3 +1,8 @@
+import {
+  historyArchived,
+  withChannelExecution,
+  taskDatabaseFor,
+} from './channel-task-control';
 import { databaseWritesAllowed, waitForStartupAudit } from '../startup-audit';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
@@ -99,6 +104,15 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
         Array<{ id: string }>
       >`SELECT id FROM xhs_subscription_tasks WHERE creator_id='__batch__' AND (state IN ('batch_queued','batch_running') OR (state IN ('batch_paused','batch_cancelled') AND EXISTS(SELECT 1 FROM json_each(document,'$.items') WHERE json_extract(value,'$.state') IN ('queued','resolving'))))`;
       for (const row of pending) {
+        if (
+          await historyArchived(
+            'xiaohongshu',
+            'xhs-task',
+            row.id,
+            await taskDatabaseFor(this.db),
+          )
+        )
+          continue;
         if (!row.id.startsWith(prefix))
           return fail('XHS_TASK_RECEIPT_UNCERTAIN');
         await this.write(async (tx) => {
@@ -126,9 +140,26 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
     }
   }
   async status(input: { batchId: string }) {
+    if (
+      await historyArchived(
+        'xiaohongshu',
+        'xhs-task',
+        prefix + input.batchId,
+        await taskDatabaseFor(this.db),
+      )
+    )
+      throw Error('CHANNEL_TASK_ARCHIVED');
     return this.read(this.db, input.batchId);
   }
-  async start(input: {
+  async start(...input: Parameters<XhsBatchSubscriptionService['startOwned']>) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.startOwned(...input),
+      { kind: 'xhs-task', id: prefix + input[0].clientRequestId },
+      await taskDatabaseFor(this.db),
+    );
+  }
+  private async startOwned(input: {
     clientRequestId: string;
     text: string;
     groupId?: string;
@@ -188,7 +219,17 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
       );
     return result.batch;
   }
-  async resume(input: { batchId: string; text: string }) {
+  async resume(
+    ...input: Parameters<XhsBatchSubscriptionService['resumeOwned']>
+  ) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.resumeOwned(...input),
+      { kind: 'xhs-task', id: prefix + input[0].batchId },
+      await taskDatabaseFor(this.db),
+    );
+  }
+  private async resumeOwned(input: { batchId: string; text: string }) {
     if (this.initializationFailed) return fail('XHS_TASK_RECEIPT_UNCERTAIN');
     const parsed = parseBatchInput(input.text);
     const urls = new Map(
@@ -234,7 +275,14 @@ export class XhsBatchSubscriptionService implements OnModuleInit {
     const active = { cancelled: false, urls, whenSettled, release };
     this.active.set(id, active);
     const work = this.lane
-      .then(() => this.run(id, active))
+      .then(async () =>
+        withChannelExecution(
+          'xiaohongshu',
+          () => this.run(id, active),
+          { kind: 'xhs-task', id: prefix + id },
+          await taskDatabaseFor(this.db),
+        ),
+      )
       .catch(async () => {
         await this.write(async (tx) => {
           const batch = await this.read(tx, id);

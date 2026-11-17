@@ -1,4 +1,11 @@
 import {
+  assertChannelRunnable,
+  historyArchived,
+  visibleHistory,
+  taskDatabaseFor,
+  withChannelExecution,
+} from './channel-task-control';
+import {
   prepareBatchLocalCancellation,
   confirmBatchLocalCancellation,
 } from './xhs-batch-local-cancellation';
@@ -172,7 +179,20 @@ export class XiaohongshuBatches {
     };
   }
 
-  async create(id: string, ids: string[]) {
+  async create(...input: Parameters<XiaohongshuBatches['createOwned']>) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.createOwned(...input),
+      { kind: 'xhs-batch', id: input[0] },
+      await taskDatabaseFor(this.db),
+    );
+  }
+  private async createOwned(id: string, ids: string[]) {
+    await assertChannelRunnable(
+      'xiaohongshu',
+      { kind: 'xhs-batch', id },
+      await taskDatabaseFor(this.db),
+    );
     if (
       !/^[a-f0-9-]{36}$/.test(id) ||
       !ids.length ||
@@ -213,8 +233,15 @@ export class XiaohongshuBatches {
     const rows = await this.db.$queryRaw<
       Array<{ id: string }>
     >`SELECT id FROM xhs_refresh_batches WHERE state IN ('running','paused')`;
-    if (rows.length > 1) throw new Error('XHS_BATCH_CORRUPT');
-    return rows.length ? this.status(rows[0].id) : null;
+    const visible = await visibleHistory(
+      'xiaohongshu',
+      'xhs-batch',
+      rows,
+      (r) => r.id,
+      await taskDatabaseFor(this.db),
+    );
+    if (visible.length > 1) throw new Error('XHS_BATCH_CORRUPT');
+    return visible.length ? this.status(visible[0].id) : null;
   }
 
   async status(id: string) {
@@ -227,6 +254,12 @@ export class XiaohongshuBatches {
     >`SELECT position,creator_id,operation_id,state,outcome FROM xhs_refresh_batch_items WHERE batch_id=${id} ORDER BY position`;
     return {
       id: rows[0].id,
+      archived: await historyArchived(
+        'xiaohongshu',
+        'xhs-batch',
+        id,
+        await taskDatabaseFor(this.db),
+      ),
       state: rows[0].state,
       items: items.map((i) => ({
         position: i.position,
@@ -254,7 +287,9 @@ export class XiaohongshuBatches {
         const item = reserved[0];
         if (!item.operation_id) throw new Error('XHS_BATCH_CORRUPT');
         const op = item.operation_id;
-        const task = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_subscription_tasks WHERE id=${op} AND creator_id=${item.creator_id}`;
+        const task = await tx.$queryRaw<
+          Array<{ id: string }>
+        >`SELECT id FROM xhs_subscription_tasks WHERE id=${op} AND creator_id=${item.creator_id}`;
         // A task reservation is not a legacy source request. Preserve its own
         // checkpoint/fence; never manufacture a stopped legacy job for it.
         if (!task.length) {
@@ -276,13 +311,28 @@ export class XiaohongshuBatches {
       return reserved[0]?.operation_id ?? null;
     });
     if (operation) {
-      const tasks = await this.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_subscription_tasks WHERE id=${operation}`;
+      const tasks = await this.db.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM xhs_subscription_tasks WHERE id=${operation}`;
       if (tasks.length) await this.xhs.cancelTask({ taskId: operation });
     }
     return this.status(id);
   }
 
-  async advance(id: string) {
+  async advance(...input: Parameters<XiaohongshuBatches['advanceOwned']>) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.advanceOwned(...input),
+      { kind: 'xhs-batch', id: input[0] },
+      await taskDatabaseFor(this.db),
+    );
+  }
+  private async advanceOwned(id: string) {
+    await assertChannelRunnable(
+      'xiaohongshu',
+      { kind: 'xhs-batch', id },
+      await taskDatabaseFor(this.db),
+    );
     const reservation = await this.db.$transaction(async (tx) => {
       const rows = await tx.$queryRaw<
         Batch[]
@@ -339,11 +389,16 @@ export class XiaohongshuBatches {
       failedCount?: number;
     } | null = null;
     let legacyReceipt: string | undefined;
-    const storedTask = await this.db.$queryRaw<Array<{ id: string }>>`SELECT id FROM xhs_subscription_tasks WHERE id=${item.operation_id} AND creator_id=${item.creator_id}`;
+    const storedTask = await this.db.$queryRaw<
+      Array<{ id: string }>
+    >`SELECT id FROM xhs_subscription_tasks WHERE id=${item.operation_id} AND creator_id=${item.creator_id}`;
     if (storedTask.length === 1) {
       try {
         const task = await this.xhs.task({ taskId: item.operation_id });
-        if (task.creatorId !== item.creator_id || task.taskId !== item.operation_id)
+        if (
+          task.creatorId !== item.creator_id ||
+          task.taskId !== item.operation_id
+        )
           throw new Error('XHS_BATCH_CORRUPT');
         if (task.state === 'queued' || task.state === 'running')
           return this.status(id);
@@ -359,15 +414,28 @@ export class XiaohongshuBatches {
     } else {
       // Older reservations are never replayed. Only their exact durable receipt
       // may settle the item; absence or an incomplete receipt pauses the batch.
-      const jobs = await this.db.$queryRaw<Array<{state:string; outcome:string | null}>>`SELECT state,outcome FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id} AND owner=${item.operation_id}`;
-      if (jobs.length === 1 && jobs[0].state === 'complete' && jobs[0].outcome) {
+      const jobs = await this.db.$queryRaw<
+        Array<{ state: string; outcome: string | null }>
+      >`SELECT state,outcome FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id} AND owner=${item.operation_id}`;
+      if (
+        jobs.length === 1 &&
+        jobs[0].state === 'complete' &&
+        jobs[0].outcome
+      ) {
         try {
           const value = JSON.parse(jobs[0].outcome);
-          if ((value.status === 'complete' || value.status === 'partial') && Number.isSafeInteger(value.added) && value.added >= 0 && typeof value.message === 'string') {
+          if (
+            (value.status === 'complete' || value.status === 'partial') &&
+            Number.isSafeInteger(value.added) &&
+            value.added >= 0 &&
+            typeof value.message === 'string'
+          ) {
             receipt = value;
             legacyReceipt = jobs[0].outcome;
           }
-        } catch { /* malformed legacy receipt remains paused */ }
+        } catch {
+          /* malformed legacy receipt remains paused */
+        }
       }
     }
     await this.db.$transaction(async (tx) => {
@@ -389,14 +457,20 @@ export class XiaohongshuBatches {
         return;
       }
       const outcome = receipt;
-      const accepted = outcome.status === 'complete' || (outcome.status === 'partial' && outcome.failureScope === 'article' && Number.isSafeInteger(outcome.failedCount) && outcome.failedCount! > 0);
+      const accepted =
+        outcome.status === 'complete' ||
+        (outcome.status === 'partial' &&
+          outcome.failureScope === 'article' &&
+          Number.isSafeInteger(outcome.failedCount) &&
+          outcome.failedCount! > 0);
       if (!accepted) {
         await tx.$executeRaw`UPDATE xhs_refresh_batches SET state='paused' WHERE id=${id} AND state IN ('running','paused')`;
         return;
       }
       const serialized = legacyReceipt ?? JSON.stringify(outcome);
       const state = outcome.status;
-      if (!legacyReceipt) await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) SELECT ${item.creator_id},COALESCE(MAX(generation),0)+1,${item.operation_id},${Date.now()},'complete',${serialized} FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id}`;
+      if (!legacyReceipt)
+        await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) SELECT ${item.creator_id},COALESCE(MAX(generation),0)+1,${item.operation_id},${Date.now()},'complete',${serialized} FROM xhs_refresh_jobs WHERE creator_id=${item.creator_id}`;
       await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state=${state},outcome=${serialized} WHERE batch_id=${id} AND position=${item.position} AND state='reserved'`;
       const remaining = await tx.$queryRaw<
         Array<{ n: bigint }>

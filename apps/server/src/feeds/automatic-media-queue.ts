@@ -1,3 +1,7 @@
+import {
+  readChannelState,
+  runChannelWorker,
+} from '../collection/channel-task-control';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -211,6 +215,7 @@ export class AutomaticMediaQueue {
   private initialized = false;
   private database = '';
   private directory = '';
+  private archivedArticles = new Set<string>();
   constructor(
     private readonly databaseFile: string,
     private readonly deps: AutomaticMediaDependencies,
@@ -299,6 +304,7 @@ export class AutomaticMediaQueue {
   private publish(state: State, code?: string) {
     const summaries = new Map<string, AutomaticMediaSummary>();
     for (const article of state.articles) {
+      if (this.archivedArticles.has(article.id)) continue;
       const summary = summaries.get(article.feedId) || {
         feedId: article.feedId,
         pending: 0,
@@ -424,11 +430,24 @@ export class AutomaticMediaQueue {
   /** At most one bounded scan page and one resource request per tick. */
   async tick() {
     if (this.busy || this.closed) return;
+    return runChannelWorker(
+      'wechat',
+      () => this.tickOwned(),
+      this.databaseFile,
+    );
+  }
+  private async tickOwned() {
+    if (this.busy || this.closed) return;
     this.busy = true;
     let release: (() => Promise<void>) | undefined;
     let state: State | undefined;
     try {
       await this.initialize();
+      this.archivedArticles = new Set(
+        (await readChannelState('wechat', this.databaseFile)).archived
+          .filter((r) => r.kind === 'automatic-media')
+          .map((r) => r.id),
+      );
       release = await batchStorageLock(this.directory);
       if (!release || this.closed) return;
       state = await this.readState();
@@ -478,6 +497,7 @@ export class AutomaticMediaQueue {
   private async work(state: State) {
     let inspected = 0;
     for (const entry of [...state.articles]) {
+      if (this.archivedArticles.has(entry.id)) continue;
       // A body projection limit stops SQL embedding, not already queued cache
       // work. Other exhausted/identity failures retain their original stop.
       let cacheOnly = entry.code === 'MEDIA_BODY_LIMIT';

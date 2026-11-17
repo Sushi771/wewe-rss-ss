@@ -1,3 +1,8 @@
+import {
+  assertChannelRunnable,
+  taskDatabaseFor,
+  withChannelExecution,
+} from './channel-task-control';
 import { ArticlePreparation } from '../article-local-save';
 import { xhsOriginalLink } from './xhs-original-link';
 import { Inject, Injectable, Optional } from '@nestjs/common';
@@ -782,7 +787,22 @@ export class XiaohongshuService {
     return this.legacyRefresh(...args);
   }
 
-  async legacyRefresh(id: string, operationId?: string) {
+  async legacyRefresh(
+    ...input: Parameters<XiaohongshuService['legacyRefreshOwned']>
+  ) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.legacyRefreshOwned(...input),
+      input[1] ? { kind: 'xhs-job', id: input[1] } : undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async legacyRefreshOwned(id: string, operationId?: string) {
+    await assertChannelRunnable(
+      'xiaohongshu',
+      operationId ? { kind: 'xhs-job', id: operationId } : undefined,
+      await taskDatabaseFor(this.prisma),
+    );
     if (this.active.has(id))
       return fail('该博主正在处理，不会重复发送请求。', 'CONFLICT');
     this.active.add(id);

@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 
 const localProcedures = new Map([
+  ['channelTasks.status', 'query'],
+  ['channelTasks.preview', 'query'],
+  ['channelTasks.confirm', 'mutation'],
   ['xiaohongshu.prepareRefreshBatchLocalCancellation', 'query'],
   ['xiaohongshu.confirmRefreshBatchLocalCancellation', 'mutation'],
   ['xiaohongshu.refreshBatchStatus', 'query'],
@@ -16,7 +19,8 @@ export function recoveryHoldLocalProcedure(
 ) {
   const local = ctx as { isLocalSave?: boolean; isLocalXhsRead?: boolean };
   return (
-    localProcedures.has(path) && localProcedures.get(path) === type &&
+    localProcedures.has(path) &&
+    localProcedures.get(path) === type &&
     (local?.isLocalSave === true ||
       (type === 'query' && local?.isLocalXhsRead === true))
   );
@@ -34,19 +38,22 @@ export function recoveryHoldHttp(
     const local =
       ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(
         req.socket?.remoteAddress || '',
-      ) && /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin);
+      ) &&
+      /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/.test(origin);
     const sameOrigin = local && req.headers?.origin === origin;
     const localRead =
-      local && req.method === 'GET' &&
+      local &&
+      req.method === 'GET' &&
       (req.headers?.origin === undefined || sameOrigin);
-    const type = req.method === 'GET' ? 'query' :
-      req.method === 'POST' ? 'mutation' : '';
+    const type =
+      req.method === 'GET' ? 'query' : req.method === 'POST' ? 'mutation' : '';
     if (
       (localRead && req.path === '/startup-status') ||
-      (req.path?.startsWith('/trpc/') && recoveryHoldLocalProcedure(
-        req.path.slice('/trpc/'.length), type,
-        { isLocalSave: sameOrigin, isLocalXhsRead: localRead },
-      ))
+      (req.path?.startsWith('/trpc/') &&
+        recoveryHoldLocalProcedure(req.path.slice('/trpc/'.length), type, {
+          isLocalSave: sameOrigin,
+          isLocalXhsRead: localRead,
+        }))
     ) {
       res.setHeader('Cache-Control', 'no-store');
       return next();

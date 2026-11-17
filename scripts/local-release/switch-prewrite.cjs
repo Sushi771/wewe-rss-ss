@@ -392,6 +392,10 @@ function bindRoles(roles, contract) {
   }
   if (
     !(
+      (require(path.join(__dirname, ...(__dirname.endsWith(path.sep + 'role-aware') ? ['..', '..'] : ['updater']), 'fixed-driver-profile.cjs')).fixedRoleBinding(roles) &&
+        bound.current.profile === 'canonical35' &&
+        bound.candidate.profile === 'canonical35' &&
+        bound.rollback.profile === 'canonical35') ||
       (bound.candidate.profile === 'canonical35' &&
         bound.current.profile === 'canonical34' &&
         bound.rollback.profile === 'canonical34' &&

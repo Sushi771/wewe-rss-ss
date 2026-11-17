@@ -1,3 +1,10 @@
+import {
+  assertChannelRunnable,
+  visibleHistory,
+  readChannelState,
+  withChannelExecution,
+  runChannelWorker,
+} from './channel-task-control';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   UnknownOccupancyRelease,
@@ -103,6 +110,8 @@ type Item = Omit<BatchOutcome, 'state'> & {
   };
 };
 type Batch = {
+  /** In-memory execution projection only; original history bytes remain retained. */
+  historyArchived?: true;
   version: 1;
   batchId: string;
   instance: string;
@@ -128,7 +137,8 @@ const hash = (value: string) =>
   createHash('sha256').update(value).digest('hex');
 const isRefresh = (b: Batch) =>
   ['manual-refresh', 'scheduled-refresh'].includes(b.purpose || '');
-const live = (b: Batch) => ['queued', 'running', 'paused'].includes(b.state);
+const live = (b: Batch) =>
+  !b.historyArchived && ['queued', 'running', 'paused'].includes(b.state);
 const AUTOMATIC_PREPARATION_LIMIT = 8;
 const AUTOMATIC_RETRY_WINDOW = 24 * 3600000;
 const CURRENT_REFRESH_SCOPE = 'wechat2rss-subscription-current-v1';
@@ -556,6 +566,9 @@ export class Wechat2RssSubscriptionBatches {
   private stopped = false;
   private busy = false;
   private accepting = false;
+  private channelRefreshAcceptance?: Promise<
+    ReturnType<typeof view> & { reused: boolean }
+  >;
   private refreshAcceptance?: Promise<
     ReturnType<typeof view> & { reused: boolean }
   >;
@@ -1148,11 +1161,17 @@ export class Wechat2RssSubscriptionBatches {
     );
     if (names.length > 1000) throw new Error('BATCH_LIMIT');
     const result: Batch[] = [];
+    const archived = new Set(
+      (await readChannelState('wechat', this.database())).archived
+        .filter((r) => r.kind === 'wechat-batch')
+        .map((r) => r.id),
+    );
     let unproved = false;
     for (const n of names) {
       try {
         const b = await this.read(n.slice(0, -5));
         if (!b) throw new Error('BATCH_HISTORY_UNPROVED');
+        if (archived.has(b.batchId)) b.historyArchived = true;
         result.push(b);
         this.warnedInvalidHistory.delete(n);
       } catch {
@@ -1168,7 +1187,14 @@ export class Wechat2RssSubscriptionBatches {
   }
   async list() {
     const records = await this.records();
-    const batches = records
+    const visible = await visibleHistory(
+      'wechat',
+      'wechat-batch',
+      records,
+      (b) => b.batchId,
+      this.database(),
+    );
+    const batches = visible
       .sort(
         (a, b) =>
           Number(live(b)) - Number(live(a)) || b.createdAt - a.createdAt,
@@ -1223,6 +1249,17 @@ export class Wechat2RssSubscriptionBatches {
     return batches;
   }
   async enqueue(
+    urls: string[],
+    purpose: 'subscription' | 'single-download' = 'subscription',
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.enqueueOwned(urls, purpose),
+      undefined,
+      this.database(),
+    );
+  }
+  private async enqueueOwned(
     urls: string[],
     purpose: 'subscription' | 'single-download' = 'subscription',
   ) {
@@ -1295,6 +1332,28 @@ export class Wechat2RssSubscriptionBatches {
     intentKey?: string,
     purpose: 'manual-refresh' | 'scheduled-refresh' = 'manual-refresh',
   ) {
+    if (this.channelRefreshAcceptance && purpose === 'manual-refresh')
+      return { ...(await this.channelRefreshAcceptance), reused: true };
+    if (this.channelRefreshAcceptance) await this.channelRefreshAcceptance;
+    const accepted = withChannelExecution(
+      'wechat',
+      () => this.enqueueRefreshOwned(feedIds, intentKey, purpose),
+      undefined,
+      this.database(),
+    );
+    this.channelRefreshAcceptance = accepted;
+    try {
+      return await accepted;
+    } finally {
+      if (this.channelRefreshAcceptance === accepted)
+        this.channelRefreshAcceptance = undefined;
+    }
+  }
+  private async enqueueRefreshOwned(
+    feedIds: string[],
+    intentKey?: string,
+    purpose: 'manual-refresh' | 'scheduled-refresh' = 'manual-refresh',
+  ) {
     this.assertNotHeld();
     if (this.refreshAcceptance && purpose === 'manual-refresh')
       return { ...(await this.refreshAcceptance), reused: true };
@@ -1335,10 +1394,11 @@ export class Wechat2RssSubscriptionBatches {
         return { ...view(original, records, this.now()), reused: true };
       // Restore legacy terminal preparation failures before cross-slot deduplication.
       // The original intent and retry budget remain authoritative.
-      await this.normalizeRefreshLifecycle(records);
-      await this.coverPreparation(records);
-      for (const record of records) await this.recoverPreparation(record);
-      for (const record of records) await this.recoverAcceptedCache(record);
+      const runnable = records.filter((record) => !record.historyArchived);
+      await this.normalizeRefreshLifecycle(runnable);
+      await this.coverPreparation(runnable);
+      for (const record of runnable) await this.recoverPreparation(record);
+      for (const record of runnable) await this.recoverAcceptedCache(record);
       const future: FutureAdmission = {
         instance: hash(this.instance()),
         intentKey,
@@ -1544,6 +1604,20 @@ export class Wechat2RssSubscriptionBatches {
   }
   async resume(id: string) {
     this.assertNotHeld();
+    return withChannelExecution(
+      'wechat',
+      () => this.resumeOwned(id),
+      { kind: 'wechat-batch', id },
+      this.database(),
+    );
+  }
+  private async resumeOwned(id: string) {
+    await assertChannelRunnable(
+      'wechat',
+      { kind: 'wechat-batch', id },
+      this.database(),
+    );
+    this.assertNotHeld();
     const b = await this.read(id);
     if (b?.cacheOnly) throw new Error('BATCH_CACHE_ONLY');
     if (!b || b.state !== 'paused') return b ? view(b) : null;
@@ -1602,6 +1676,26 @@ export class Wechat2RssSubscriptionBatches {
    * The storage mutex prevents converting a batch while a worker is in flight.
    * Repeated delivery and restart retain this mode and cannot emit /add. */
   async resumeCacheOnly(id: string) {
+    this.assertNotHeld();
+    try {
+      return await withChannelExecution(
+        'wechat',
+        () => this.resumeCacheOnlyOwned(id),
+        { kind: 'wechat-batch', id },
+        this.database(),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === 'CHANNEL_BUSY')
+        throw Error('BATCH_BUSY');
+      throw error;
+    }
+  }
+  private async resumeCacheOnlyOwned(id: string) {
+    await assertChannelRunnable(
+      'wechat',
+      { kind: 'wechat-batch', id },
+      this.database(),
+    );
     this.assertNotHeld();
     const release = await batchStorageLock(await this.storage());
     if (!release) throw new Error('BATCH_BUSY');
@@ -1708,6 +1802,7 @@ export class Wechat2RssSubscriptionBatches {
   }
   /** Recover only proven accepted cache work. Never reset attempts on restart. */
   private async recoverAcceptedCache(b: Batch) {
+    if (b.historyArchived) return;
     if (!recoverableCache(b) || b.instance !== hash(this.instance())) return;
     let changed = false;
     for (const item of b.items) {
@@ -1878,6 +1973,7 @@ export class Wechat2RssSubscriptionBatches {
   /** Upgrade only explicit unsent failures. Never infer safety from an error
    * message, a missing accepted flag, or a terminal batch state. */
   private async recoverPreparation(b: Batch) {
+    if (b.historyArchived) return;
     if (!automaticRecovery(b) || b.instance !== hash(this.instance())) return;
     let changed =
       ['completed', 'deferred'].includes(b.state) &&
@@ -1977,6 +2073,7 @@ export class Wechat2RssSubscriptionBatches {
     }
     for (const b of records) {
       if (
+        b.historyArchived ||
         !isRefresh(b) ||
         b.instance !== instance ||
         b.cacheOnly ||
@@ -2065,6 +2162,23 @@ export class Wechat2RssSubscriptionBatches {
   }
   async runDue() {
     if (this.recoveryHold || this.busy || this.stopped) return;
+    return runChannelWorker(
+      'wechat',
+      () => this.runDueOwned(),
+      this.database(),
+    );
+  }
+  private async runnableRecords() {
+    return visibleHistory(
+      'wechat',
+      'wechat-batch',
+      await this.records(),
+      (b) => b.batchId,
+      this.database(),
+    );
+  }
+  private async runDueOwned() {
+    if (this.recoveryHold || this.busy || this.stopped) return;
     this.busy = true;
     let release: (() => Promise<void>) | undefined;
     let cacheOnlyRun = false;
@@ -2072,14 +2186,14 @@ export class Wechat2RssSubscriptionBatches {
       release = await batchStorageLock(await this.storage());
       if (!release) return;
       // A cache-only recovery must not wake the shared download consumer.
-      cacheOnlyRun = (await this.records()).some(
+      cacheOnlyRun = (await this.runnableRecords()).some(
         (record) => record.cacheOnly && live(record),
       );
       if (!cacheOnlyRun) await this.runConsumer();
       if (this.stopped) return;
-      const pending = await this.records();
+      const pending = await this.runnableRecords();
       for (const record of pending) await this.releaseSharedRestriction(record);
-      const latestRecords = await this.records();
+      const latestRecords = await this.runnableRecords();
       await this.normalizeRefreshLifecycle(latestRecords);
       await this.coverPreparation(latestRecords);
       for (const record of latestRecords) await this.recoverPreparation(record);
@@ -2088,7 +2202,7 @@ export class Wechat2RssSubscriptionBatches {
       // Read-only reconciliation can prove preparation failed before the one-shot
       // reservation. An unknown receipt alone never authorizes another /add.
       if (this.reconcile)
-        for (const record of await this.records()) {
+        for (const record of await this.runnableRecords()) {
           if (!isRefresh(record) || record.instance !== hash(this.instance()))
             continue;
           for (const item of record.items) {
@@ -2178,10 +2292,10 @@ export class Wechat2RssSubscriptionBatches {
           }
         }
       // Newly proven unsent work must also respect later equivalent successes.
-      await this.coverPreparation(await this.records());
+      await this.coverPreparation(await this.runnableRecords());
       // Older versions paused the whole refresh after one uncertain receipt.
       // Keep that item blocked forever, but automatically release independent work.
-      for (const record of await this.records()) {
+      for (const record of await this.runnableRecords()) {
         if (record.state !== 'paused' || !isolatedRefresh(record)) continue;
         if (record.instance !== hash(this.instance())) continue;
         record.state = record.items.some((item) =>
@@ -2191,7 +2305,7 @@ export class Wechat2RssSubscriptionBatches {
           : 'completed';
         await this.write(record);
       }
-      const candidates = (await this.records()).filter(
+      const candidates = (await this.runnableRecords()).filter(
         (b) =>
           ['queued', 'running'].includes(b.state) ||
           pausedCacheWork(b) ||
@@ -2297,7 +2411,7 @@ export class Wechat2RssSubscriptionBatches {
       this.busy = false;
       if (
         !this.stopped &&
-        ((await this.records()).some(
+        ((await this.runnableRecords()).some(
           (b) =>
             ['queued', 'running'].includes(b.state) ||
             (b.instance === hash(this.instance()) &&

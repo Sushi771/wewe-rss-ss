@@ -1,3 +1,4 @@
+import { withChannelExecution } from './channel-task-control';
 import { knownAuthProfileRecoveryPermit } from './xhs-known-auth-profile-probe';
 import {
   fullHistoryContext,
@@ -192,8 +193,10 @@ export class XhsSubscriptionRuntime
     scope: { taskId: string; creatorId: string },
     work: () => Promise<T>,
   ): Promise<T> {
-    const batchHistoryVerified = this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' &&
-      !!this.riskStore && !(await this.riskStore.read(scope));
+    const batchHistoryVerified =
+      this.stopCode === 'XHS_SOURCE_HISTORY_REVIEW_REQUIRED' &&
+      !!this.riskStore &&
+      !(await this.riskStore.read(scope));
     return this.taskSourceContext.run({ ...scope, batchHistoryVerified }, work);
   }
   resetTaskDiagnostic() {
@@ -1042,6 +1045,10 @@ export class XhsSubscriptionRuntime
     )
       this.stopCode = undefined;
   }
+  private channelDatabase?: () => string;
+  bindChannelDatabase(database: () => string) {
+    this.channelDatabase ??= database;
+  }
   private readonly adapter: RedbookSubscriptionAdapter;
   private readonly mediaTransport: RedbookMediaTransport;
   private readonly requestAttempts = {
@@ -1408,6 +1415,33 @@ export class XhsSubscriptionRuntime
     );
   }
   private async guardTransport<T>(
+    operation: () => Promise<T>,
+    charge?: Charge,
+    scoped?: TaskSourceScope,
+    physical?: { phase: RoundPhase; target: string; authorId?: string },
+  ) {
+    const taskId = scoped?.taskId ?? this.taskSourceContext.getStore()?.taskId;
+    try {
+      const execute = () =>
+        this.guardTransportOwned(operation, charge, scoped, physical);
+      if (!this.channelDatabase) return execute();
+      return await withChannelExecution(
+        'xiaohongshu',
+        execute,
+        fullHistoryContext.getStore()
+          ? { kind: 'xhs-whole', id: fullHistoryContext.getStore()!.jobId }
+          : taskId
+            ? { kind: 'xhs-task', id: taskId }
+            : undefined,
+        this.channelDatabase(),
+      );
+    } catch (error) {
+      if (error instanceof Error && /^CHANNEL_/.test(error.message))
+        throw new XhsPreDispatchError('XHS_LIVE_ACCESS_DISABLED');
+      throw error;
+    }
+  }
+  private async guardTransportOwned<T>(
     operation: () => Promise<T>,
     charge?: Charge,
     scoped?: TaskSourceScope,
@@ -1995,6 +2029,31 @@ export class XhsSubscriptionRuntime
     });
   }
   private async withSession<T>(operation: () => Promise<T>): Promise<T> {
+    // This gate precedes risk.begin(), budget reservation and the adapter's
+    // transport envelope. A local pause must never fabricate an unknown request.
+    if (!this.channelDatabase) return this.withSessionInChannel(operation);
+    const full = fullHistoryContext.getStore();
+    const taskId = this.taskSourceContext.getStore()?.taskId;
+    try {
+      return await withChannelExecution(
+        'xiaohongshu',
+        () => this.withSessionInChannel(operation),
+        full
+          ? { kind: 'xhs-whole', id: full.jobId }
+          : taskId
+            ? { kind: 'xhs-task', id: taskId }
+            : undefined,
+        this.channelDatabase(),
+      );
+    } catch (error) {
+      if (error instanceof Error && /^CHANNEL_/.test(error.message))
+        throw new XhsPreDispatchError('XHS_LIVE_ACCESS_DISABLED');
+      throw error;
+    }
+  }
+  private async withSessionInChannel<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
     await this.startupSessionRestore;
     if (!this.budgetScope.getStore())
       return this.budgetScope.run({ id: '' }, () =>
@@ -2915,7 +2974,7 @@ export function createLocalXhsSubscriptionRuntime() {
     : '';
   if (process.platform === 'win32' && path.isAbsolute(database))
     vault = new XhsDpapiSessionVault(path.dirname(database));
-  return new XhsSubscriptionRuntime({
+  const runtime = new XhsSubscriptionRuntime({
     commentsEnabled: () => process.env.XHS_COMMENT_COLLECTION_ENABLED !== '0',
     enabled: () => {
       writerLease?.check();
@@ -2929,4 +2988,11 @@ export function createLocalXhsSubscriptionRuntime() {
     profileParser: parseXhsProfile,
     requirePersistentRisk: true,
   });
+  if (database)
+    runtime.bindChannelDatabase(() =>
+      path.isAbsolute(database)
+        ? database
+        : path.resolve(process.cwd(), 'prisma', database),
+    );
+  return runtime;
 }

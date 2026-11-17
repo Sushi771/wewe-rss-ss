@@ -1,3 +1,4 @@
+import { assertChannelRunnable } from '../collection/channel-task-control';
 import {
   HttpException,
   HttpStatus,
@@ -138,6 +139,11 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       !activeRefreshScheduleEnabled(process.env)
     )
       return;
+    try {
+      await assertChannelRunnable('wechat');
+    } catch {
+      return;
+    }
     this.activeRefreshScheduler ??= new ActiveRefreshScheduler(
       () => {
         const raw = process.env.DATABASE_URL || '';

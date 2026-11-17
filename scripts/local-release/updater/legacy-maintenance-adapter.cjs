@@ -42,6 +42,7 @@ function createLegacyMaintenance({
   writerGate,
   checkpoint,
   observe,
+  reuseBinding,
 }) {
   for (const method of ['check', 'assertWritable', 'legacyMaintenanceBoundary'])
     if (typeof scopeLease?.[method] !== 'function')
@@ -60,6 +61,7 @@ function createLegacyMaintenance({
   validateRoles(roles);
   database = fs.realpathSync.native(database);
   dataRoot = fs.realpathSync.native(dataRoot);
+  const reuse = reuseBinding ? require('./fixed-reuse-owner.cjs').reuseBinding(reuseBinding, { database, dataRoot, roles, scopeLease }) : undefined;
   if (checkpoint?.scopeLease !== scopeLease)
     fail('SAME_SCOPE_CHECKPOINT_REQUIRED');
   const originalIdentity = identity(database),
@@ -121,7 +123,7 @@ function createLegacyMaintenance({
   function backup(ctx) {
     context(ctx);
     if (!ctx.backup) return; // Initial authorization precedes snapshot creation.
-    const expected = path.join(
+    const expected = reuse ? reuse.check(ctx) : path.join(
       dataRoot,
       'update-backups',
       ctx.transactionId,
@@ -209,11 +211,15 @@ function createLegacyMaintenance({
       if (lease) fail('MAINTENANCE_ALREADY_ACQUIRED');
       scopeLease.assertWritable(['restart', 'switch']);
       scopeLease.check(true);
-      boundary = scopeLease.legacyMaintenanceBoundary(
-        checkpoint.identity,
-        observe,
-      );
-      lease = writerGate.acquireMaintenance(database, checkpoint);
+      if (checkpoint.coldProof) {
+        if (!reuse || typeof scopeLease.coldMaintenanceBoundary !== 'function' || typeof writerGate.acquireColdMaintenance !== 'function')
+          fail('OPAQUE_COLD_MAINTENANCE_REQUIRED');
+        boundary = scopeLease.coldMaintenanceBoundary(checkpoint.coldProof);
+        lease = writerGate.acquireColdMaintenance(database, checkpoint);
+      } else {
+        boundary = scopeLease.legacyMaintenanceBoundary(checkpoint.identity, observe);
+        lease = writerGate.acquireMaintenance(database, checkpoint);
+      }
       check();
       return true;
     },

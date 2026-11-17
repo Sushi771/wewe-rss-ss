@@ -219,6 +219,18 @@ function validateRoles(roles) {
       current.schemaSha256,
       'RELEASE_SCHEMA_CHANGE_WITHOUT_MIGRATION',
     );
+  // Only physically verified roles from an independently pinned new build
+  // profile enter here. A JSON role/hash flag cannot create this capability.
+  const fixed = require(require('node:path').join(__dirname,
+    ...(__dirname.endsWith(require('node:path').sep + 'role-aware') ? ['..', '..'] : ['updater']),
+    'fixed-driver-profile.cjs')).fixedRoleBinding(roles);
+  if (fixed) {
+    assert.equal(Object.keys(current.migrations).length, 35, 'FIXED_EXACT_35_REQUIRED');
+    assert.deepEqual({ schemaSha256: candidate.schemaSha256, migrations: candidate.migrations },
+      { schemaSha256: current.schemaSha256, migrations: current.migrations }, 'FIXED_EXACT_35_SCHEMA_REQUIRED');
+    assert.equal(roles.candidate.manifest.prisma.engineCommit, roles.current.manifest.prisma.engineCommit, 'FIXED_EXACT_35_ENGINE_REQUIRED');
+    return roles;
+  }
   // Exact deployed baseline; diagnostic table is the sole additive migration.
   if (
     roles.current.manifestSha256 ===

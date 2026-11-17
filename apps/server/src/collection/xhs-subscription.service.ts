@@ -1,4 +1,14 @@
-import { assertBatchOperationNotCancelled, XhsBatchOperationCancelledError } from './xhs-batch-local-cancellation';
+import {
+  assertChannelRunnable,
+  historyArchived,
+  visibleHistory,
+  withChannelExecution,
+  taskDatabaseFor,
+} from './channel-task-control';
+import {
+  assertBatchOperationNotCancelled,
+  XhsBatchOperationCancelledError,
+} from './xhs-batch-local-cancellation';
 import { historyReviewMessage } from './xhs-task-message';
 import {
   fullHistoryContext,
@@ -514,7 +524,14 @@ export class XhsSubscriptionService implements OnModuleInit {
       void this.startupRecovery.catch(() => {});
       return;
     }
-    await this.recoverInterrupted();
+    try {
+      await this.recoverInterrupted();
+    } catch (error) {
+      // A damaged channel control closes XHS admission, without taking the
+      // independent WeChat host down. Shared database failures still propagate.
+      if (!(error instanceof Error && /^CHANNEL_/.test(error.message)))
+        throw error;
+    }
   }
   private async readyForMutation() {
     if (this.destroyed)
@@ -537,6 +554,15 @@ export class XhsSubscriptionService implements OnModuleInit {
     let recoveryFailed = false;
     for (const row of rows) {
       const task = JSON.parse(row.document) as Task;
+      if (
+        await historyArchived(
+          'xiaohongshu',
+          'xhs-task',
+          task.taskId,
+          await taskDatabaseFor(this.db),
+        )
+      )
+        continue;
       task.state = 'blocked';
       task.code = 'XHS_TASK_INTERRUPTED';
       task.message = '任务被中断，请重新选择剩余项目。';
@@ -825,6 +851,11 @@ export class XhsSubscriptionService implements OnModuleInit {
     startAfter?: Promise<boolean>,
   ) {
     await this.readyForMutation();
+    await assertChannelRunnable(
+      'xiaohongshu',
+      undefined,
+      await taskDatabaseFor(this.db),
+    );
     const resolution = this.resolutions.get(input.resolutionId);
     if (!resolution || resolution.expiresAt <= Date.now())
       return reject('XHS_RESOLUTION_EXPIRED');
@@ -1450,6 +1481,16 @@ export class XhsSubscriptionService implements OnModuleInit {
     return tx.$executeRaw`INSERT INTO xhs_subscription_tasks (id, creator_id, state, document, updated_at) VALUES (${t.taskId}, ${t.creatorId}, ${t.state}, ${json}, ${BigInt(Date.now())}) ON CONFLICT(id) DO UPDATE SET state=excluded.state, document=excluded.document, updated_at=excluded.updated_at`;
   }
   private async enqueue(
+    ...input: Parameters<XhsSubscriptionService['enqueueOwned']>
+  ) {
+    return withChannelExecution(
+      'xiaohongshu',
+      () => this.enqueueOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.db),
+    );
+  }
+  private async enqueueOwned(
     kind: Task['kind'],
     creatorId: string,
     noteIds: string[],
@@ -1474,6 +1515,11 @@ export class XhsSubscriptionService implements OnModuleInit {
     batchItem?: { batchId: string; position: number; creatorId: string },
   ) {
     await this.readyForMutation();
+    await assertChannelRunnable(
+      'xiaohongshu',
+      undefined,
+      await taskDatabaseFor(this.db),
+    );
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if (checkpoint?.knownResponseAuthReviews)
       return reject('XHS_TASK_NOT_RESUMABLE');
@@ -1641,6 +1687,18 @@ export class XhsSubscriptionService implements OnModuleInit {
     return { taskId: t.taskId, creatorId };
   }
   private async loadTask(taskId: string): Promise<Task> {
+    if (
+      await historyArchived(
+        'xiaohongshu',
+        'xhs-task',
+        taskId,
+        await taskDatabaseFor(this.db),
+      )
+    )
+      throw new TRPCError({
+        code: 'PRECONDITION_FAILED',
+        message: 'XHS_TASK_ARCHIVED',
+      });
     const rows = await this.db.$queryRaw<
       Array<{ document: string }>
     >`SELECT document FROM xhs_subscription_tasks WHERE id=${taskId}`;
@@ -1648,6 +1706,15 @@ export class XhsSubscriptionService implements OnModuleInit {
     return JSON.parse(rows[0].document) as Task;
   }
   async task(input: { taskId: string }): Promise<XhsSubscriptionTask> {
+    if (
+      await historyArchived(
+        'xiaohongshu',
+        'xhs-task',
+        input.taskId,
+        await taskDatabaseFor(this.db),
+      )
+    )
+      throw new TRPCError({ code: 'NOT_FOUND', message: 'XHS_TASK_ARCHIVED' });
     // Do not expose the damaged document or invent counters. The protected
     // status endpoint can instead present a fixed, actionable diagnostic.
     const stored = await this.db.$queryRaw<
@@ -1994,7 +2061,17 @@ export class XhsSubscriptionService implements OnModuleInit {
       if (!tasks.has(t.taskId)) tasks.set(t.taskId, t);
     }
     return {
-      items: [...tasks.values()].slice(0, limit).map((t) => this.view(t)),
+      items: (
+        await visibleHistory(
+          'xiaohongshu',
+          'xhs-task',
+          [...tasks.values()],
+          (t) => t.taskId,
+          await taskDatabaseFor(this.db),
+        )
+      )
+        .slice(0, limit)
+        .map((t) => this.view(t)),
     };
   }
   async resumeTask(
@@ -2171,6 +2248,22 @@ export class XhsSubscriptionService implements OnModuleInit {
     });
   }
   private async run(t: Task, directory?: string) {
+    try {
+      return await withChannelExecution(
+        'xiaohongshu',
+        () => this.runOwned(t, directory),
+        { kind: 'xhs-task', id: t.taskId },
+        await taskDatabaseFor(this.db),
+      );
+    } catch (error) {
+      // A lane rejection happens before runTask and must not leave an in-memory
+      // source owner forever. The durable checkpoint stays intact and isolated.
+      if (error instanceof Error && /^CHANNEL_/.test(error.message))
+        this.pending.delete(t.taskId);
+      throw error;
+    }
+  }
+  private async runOwned(t: Task, directory?: string) {
     return this.source?.withTaskScope
       ? this.source.withTaskScope(
           { taskId: t.taskId, creatorId: t.creatorId },

@@ -1,3 +1,4 @@
+import { ChannelTaskControls } from './channel-task-controls';
 import XhsBatchLocalCancellation from '@web/components/XhsBatchLocalCancellation';
 import XhsMemoryConnection from '@web/components/XhsMemoryConnection';
 import { toast } from 'sonner';
@@ -1523,6 +1524,7 @@ export default function Xiaohongshu() {
   };
   return (
     <main className="feed-workspace" aria-label="小红书博主与笔记管理">
+      <ChannelTaskControls channel="xiaohongshu" />
       <div className="feed-source-controls flex shrink-0 items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-700">
         {current && (
           <XhsCreatorAvatar

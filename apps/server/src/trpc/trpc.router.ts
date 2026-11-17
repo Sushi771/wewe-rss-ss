@@ -1,3 +1,4 @@
+import { ChannelTaskHistory } from '../collection/channel-task-history';
 import {
   readXhsSourceBudget,
   configureXhsSourceBudget,
@@ -2811,7 +2812,48 @@ export class TrpcRouter {
       ),
   });
 
+  channelTasksRouter = this.trpcService.router({
+    status: this.trpcService.protectedProcedure
+      .input(z.object({ channel: z.enum(['wechat', 'xiaohongshu']) }).strict())
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx, true);
+        return new ChannelTaskHistory(this.prismaService).status(input.channel);
+      }),
+    preview: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            channel: z.enum(['wechat', 'xiaohongshu']),
+            action: z.enum(['archive', 'pause', 'resume']),
+          })
+          .strict(),
+      )
+      .query(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx, true);
+        return new ChannelTaskHistory(this.prismaService).preview(
+          input.channel,
+          input.action,
+        );
+      }),
+    confirm: this.trpcService.protectedProcedure
+      .input(
+        z
+          .object({
+            channel: z.enum(['wechat', 'xiaohongshu']),
+            action: z.enum(['archive', 'pause', 'resume']),
+            digest: z.string().regex(/^[a-f0-9]{64}$/),
+            acknowledged: z.literal(true),
+          })
+          .strict(),
+      )
+      .mutation(({ input, ctx }) => {
+        this.requireLocalXhsAccess(ctx);
+        return new ChannelTaskHistory(this.prismaService).confirm(input);
+      }),
+  });
+
   appRouter = this.trpcService.router({
+    channelTasks: this.channelTasksRouter,
     feed: this.feedRouter,
     account: this.accountRouter,
     article: this.articleRouter,

@@ -49,6 +49,18 @@ async function startCurrent({ root, release, database, recoveryRelease = release
     if (existing) {
       assert.equal(existing.commandLine, command);
       assert.equal(existing.executable.toLowerCase(), executable.toLowerCase());
+      if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1') {
+        await require('./held-management-readiness.cjs').waitHeldManagementReady(port, null, {
+          id: manifest.id, sha256: hash(path.join(release, 'release.json')), database,
+        });
+        const after = ctl.processIdentity('Snapshot', existing.pid, port);
+        assert.equal(after.startUtc, existing.startUtc);
+        assert.equal(after.commandLine, command);
+        assert.equal(after.executable.toLowerCase(), executable.toLowerCase());
+        own();
+        assert(fs.readFileSync(pointer).equals(pointerRaw), 'HELD_ACTIVE_POINTER_CHANGED');
+        return { newIdentity: after, normalStart: true, alreadyRunning: true, readiness: 'held-local-management' };
+      }
       const h = await fetch(`http://127.0.0.1:${port}/startup-status`, {
         signal: AbortSignal.timeout(8000),
       });
@@ -162,7 +174,11 @@ async function startCurrent({ root, release, database, recoveryRelease = release
     // Failure retains a real live/unknown writer lease; never kill or manufacture an exit receipt.
     child.on('error', () => {});
     child.unref();
-    await ctl.waitReady(port, child);
+    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
+      await require('./held-management-readiness.cjs').waitHeldManagementReady(port, child, {
+        id: manifest.id, sha256: hash(path.join(release, 'release.json')), database,
+      });
+    else await ctl.waitReady(port, child);
     own();
     const health = await fetch(`http://127.0.0.1:${port}/startup-status`, {
       signal: AbortSignal.timeout(8000),

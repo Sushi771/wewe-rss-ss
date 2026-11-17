@@ -235,10 +235,22 @@ function acquireMaintenance(database, checkpoint) {
     throw error;
   }
 }
+/** No stale writer is retired here. The fixed cold owner must prove actual
+ * project quiescence under owned installation locks and a suspended task. */
+function acquireColdMaintenance(database, checkpoint) {
+  const b = binding(database), { coldProof, scopeLease } = checkpoint || {};
+  const validate = require('./updater/fixed-cold-start.cjs').validateColdMaintenance;
+  validate(coldProof, { database: b.database, scopeLease }, true);
+  if (fs.existsSync(b.file)) return fail();
+  const lease = acquire(database, 'maintenance');
+  try { validate(coldProof, { database: b.database, scopeLease }, true); return lease; }
+  catch (error) { lease.close(); throw error; }
+}
 const api = Object.freeze({
   acquireWriter,
   writerForUrl,
   acquireMaintenance,
+  acquireColdMaintenance,
   retireStoppedWriter,
   binding,
 });

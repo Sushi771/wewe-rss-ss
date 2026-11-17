@@ -1,3 +1,9 @@
+import {
+  assertChannelRunnable,
+  visibleHistory,
+  runChannelWorker,
+  withChannelExecution,
+} from './channel-task-control';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
@@ -205,7 +211,14 @@ export class Wechat2RssSubscriptionTasks {
         console.warn('[WECHAT2RSS_TASK_INVALID]');
       }
     }
-    return tasks
+    const visible = await visibleHistory(
+      'wechat',
+      'wechat-task',
+      tasks,
+      (t) => t.taskId,
+      this.database(),
+    );
+    return visible
       .sort(
         (a, b) =>
           Number(pending(b.state)) - Number(pending(a.state)) ||
@@ -250,13 +263,29 @@ export class Wechat2RssSubscriptionTasks {
     }
   }
 
-  async enqueue(input: {
+  async enqueue(
+    input: Parameters<Wechat2RssSubscriptionTasks['enqueueOwned']>[0],
+  ) {
+    this.assertNotHeld();
+    return withChannelExecution(
+      'wechat',
+      () => this.enqueueOwned(input),
+      { kind: 'wechat-task', id: subscriptionTaskId(input.articleUrl) },
+      this.database(),
+    );
+  }
+  private async enqueueOwned(input: {
     articleUrl: string;
     feedPath: string;
     feedId?: string;
     phase: 'identity' | 'cache' | 'metadata';
   }) {
     this.assertNotHeld();
+    await assertChannelRunnable(
+      'wechat',
+      { kind: 'wechat-task', id: subscriptionTaskId(input.articleUrl) },
+      this.database(),
+    );
     const url = new URL(subscriptionArticleUrl(input.articleUrl));
     url.hash = '';
     url.searchParams.sort();
@@ -291,6 +320,11 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async resume(id: string) {
+    await assertChannelRunnable(
+      'wechat',
+      { kind: 'wechat-task', id },
+      this.database(),
+    );
     this.assertNotHeld();
     const task = await this.read(id);
     if (!task) return null;
@@ -322,6 +356,14 @@ export class Wechat2RssSubscriptionTasks {
   }
 
   async runDue() {
+    if (this.recoveryHold || this.busy || this.stopped) return;
+    return runChannelWorker(
+      'wechat',
+      () => this.runDueOwned(),
+      this.database(),
+    );
+  }
+  private async runDueOwned() {
     if (this.recoveryHold || this.busy || this.stopped) return;
     this.busy = true;
     try {

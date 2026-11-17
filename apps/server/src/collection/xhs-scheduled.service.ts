@@ -1,3 +1,4 @@
+import { assertChannelRunnable } from './channel-task-control';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
@@ -26,6 +27,11 @@ export class XhsScheduledService {
       !databaseWritesAllowed()
     )
       return;
+    try {
+      await assertChannelRunnable('xiaohongshu');
+    } catch {
+      return;
+    }
     this.clock ??= new XhsScheduledClock(
       () => {
         const raw = process.env.DATABASE_URL || '';

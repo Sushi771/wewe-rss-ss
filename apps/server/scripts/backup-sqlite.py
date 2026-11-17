@@ -493,6 +493,82 @@ def reusable(database, backup_root, deadline=None, allow_periodic=False):
         return None
 
 
+def require_reusable(database, backup_root, expected_backup, expected_sha256, timeout=55):
+    """Verify one exact protected snapshot, with no fresh-copy fallback.
+
+    Internal maintenance primitive only; the caller must retain genuine writer
+    exclusion and its normal approval/budget gates through the later operation.
+    This proves current snapshot content, not maintenance or restore authority.
+    Only the existing full-snapshot OS lock pathname may be created here.
+    """
+    if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+            or any(c not in '0123456789abcdef' for c in expected_sha256)
+            or not isinstance(timeout, (int, float)) or isinstance(timeout, bool)
+            or not math.isfinite(timeout) or not 0 < timeout <= 55):
+        raise ValueError('SQLITE_REQUIRED_REUSE_INPUT_INVALID')
+
+    def plain(value):
+        raw = Path(value)
+        if not raw.is_absolute():
+            raise ValueError('SQLITE_REQUIRED_REUSE_PATH_INVALID')
+        for at in (raw, *raw.parents):
+            if at.is_symlink() or (hasattr(at, 'is_junction') and at.is_junction()):
+                raise ValueError('SQLITE_REQUIRED_REUSE_PATH_INVALID')
+        resolved = raw.resolve(strict=True)
+        if resolved != raw:
+            raise ValueError('SQLITE_REQUIRED_REUSE_PATH_INVALID')
+        return resolved
+
+    database, backup_root, expected_backup = map(plain, (database, backup_root, expected_backup))
+    if (not backup_root.is_dir() or not expected_backup.is_relative_to(backup_root)
+            or database.is_relative_to(backup_root) or expected_backup == database):
+        raise ValueError('SQLITE_REQUIRED_REUSE_PATH_INVALID')
+    receipt = backup_root / ('.latest-' + hashlib.sha256(str(database).encode()).hexdigest()[:24] + '.json')
+    deadline = time.monotonic() + timeout
+
+    def state(file, optional=False):
+        if optional and not file.exists():
+            if file.is_symlink() or (hasattr(file, 'is_junction') and file.is_junction()):
+                raise ValueError('SQLITE_REQUIRED_REUSE_PATH_INVALID')
+            return None
+        plain(file)
+        stat = file.stat()
+        if not file.is_file() or stat.st_nlink != 1 or not stat.st_ino:
+            raise ValueError('SQLITE_REQUIRED_REUSE_FILE_INVALID')
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+    def source_state():
+        # WAL shared-memory read marks may change during a read-only SQLite
+        # connection; only DB/WAL/journal contain durable business changes.
+        states = [state(database)]
+        for suffix in ('-wal', '-journal'):
+            value = state(Path(str(database) + suffix), optional=True)
+            if suffix == '-journal' and value and value[2]:
+                raise ValueError('SQLITE_REQUIRED_REUSE_SOURCE_UNSETTLED')
+            states.append(value)
+        shm = Path(str(database) + '-shm')
+        state(shm, optional=True)  # reject redirects/hardlinks, without pinning read marks
+        return states
+
+    lock_name = hashlib.sha256(str(database).encode()).hexdigest()[:24]
+    lock_path = database.parent / f'.full-snapshot-{lock_name}.lock'
+    if lock_path.exists() or lock_path.is_symlink() or (hasattr(lock_path, 'is_junction') and lock_path.is_junction()):
+        state(lock_path)
+    with FileLock(lock_path, timeout=min(30, timeout)) as lock:
+        before = (source_state(), state(expected_backup), state(receipt))
+        report = reusable(database, backup_root, deadline, allow_periodic=False)
+        lock.check()
+        if (report is None or report.get('backup') != str(expected_backup)
+                or report.get('sha256') != expected_sha256 or report.get('reused') is not True):
+            raise ValueError('SQLITE_REQUIRED_REUSE_UNAVAILABLE')
+        if before != (source_state(), state(expected_backup), state(receipt)):
+            raise ValueError('SQLITE_REQUIRED_REUSE_CHANGED')
+        if time.monotonic() > deadline:
+            raise TimeoutError('SQLite required reuse timed out')
+        lock.check()
+        return report
+
+
 def create_backup(database, backup_root, prefix="before-collection", timeout=55,
                   diagnostics=None, copy_timeout=None, periodic_now=None):
     if prefix != 'periodic-snapshot':

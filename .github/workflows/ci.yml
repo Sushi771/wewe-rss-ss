@@ -5,6 +5,7 @@ on:
     branches:
       [
         main,
+        fix/held-readiness-contract-20261117,
         codex/manual-refresh-download-integration,
         codex/scheduled-source-active-20261108,
         codex/release-build-rollback-20261021,

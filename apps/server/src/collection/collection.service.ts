@@ -1,3 +1,4 @@
+import { withChannelExecution, taskDatabaseFor } from './channel-task-control';
 import { mediaTransaction } from './media-transaction';
 import { createHash } from 'node:crypto';
 import {
@@ -484,7 +485,17 @@ export class CollectionService {
     return { created, updated };
   }
 
-  async collectOwnerSearch(mpId: string) {
+  async collectOwnerSearch(
+    ...input: Parameters<CollectionService['collectOwnerSearchOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.collectOwnerSearchOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async collectOwnerSearchOwned(mpId: string) {
     if (this.publicCollections.has(mpId)) throw new Error('该公众号正在更新');
     this.publicCollections.add(mpId);
     try {
@@ -528,6 +539,18 @@ export class CollectionService {
    * An opaque result is required; raw client ProviderPages cannot enter here.
    */
   async collectVerifiedWereadCandidate(
+    ...input: Parameters<
+      CollectionService['collectVerifiedWereadCandidateOwned']
+    >
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.collectVerifiedWereadCandidateOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async collectVerifiedWereadCandidateOwned(
     result: VerifiedWereadPublisherCandidate,
   ) {
     const mpId = result.candidate.mpId;
@@ -566,6 +589,16 @@ export class CollectionService {
   }
 
   async collectOwnerWereadLatest(
+    ...input: Parameters<CollectionService['collectOwnerWereadLatestOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.collectOwnerWereadLatestOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async collectOwnerWereadLatestOwned(
     mpId: string,
     trigger: 'local-manual' | 'scheduled' | 'public' = 'public',
   ) {
@@ -647,7 +680,17 @@ export class CollectionService {
     );
   }
 
-  async collectWechat2RssRecent(input: {
+  async collectWechat2RssRecent(
+    ...input: Parameters<CollectionService['collectWechat2RssRecentOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.collectWechat2RssRecentOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async collectWechat2RssRecentOwned(input: {
     mpId: string;
     mpName: string;
     trigger: 'local-manual' | 'scheduled' | 'public';
@@ -1324,7 +1367,17 @@ export class CollectionService {
     }
   }
 
-  async retryArticleBody(id: string): Promise<BodyRetryResult> {
+  async retryArticleBody(
+    ...input: Parameters<CollectionService['retryArticleBodyOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.retryArticleBodyOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async retryArticleBodyOwned(id: string): Promise<BodyRetryResult> {
     const initial = await this.prisma.article.findUniqueOrThrow({
       where: { id },
     });
@@ -1440,7 +1493,20 @@ export class CollectionService {
     }
   }
 
-  async collectPublicAlbums(input: { mpId: string; albumIds: string[] }) {
+  async collectPublicAlbums(
+    ...input: Parameters<CollectionService['collectPublicAlbumsOwned']>
+  ) {
+    return withChannelExecution(
+      'wechat',
+      () => this.collectPublicAlbumsOwned(...input),
+      undefined,
+      await taskDatabaseFor(this.prisma),
+    );
+  }
+  private async collectPublicAlbumsOwned(input: {
+    mpId: string;
+    albumIds: string[];
+  }) {
     if (this.publicCollections.has(input.mpId))
       throw new Error('该公众号正在采集公开合集，请等待本次结束');
     this.publicCollections.add(input.mpId);
