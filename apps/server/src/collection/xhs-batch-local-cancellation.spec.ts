@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { applyFixtureMigrations } from '../../test/redbook-isolated/fixture-migrations';
 import { XhsSubscriptionService } from './xhs-subscription.service';
@@ -9,16 +10,12 @@ import { XhsSubscriptionRuntime } from './xhs-subscription-runtime';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { XiaohongshuBatches } from './xiaohongshu-batches';
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
-import {
-  prepareBatchLocalCancellation,
-  confirmBatchLocalCancellation,
-} from './xhs-batch-local-cancellation';
 import { assertUnboundDispatch } from './xhs-unbound-round';
 import {
   parsePersistentCreatorBatch,
   inspectPersistentBatch,
 } from '../../../web/src/utils/xiaohongshu-refresh';
-const { DatabaseSync } = require('node:sqlite');
+const { DatabaseSync } = createRequire(__filename)('node:sqlite');
 
 // Newly created synthetic database only. Real Prisma, migrations, writer gate,
 // consistent local backup, review/commit, source fence and frontend parser.
@@ -35,8 +32,6 @@ describe('unsent legacy batch local cancellation', () => {
     taskDocument: string;
   const creator = 'synthetic-a',
     time = 1794798578834n;
-  const pack = (v: unknown) =>
-    JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? String(x) : x));
   const sha = (v: Buffer) => createHash('sha256').update(v).digest('hex');
   const fixedHistoricalOperation = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
   const preserved = () =>

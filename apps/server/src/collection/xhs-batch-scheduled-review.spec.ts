@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { applyFixtureMigrations } from '../../test/redbook-isolated/fixture-migrations';
 import { XhsSubscriptionService } from './xhs-subscription.service';
@@ -109,7 +110,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
   }
   function localSettler() {
     const backup = jest.fn(async () => {
-      const { DatabaseSync } = require('node:sqlite');
+      const { DatabaseSync } = createRequire(__filename)('node:sqlite');
       const source = path.join(dir, 'fixture.sqlite');
       const target = path.join(dir, randomUUID() + '.sqlite');
       const connection = new DatabaseSync(source, { readOnly: true });
@@ -377,7 +378,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     batchId = randomUUID();
     const selected = [ids[0], ids[2]];
     await batch.create(batchId, selected);
-    for (const _creatorId of selected) {
+    for (let remaining = selected.length; remaining > 0; remaining--) {
       await batch.advance(batchId);
       await waitForLane();
       await batch.advance(batchId);
@@ -631,7 +632,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     (service as any).prepareScheduledContext.mockRestore();
     const fresh = randomUUID();
     await batch.create(fresh, [ids[0], ids[2]]);
-    for (const _id of [ids[0], ids[2]]) {
+    for (let remaining = 2; remaining > 0; remaining--) {
       await batch.advance(fresh);
       await waitForLane();
       await batch.advance(fresh);
