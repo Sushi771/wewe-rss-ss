@@ -18,6 +18,9 @@ Module._load = function (request, parent, isMain) {
   return Reflect.apply(original, this, arguments);
 };
 function withFixedCode(closure, run) {
-  return context.run(new Map(closure.map(pin => [path.resolve(pin.path).toLowerCase(), pin])), run);
+  return context.run(
+    new Map(closure.map((pin) => [path.resolve(pin.path).toLowerCase(), pin])),
+    run,
+  );
 }
 module.exports = { withFixedCode };

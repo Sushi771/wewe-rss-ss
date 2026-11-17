@@ -61,7 +61,14 @@ function createLegacyMaintenance({
   validateRoles(roles);
   database = fs.realpathSync.native(database);
   dataRoot = fs.realpathSync.native(dataRoot);
-  const reuse = reuseBinding ? require('./fixed-reuse-owner.cjs').reuseBinding(reuseBinding, { database, dataRoot, roles, scopeLease }) : undefined;
+  const reuse = reuseBinding
+    ? require('./fixed-reuse-owner.cjs').reuseBinding(reuseBinding, {
+        database,
+        dataRoot,
+        roles,
+        scopeLease,
+      })
+    : undefined;
   if (checkpoint?.scopeLease !== scopeLease)
     fail('SAME_SCOPE_CHECKPOINT_REQUIRED');
   const originalIdentity = identity(database),
@@ -123,12 +130,14 @@ function createLegacyMaintenance({
   function backup(ctx) {
     context(ctx);
     if (!ctx.backup) return; // Initial authorization precedes snapshot creation.
-    const expected = reuse ? reuse.check(ctx) : path.join(
-      dataRoot,
-      'update-backups',
-      ctx.transactionId,
-      'before.sqlite',
-    );
+    const expected = reuse
+      ? reuse.check(ctx)
+      : path.join(
+          dataRoot,
+          'update-backups',
+          ctx.transactionId,
+          'before.sqlite',
+        );
     if (
       path.resolve(ctx.backup.path) !== expected ||
       fs.realpathSync.native(expected) !== expected ||
@@ -212,12 +221,19 @@ function createLegacyMaintenance({
       scopeLease.assertWritable(['restart', 'switch']);
       scopeLease.check(true);
       if (checkpoint.coldProof) {
-        if (!reuse || typeof scopeLease.coldMaintenanceBoundary !== 'function' || typeof writerGate.acquireColdMaintenance !== 'function')
+        if (
+          !reuse ||
+          typeof scopeLease.coldMaintenanceBoundary !== 'function' ||
+          typeof writerGate.acquireColdMaintenance !== 'function'
+        )
           fail('OPAQUE_COLD_MAINTENANCE_REQUIRED');
         boundary = scopeLease.coldMaintenanceBoundary(checkpoint.coldProof);
         lease = writerGate.acquireColdMaintenance(database, checkpoint);
       } else {
-        boundary = scopeLease.legacyMaintenanceBoundary(checkpoint.identity, observe);
+        boundary = scopeLease.legacyMaintenanceBoundary(
+          checkpoint.identity,
+          observe,
+        );
         lease = writerGate.acquireMaintenance(database, checkpoint);
       }
       check();

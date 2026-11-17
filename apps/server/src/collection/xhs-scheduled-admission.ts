@@ -118,8 +118,7 @@ export async function admitScheduledXhs(
       existing[0].creator_id !== creatorId ||
       old.state !== existing[0].state ||
       old.taskId !== taskId ||
-      (input.batchCandidate &&
-        (old.kind !== 'list' || old.collectDetails)) ||
+      (input.batchCandidate && (old.kind !== 'list' || old.collectDetails)) ||
       old.creatorId !== creatorId ||
       old.schedule?.round !== round ||
       old.schedule?.phase !== phase ||

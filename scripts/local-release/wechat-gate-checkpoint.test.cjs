@@ -1,15 +1,205 @@
 'use strict';
-const t=require('node:test'),a=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),cp=require('node:child_process'),{DatabaseSync}=require('node:sqlite');
-const {recordWechatGate}=require('./wechat-gate-checkpoint.cjs');
-function setup(){const dir=fs.mkdtempSync(path.join(__dirname,'wgtest-')),p=path.join(dir,'db');const sql=new DatabaseSync(p);sql.exec("CREATE TABLE Wechat2RssSourceGate(id integer primary key,state text,token text,status integer);INSERT INTO Wechat2RssSourceGate VALUES(1,'pending','synthetic',NULL);CREATE TABLE articles(id int);INSERT INTO articles VALUES(1);CREATE TABLE refresh_submission_claims(state text);INSERT INTO refresh_submission_claims VALUES('unknown'),('unknown'),('unknown'),('unknown'),('unknown'),('unknown'),('unknown');");sql.close();let closes=0; const identity={pid:1,startUtc:'t',executable:'x',commandLine:'c'};const boundary={check(){},observe(){}};const cpnt={identity,stopReceipt:{...identity,stopped:true},database:p,observeProjectWriters(){},scopeLease:{legacyMaintenanceBoundary(){return boundary}}};const api={acquireMaintenance(){return {check(){},close(){closes++}}}};return {dir,p,cpnt,api,boundary,closes:()=>closes}}
-function secure(d){const s="$s=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($s); $a.SetAccessRuleProtection($true,$false); $r=New-Object System.Security.AccessControl.FileSystemAccessRule($s,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $a.AddAccessRule($r); Set-Acl -LiteralPath $env:WD -AclObject $a";cp.execFileSync('pwsh.exe',['-NoProfile','-Command',s],{env:{...process.env,WD:d},stdio:'inherit'})}
-function row(f){const d=new DatabaseSync(f.p);let x=d.prepare('select state,token,status from Wechat2RssSourceGate').get(),n=d.prepare("select count(*) n from refresh_submission_claims where state='unknown'").get().n,c=d.prepare('select count(*) n from articles').get().n;d.close();return [x.state,x.token,x.status,n,c]}
-t('isolated commit persists unknown record and preserves data',()=>{let f=setup();try{secure(f.dir);a.equal(recordWechatGate(f.cpnt,f.dir,f.api).outcome,'committed');a.deepEqual(row(f),['idle',null,null,7,1]);a.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'wechat-pending-recovery.json'))).result,'unknown');a.equal(f.closes(),1)}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
-t('lost boundary before commit rolls back',()=>{let f=setup();try{secure(f.dir);let n=0;f.boundary.observe=()=>{if(++n===4)throw Error('writer');};a.throws(()=>recordWechatGate(f.cpnt,f.dir,f.api),/writer/);a.deepEqual(row(f),['pending','synthetic',null,7,1]);a.equal(f.closes(),1)}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
+const t = require('node:test'),
+  a = require('node:assert/strict'),
+  fs = require('node:fs'),
+  os = require('node:os'),
+  path = require('node:path'),
+  cp = require('node:child_process'),
+  { DatabaseSync } = require('node:sqlite');
+const { recordWechatGate } = require('./wechat-gate-checkpoint.cjs');
+function setup() {
+  const dir = fs.mkdtempSync(path.join(__dirname, 'wgtest-')),
+    p = path.join(dir, 'db');
+  const sql = new DatabaseSync(p);
+  sql.exec(
+    "CREATE TABLE Wechat2RssSourceGate(id integer primary key,state text,token text,status integer);INSERT INTO Wechat2RssSourceGate VALUES(1,'pending','synthetic',NULL);CREATE TABLE articles(id int);INSERT INTO articles VALUES(1);CREATE TABLE refresh_submission_claims(state text);INSERT INTO refresh_submission_claims VALUES('unknown'),('unknown'),('unknown'),('unknown'),('unknown'),('unknown'),('unknown');",
+  );
+  sql.close();
+  let closes = 0;
+  const identity = { pid: 1, startUtc: 't', executable: 'x', commandLine: 'c' };
+  const boundary = { check() {}, observe() {} };
+  const cpnt = {
+    identity,
+    stopReceipt: { ...identity, stopped: true },
+    database: p,
+    observeProjectWriters() {},
+    scopeLease: {
+      legacyMaintenanceBoundary() {
+        return boundary;
+      },
+    },
+  };
+  const api = {
+    acquireMaintenance() {
+      return {
+        check() {},
+        close() {
+          closes++;
+        },
+      };
+    },
+  };
+  return { dir, p, cpnt, api, boundary, closes: () => closes };
+}
+function secure(d) {
+  const s =
+    "$s=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $a=New-Object System.Security.AccessControl.DirectorySecurity; $a.SetOwner($s); $a.SetAccessRuleProtection($true,$false); $r=New-Object System.Security.AccessControl.FileSystemAccessRule($s,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $a.AddAccessRule($r); Set-Acl -LiteralPath $env:WD -AclObject $a";
+  cp.execFileSync('pwsh.exe', ['-NoProfile', '-Command', s], {
+    env: { ...process.env, WD: d },
+    stdio: 'inherit',
+  });
+}
+function row(f) {
+  const d = new DatabaseSync(f.p);
+  let x = d
+      .prepare('select state,token,status from Wechat2RssSourceGate')
+      .get(),
+    n = d
+      .prepare(
+        "select count(*) n from refresh_submission_claims where state='unknown'",
+      )
+      .get().n,
+    c = d.prepare('select count(*) n from articles').get().n;
+  d.close();
+  return [x.state, x.token, x.status, n, c];
+}
+t('isolated commit persists unknown record and preserves data', () => {
+  let f = setup();
+  try {
+    secure(f.dir);
+    a.equal(recordWechatGate(f.cpnt, f.dir, f.api).outcome, 'committed');
+    a.deepEqual(row(f), ['idle', null, null, 7, 1]);
+    a.equal(
+      JSON.parse(
+        fs.readFileSync(path.join(f.dir, 'wechat-pending-recovery.json')),
+      ).result,
+      'unknown',
+    );
+    a.equal(f.closes(), 1);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+t('lost boundary before commit rolls back', () => {
+  let f = setup();
+  try {
+    secure(f.dir);
+    let n = 0;
+    f.boundary.observe = () => {
+      if (++n === 4) throw Error('writer');
+    };
+    a.throws(() => recordWechatGate(f.cpnt, f.dir, f.api), /writer/);
+    a.deepEqual(row(f), ['pending', 'synthetic', null, 7, 1]);
+    a.equal(f.closes(), 1);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});
 
+t('lost commit acknowledgement classified read-only', () => {
+  let f = setup();
+  try {
+    secure(f.dir);
+    const open = (p, o) => {
+      const db = new DatabaseSync(p, o);
+      if (o.readOnly) return db;
+      return new Proxy(db, {
+        get(target, k) {
+          if (k === 'exec')
+            return (sql) => {
+              target.exec(sql);
+              if (sql === 'COMMIT') throw Error('lost ack');
+            };
+          const v = target[k];
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+    };
+    a.equal(
+      recordWechatGate(f.cpnt, f.dir, f.api, open).outcome,
+      'committed-verified',
+    );
+    a.deepEqual(row(f), ['idle', null, null, 7, 1]);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+t('commit failure classified not committed without retry', () => {
+  let f = setup();
+  try {
+    secure(f.dir);
+    const open = (p, o) => {
+      const db = new DatabaseSync(p, o);
+      if (o.readOnly) return db;
+      return new Proxy(db, {
+        get(target, k) {
+          if (k === 'exec')
+            return (sql) => {
+              if (sql === 'COMMIT') throw Error('not committed');
+              return target.exec(sql);
+            };
+          const v = target[k];
+          return typeof v === 'function' ? v.bind(target) : v;
+        },
+      });
+    };
+    a.throws(
+      () => recordWechatGate(f.cpnt, f.dir, f.api, open),
+      /NOT_COMMITTED_VERIFIED/,
+    );
+    a.deepEqual(row(f), ['pending', 'synthetic', null, 7, 1]);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+t('real maintenance lease holds through database commit', () => {
+  let f = setup();
+  const gate = require('./project-writer-gate.cjs');
+  try {
+    secure(f.dir);
+    let calls = 0;
+    f.boundary.observe = () => {
+      calls++;
+      const b = gate.binding(f.p);
+      a.equal(fs.existsSync(b.file), true);
+      a.equal(JSON.parse(fs.readFileSync(b.file)).mode, 'maintenance');
+    };
+    f.cpnt.scopeLease.assertWritable = () => {};
+    const r = recordWechatGate(f.cpnt, f.dir, gate);
+    a.equal(r.outcome, 'committed');
+    a.ok(calls >= 4);
+    a.deepEqual(row(f), ['idle', null, null, 7, 1]);
+    a.equal(fs.existsSync(gate.binding(f.p).file), false);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});
 
-t('lost commit acknowledgement classified read-only',()=>{let f=setup();try{secure(f.dir);const open=(p,o)=>{const db=new DatabaseSync(p,o);if(o.readOnly)return db;return new Proxy(db,{get(target,k){if(k==='exec')return sql=>{target.exec(sql);if(sql==='COMMIT')throw Error('lost ack')};const v=target[k];return typeof v==='function'?v.bind(target):v}})};a.equal(recordWechatGate(f.cpnt,f.dir,f.api,open).outcome,'committed-verified');a.deepEqual(row(f),['idle',null,null,7,1])}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
-t('commit failure classified not committed without retry',()=>{let f=setup();try{secure(f.dir);const open=(p,o)=>{const db=new DatabaseSync(p,o);if(o.readOnly)return db;return new Proxy(db,{get(target,k){if(k==='exec')return sql=>{if(sql==='COMMIT')throw Error('not committed');return target.exec(sql)};const v=target[k];return typeof v==='function'?v.bind(target):v}})};a.throws(()=>recordWechatGate(f.cpnt,f.dir,f.api,open),/NOT_COMMITTED_VERIFIED/);a.deepEqual(row(f),['pending','synthetic',null,7,1])}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
-t('real maintenance lease holds through database commit',()=>{let f=setup();const gate=require('./project-writer-gate.cjs');try{secure(f.dir);let calls=0;f.boundary.observe=()=>{calls++;const b=gate.binding(f.p);a.equal(fs.existsSync(b.file),true);a.equal(JSON.parse(fs.readFileSync(b.file)).mode,'maintenance')};f.cpnt.scopeLease.assertWritable=()=>{};const r=recordWechatGate(f.cpnt,f.dir,gate);a.equal(r.outcome,'committed');a.ok(calls>=4);a.deepEqual(row(f),['idle',null,null,7,1]);a.equal(fs.existsSync(gate.binding(f.p).file),false)}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
-
-t('direct start path retains real writer lease through commit',()=>{let f=setup();const gate=require('./project-writer-gate.cjs');const {performWechatGate}=require('./wechat-gate-checkpoint.cjs');try{secure(f.dir);const lease=gate.acquireWriter(f.p);let n=0;const boundary={check(){lease.check();n++},observe(){lease.check()}};a.equal(performWechatGate(f.p,f.dir,lease,boundary).outcome,'committed');a.ok(n>=4);a.deepEqual(row(f),['idle',null,null,7,1]);a.equal(fs.existsSync(gate.binding(f.p).file),false)}finally{fs.rmSync(f.dir,{recursive:true,force:true})}});
+t('direct start path retains real writer lease through commit', () => {
+  let f = setup();
+  const gate = require('./project-writer-gate.cjs');
+  const { performWechatGate } = require('./wechat-gate-checkpoint.cjs');
+  try {
+    secure(f.dir);
+    const lease = gate.acquireWriter(f.p);
+    let n = 0;
+    const boundary = {
+      check() {
+        lease.check();
+        n++;
+      },
+      observe() {
+        lease.check();
+      },
+    };
+    a.equal(
+      performWechatGate(f.p, f.dir, lease, boundary).outcome,
+      'committed',
+    );
+    a.ok(n >= 4);
+    a.deepEqual(row(f), ['idle', null, null, 7, 1]);
+    a.equal(fs.existsSync(gate.binding(f.p).file), false);
+  } finally {
+    fs.rmSync(f.dir, { recursive: true, force: true });
+  }
+});

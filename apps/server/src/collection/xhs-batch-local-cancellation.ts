@@ -159,7 +159,9 @@ type LegacyBatchCancellationReceipt = {
   originalBatch: Batch;
   originalItems: Item[];
 };
-export type BatchCancellationReceipt = LegacyBatchCancellationReceipt | ScheduledCancellationReceipt;
+export type BatchCancellationReceipt =
+  | LegacyBatchCancellationReceipt
+  | ScheduledCancellationReceipt;
 
 /** Used by the source fence as well as idempotent confirmation. No source grant. */
 export async function verifyBatchLocalCancellation(

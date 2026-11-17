@@ -1,7 +1,10 @@
 import { verifyBatchLocalCancellation } from './xhs-batch-local-cancellation';
 import { TextDecoder } from 'node:util';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
-import { matchesScheduledLocalStop, SCHEDULED_LOCAL_CANCELLATION } from './xhs-scheduled-local-cancellation';
+import {
+  matchesScheduledLocalStop,
+  SCHEDULED_LOCAL_CANCELLATION,
+} from './xhs-scheduled-local-cancellation';
 
 export type LegacyXhsQuery = {
   $queryRaw<T>(sql: TemplateStringsArray, ...values: any[]): Promise<T>;
@@ -309,14 +312,26 @@ export async function readLegacyXhsSourceFence(
       byBatch = new Map<string, any>();
     let unresolved = false;
     const localStops = new Set<string>();
-    for (const item of items.filter(i => i.state === 'cancelled' && i.operation_id)) {
+    for (const item of items.filter(
+      (i) => i.state === 'cancelled' && i.operation_id,
+    )) {
       try {
-        const batch = batches.find(b => b.id === item.batch_id);
-        const audit = await verifyBatchLocalCancellation(db, item, batch?.state);
-        const job = jobs.find(j => j.owner === item.operation_id);
-        if (audit.kind === SCHEDULED_LOCAL_CANCELLATION && job && matchesScheduledLocalStop(audit, job))
+        const batch = batches.find((b) => b.id === item.batch_id);
+        const audit = await verifyBatchLocalCancellation(
+          db,
+          item,
+          batch?.state,
+        );
+        const job = jobs.find((j) => j.owner === item.operation_id);
+        if (
+          audit.kind === SCHEDULED_LOCAL_CANCELLATION &&
+          job &&
+          matchesScheduledLocalStop(audit, job)
+        )
           localStops.add(job.owner);
-      } catch { return blocked('receipt'); }
+      } catch {
+        return blocked('receipt');
+      }
     }
     for (const job of jobs) {
       if (
@@ -359,7 +374,10 @@ export async function readLegacyXhsSourceFence(
       )
         return blocked('state');
       byBatch.set(batch.id, batch);
-      if ((batch.state === 'running' || batch.state === 'paused') && batch.id !== candidateBatch)
+      if (
+        (batch.state === 'running' || batch.state === 'paused') &&
+        batch.id !== candidateBatch
+      )
         unresolved = true;
     }
     for (const item of items) {
@@ -390,11 +408,17 @@ export async function readLegacyXhsSourceFence(
           (item.state === 'cancelled' && batch.state !== 'stopped')
         )
           return blocked('state');
-        if (item.state === 'queued' && item.batch_id !== candidateBatch) unresolved = true;
+        if (item.state === 'queued' && item.batch_id !== candidateBatch)
+          unresolved = true;
         continue;
       }
-      if (candidate && item.batch_id === candidateBatch && item.state === 'reserved' &&
-          item.operation_id === candidate.taskId && item.creator_id === candidate.creatorId) {
+      if (
+        candidate &&
+        item.batch_id === candidateBatch &&
+        item.state === 'reserved' &&
+        item.operation_id === candidate.taskId &&
+        item.creator_id === candidate.creatorId
+      ) {
         if (item.outcome !== null) return blocked('state');
         continue;
       }

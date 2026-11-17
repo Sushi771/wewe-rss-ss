@@ -103,7 +103,9 @@ export class XhsSourceRiskStore {
   async read(candidate?: { taskId: string; creatorId: string }) {
     try {
       const row = await this.rows(this.db);
-      if ((await readLegacyXhsSourceFence(this.db, candidate)).state === 'blocked')
+      if (
+        (await readLegacyXhsSourceFence(this.db, candidate)).state === 'blocked'
+      )
         return LEGACY_XHS_REVIEW;
       return row.state === 'clear'
         ? undefined

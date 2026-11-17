@@ -180,6 +180,9 @@ jobs:
       - name: Format check
         run: pnpm fmt.check
 
+      - name: Test held management and exact maintenance bindings offline
+        run: node --test scripts/local-release/held-management-readiness.test.cjs scripts/local-release/held-start-current.test.cjs scripts/local-release/updater/prepare-maintenance-binding.test.cjs scripts/local-release/updater/precommit-held-health.test.cjs scripts/local-release/updater/installer/installed-adapter.test.cjs
+
       - name: Enforce explicit backup boundaries without database or network access
         run: |
           node --test scripts/check-backup-policy.test.cjs

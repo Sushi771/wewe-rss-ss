@@ -10,7 +10,10 @@ import { XhsWholeCreatorService } from './xhs-whole-creator.service';
 import { XhsSourceRiskStore } from './xhs-source-risk-store';
 import { XiaohongshuBatches } from './xiaohongshu-batches';
 import { scheduledTaskId } from './xhs-scheduled-admission';
-import { FULL_HISTORY_KIND, fullHistoryContext } from './xhs-full-history-scope';
+import {
+  FULL_HISTORY_KIND,
+  fullHistoryContext,
+} from './xhs-full-history-scope';
 import {
   prepareScheduledPolicy,
   confirmScheduledPolicy,
@@ -67,36 +70,74 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     });
   }
   async function stoppedUnsentTask(withLegacyStop = true) {
-    jest.spyOn(service as any, 'prepareScheduledContext').mockRejectedValue(
-      new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED'),
-    );
-    const id = batchId, taskId = operation();
-    await batch.advance(id); await waitForLane(); await batch.advance(id);
+    jest
+      .spyOn(service as any, 'prepareScheduledContext')
+      .mockRejectedValue(
+        new XhsSubscriptionError('XHS_ACCESS_CONTEXT_EXPIRED'),
+      );
+    const id = batchId,
+      taskId = operation();
+    await batch.advance(id);
+    await waitForLane();
+    await batch.advance(id);
     // Observed deployed shape carries retained exclusions even when no source
     // operation started. Keep them verbatim; they are not dispatched note IDs.
-    const [row]=await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?',taskId);
-    const saved=JSON.parse(row.document);
-    saved.historyExcludedIds=['retained-note-a','retained-note-b','retained-note-c'];
-    await db.$executeRawUnsafe('UPDATE xhs_subscription_tasks SET document=? WHERE id=?',JSON.stringify(saved),taskId);
+    const [row] = await db.$queryRawUnsafe<any[]>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+      taskId,
+    );
+    const saved = JSON.parse(row.document);
+    saved.historyExcludedIds = [
+      'retained-note-a',
+      'retained-note-b',
+      'retained-note-c',
+    ];
+    await db.$executeRawUnsafe(
+      'UPDATE xhs_subscription_tasks SET document=? WHERE id=?',
+      JSON.stringify(saved),
+      taskId,
+    );
     await batch.stop(id);
     if (withLegacyStop)
-      await db.$executeRawUnsafe("INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES(?,1,?,?,'stopped',NULL)", ids[0], taskId, BigInt(Date.now()));
+      await db.$executeRawUnsafe(
+        "INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES(?,1,?,?,'stopped',NULL)",
+        ids[0],
+        taskId,
+        BigInt(Date.now()),
+      );
     return { id, taskId };
   }
   function localSettler() {
     const backup = jest.fn(async () => {
       const { DatabaseSync } = require('node:sqlite');
       const source = path.join(dir, 'fixture.sqlite');
-      const target = path.join(dir, randomUUID()+'.sqlite');
+      const target = path.join(dir, randomUUID() + '.sqlite');
       const connection = new DatabaseSync(source, { readOnly: true });
-      try { connection.exec("VACUUM INTO '"+target.replace(/'/g,"''")+"'"); } finally { connection.close(); }
+      try {
+        connection.exec("VACUUM INTO '" + target.replace(/'/g, "''") + "'");
+      } finally {
+        connection.close();
+      }
       const copied = new DatabaseSync(target, { readOnly: true });
-      const integrityCheck = copied.prepare('PRAGMA integrity_check').get().integrity_check;
+      const integrityCheck = copied
+        .prepare('PRAGMA integrity_check')
+        .get().integrity_check;
       copied.close();
-      const bytes = await import('node:fs/promises').then(fs => fs.readFile(target));
-      return { source, backup: target, sha256: createHash('sha256').update(bytes).digest('hex'), integrityCheck, recoveryOrigin: { format: 'sqlite-recovery-origin-v1', kind: 'protected' } };
+      const bytes = await import('node:fs/promises').then((fs) =>
+        fs.readFile(target),
+      );
+      return {
+        source,
+        backup: target,
+        sha256: createHash('sha256').update(bytes).digest('hex'),
+        integrityCheck,
+        recoveryOrigin: {
+          format: 'sqlite-recovery-origin-v1',
+          kind: 'protected',
+        },
+      };
     });
-    return { backup, settle: new XiaohongshuBatches(db,service,backup) };
+    return { backup, settle: new XiaohongshuBatches(db, service, backup) };
   }
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), 'xhs-batch-review-'));
@@ -209,10 +250,23 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       const u = new URL(request.url);
       if (u.pathname.endsWith('/user/otherinfo')) {
         const authorId = u.searchParams.get('target_user_id')!;
-        return { status: 200, url: request.url, body: { success: true, code: 0,
-          data: { result: { success: true, code: 0 }, basic_info: {
-            user_id: authorId, nickname: 'Synthetic author', red_id: 'synthetic',
-          }, interactions: [] } } };
+        return {
+          status: 200,
+          url: request.url,
+          body: {
+            success: true,
+            code: 0,
+            data: {
+              result: { success: true, code: 0 },
+              basic_info: {
+                user_id: authorId,
+                nickname: 'Synthetic author',
+                red_id: 'synthetic',
+              },
+              interactions: [],
+            },
+          },
+        };
       }
       const authorId = u.searchParams.get('user_id')!;
       return {
@@ -283,7 +337,9 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(api).toHaveBeenCalledTimes(6);
     expect(
       api.mock.calls.every(([request]) =>
-        /\/(?:user_posted|user\/otherinfo)$/.test(new URL(request.url).pathname),
+        /\/(?:user_posted|user\/otherinfo)$/.test(
+          new URL(request.url).pathname,
+        ),
       ),
     ).toBe(true);
     const tasks = await db.$queryRawUnsafe<any[]>(
@@ -296,7 +352,9 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
         state: 'completed',
         scheduledContext: { used: 1, state: 'confirmed' },
       });
-    expect(tasks.every(task => !JSON.parse(task.document).collectDetails)).toBe(true);
+    expect(
+      tasks.every((task) => !JSON.parse(task.document).collectDetails),
+    ).toBe(true);
     const ledger = await db.$queryRawUnsafe<any[]>(
       'SELECT phase,outcome FROM xhs_unbound_owner_requests WHERE operation_id<>?',
       oldOperation,
@@ -304,7 +362,9 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(ledger).toHaveLength(6);
     expect(
       ledger.every(
-        (x) => ['profile', 'list'].includes(x.phase) && x.outcome === 'response-received',
+        (x) =>
+          ['profile', 'list'].includes(x.phase) &&
+          x.outcome === 'response-received',
       ),
     ).toBe(true);
     expect(await snapshot()).toEqual(historical);
@@ -324,196 +384,475 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     }
     expect((await batch.status(batchId)).state).toBe('complete');
     expect(api).toHaveBeenCalledTimes(4);
-    expect(api.mock.calls.every(([r]) => {
-      const u = new URL(r.url);
-      return [authors[ids[0]], authors[ids[2]]].includes(
-        u.searchParams.get('target_user_id') ?? u.searchParams.get('user_id')!,
-      );
-    })).toBe(true);
+    expect(
+      api.mock.calls.every(([r]) => {
+        const u = new URL(r.url);
+        return [authors[ids[0]], authors[ids[2]]].includes(
+          u.searchParams.get('target_user_id') ??
+            u.searchParams.get('user_id')!,
+        );
+      }),
+    ).toBe(true);
     expect(await snapshot()).toEqual(historical);
     expect(await db.xhsNote.count({ where: { creatorId: ids[1] } })).toBe(0);
   });
   it('ordinary stop does not manufacture a legacy request for an unsent scheduled task', async () => {
     const old = await stoppedUnsentTask(false);
-    expect(await db.$queryRawUnsafe('SELECT owner FROM xhs_refresh_jobs WHERE owner=?',old.taskId)).toEqual([]);
+    expect(
+      await db.$queryRawUnsafe(
+        'SELECT owner FROM xhs_refresh_jobs WHERE owner=?',
+        old.taskId,
+      ),
+    ).toEqual([]);
     expect(api).not.toHaveBeenCalled();
     expect(await snapshot()).toEqual(historical);
   });
-  it('permits only authenticated local settlement while eight queued WeChat items and all source work remain held', async()=>{
-    const old=await stoppedUnsentTask();
-    const original={...process.env};const priorAudit=(globalThis as any).__weweStartupAudit;
-    let trpc:TrpcService|undefined;
-    const wxSource=jest.fn().mockRejectedValue(new Error('unexpected source'));
-    const database=path.join(dir,'fixture.sqlite');
-    const producer=new Wechat2RssSubscriptionBatches(()=>database,()=> 'synthetic-instance',wxSource,wxSource,wxSource);
+  it('permits only authenticated local settlement while eight queued WeChat items and all source work remain held', async () => {
+    const old = await stoppedUnsentTask();
+    const original = { ...process.env };
+    const priorAudit = (globalThis as any).__weweStartupAudit;
+    let trpc: TrpcService | undefined;
+    const wxSource = jest
+      .fn()
+      .mockRejectedValue(new Error('unexpected source'));
+    const database = path.join(dir, 'fixture.sqlite');
+    const producer = new Wechat2RssSubscriptionBatches(
+      () => database,
+      () => 'synthetic-instance',
+      wxSource,
+      wxSource,
+      wxSource,
+    );
     producer.attachRefresh(wxSource);
-    const wx=await producer.enqueueRefresh(Array.from({length:8},(_,i)=>'MP_WXS_'+(1234500000+i)),'e'.repeat(64),'scheduled-refresh');
+    const wx = await producer.enqueueRefresh(
+      Array.from({ length: 8 }, (_, i) => 'MP_WXS_' + (1234500000 + i)),
+      'e'.repeat(64),
+      'scheduled-refresh',
+    );
     producer.close();
-    const file=path.join(dir,'.wechat2rss-subscription-batches',wx.batchId+'.json');
-    const pending=JSON.parse(await readFile(file,'utf8'));pending.state='running';
-    await writeFile(file,JSON.stringify(pending));const originalWx=await readFile(file);
-    const {settle,backup}=localSettler();
-    try{
-      Object.assign(process.env,{NODE_ENV:'production',PRIVATE_ONLINE_MODE:'0',WEWE_ACCEPTANCE_MODE:'0',WECHAT2RSS_RECOVERY_HOLD:'1'});
-      const config={get:(key:string)=>key==='platform'?{url:''}:{updateDelayTime:0}} as any;
-      trpc=new TrpcService(db as any,config,{} as any,{} as any);
-      const router=new TrpcRouter(trpc,db as any,config,{} as any,{} as any,undefined,service,runtime);
-      jest.spyOn(router as any,'xhsBatches','get').mockReturnValue(settle);
+    const file = path.join(
+      dir,
+      '.wechat2rss-subscription-batches',
+      wx.batchId + '.json',
+    );
+    const pending = JSON.parse(await readFile(file, 'utf8'));
+    pending.state = 'running';
+    await writeFile(file, JSON.stringify(pending));
+    const originalWx = await readFile(file);
+    const { settle, backup } = localSettler();
+    try {
+      Object.assign(process.env, {
+        NODE_ENV: 'production',
+        PRIVATE_ONLINE_MODE: '0',
+        WEWE_ACCEPTANCE_MODE: '0',
+        WECHAT2RSS_RECOVERY_HOLD: '1',
+      });
+      const config = {
+        get: (key: string) =>
+          key === 'platform' ? { url: '' } : { updateDelayTime: 0 },
+      } as any;
+      trpc = new TrpcService(db as any, config, {} as any, {} as any);
+      const router = new TrpcRouter(
+        trpc,
+        db as any,
+        config,
+        {} as any,
+        {} as any,
+        undefined,
+        service,
+        runtime,
+      );
+      jest.spyOn(router as any, 'xhsBatches', 'get').mockReturnValue(settle);
       // The real startup hooks and worker retain the original hold; allowing a
       // local procedure never toggles it or starts a consumer/timer.
       await trpc.onModuleInit();
-      const held=(trpc as any).subscriptionBatches;
-      await held.runDue();expect(held.timer).toBeUndefined();
-      const ctx={errorMsg:null,isLocalSave:true,isLocalXhsRead:true};
-      const caller=router.appRouter.createCaller(ctx);
-      const input={batchId:old.id};
-      const plan=await caller.xiaohongshu.prepareRefreshBatchLocalCancellation(input);
-      const confirm={...input,digest:plan.digest,acknowledgedNotDispatched:true as const};
-      await expect(router.appRouter.createCaller({...ctx,errorMsg:'bad auth'}).xiaohongshu.prepareRefreshBatchLocalCancellation(input)).rejects.toMatchObject({code:'UNAUTHORIZED'});
-      await expect(router.appRouter.createCaller({errorMsg:null,isLocalSave:false,isLocalXhsRead:false}).xiaohongshu.prepareRefreshBatchLocalCancellation(input)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      await expect(router.appRouter.createCaller({errorMsg:null,isLocalSave:false,isLocalXhsRead:true}).xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation({...confirm,acknowledgedNotDispatched:false} as any)).rejects.toMatchObject({code:'BAD_REQUEST'});
-      await expect(caller.xiaohongshu.prepareRefreshBatchLocalCancellation({...input,extra:true} as any)).rejects.toMatchObject({code:'BAD_REQUEST'});
-      await expect(caller.xiaohongshu.advanceRefreshBatch(input)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      await expect(caller.xiaohongshu.restoreSession()).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      (globalThis as any).__weweStartupAudit={status:'failed',reason:'fixture-write-hold'};
-      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      (globalThis as any).__weweStartupAudit=priorAudit;
+      const held = (trpc as any).subscriptionBatches;
+      await held.runDue();
+      expect(held.timer).toBeUndefined();
+      const ctx = { errorMsg: null, isLocalSave: true, isLocalXhsRead: true };
+      const caller = router.appRouter.createCaller(ctx);
+      const input = { batchId: old.id };
+      const plan =
+        await caller.xiaohongshu.prepareRefreshBatchLocalCancellation(input);
+      const confirm = {
+        ...input,
+        digest: plan.digest,
+        acknowledgedNotDispatched: true as const,
+      };
+      await expect(
+        router.appRouter
+          .createCaller({ ...ctx, errorMsg: 'bad auth' })
+          .xiaohongshu.prepareRefreshBatchLocalCancellation(input),
+      ).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+      await expect(
+        router.appRouter
+          .createCaller({
+            errorMsg: null,
+            isLocalSave: false,
+            isLocalXhsRead: false,
+          })
+          .xiaohongshu.prepareRefreshBatchLocalCancellation(input),
+      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      await expect(
+        router.appRouter
+          .createCaller({
+            errorMsg: null,
+            isLocalSave: false,
+            isLocalXhsRead: true,
+          })
+          .xiaohongshu.confirmRefreshBatchLocalCancellation(confirm),
+      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      await expect(
+        caller.xiaohongshu.confirmRefreshBatchLocalCancellation({
+          ...confirm,
+          acknowledgedNotDispatched: false,
+        } as any),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      await expect(
+        caller.xiaohongshu.prepareRefreshBatchLocalCancellation({
+          ...input,
+          extra: true,
+        } as any),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      await expect(
+        caller.xiaohongshu.advanceRefreshBatch(input),
+      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      await expect(caller.xiaohongshu.restoreSession()).rejects.toMatchObject({
+        code: 'PRECONDITION_FAILED',
+      });
+      (globalThis as any).__weweStartupAudit = {
+        status: 'failed',
+        reason: 'fixture-write-hold',
+      };
+      await expect(
+        caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm),
+      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      (globalThis as any).__weweStartupAudit = priorAudit;
       expect(backup).not.toHaveBeenCalled();
       backup.mockResolvedValueOnce(undefined as any); // Deliberately invalid external backup report.
-      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
-      expect((await batch.status(old.id)).items[0]).toMatchObject({state:'reserved',outcome:null});
-      const result=await caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm);
-      expect(result.batch.items.every(i=>i.state==='cancelled')).toBe(true);
-      expect((await caller.xiaohongshu.refreshBatchStatus(input)).state).toBe('stopped');
-      expect((await caller.xiaohongshu.connectionStatus()).requestAttempts).toMatchObject({profiles:0,lists:0,details:0,media:0});
+      await expect(
+        caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm),
+      ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+      expect((await batch.status(old.id)).items[0]).toMatchObject({
+        state: 'reserved',
+        outcome: null,
+      });
+      const result =
+        await caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm);
+      expect(result.batch.items.every((i) => i.state === 'cancelled')).toBe(
+        true,
+      );
+      expect((await caller.xiaohongshu.refreshBatchStatus(input)).state).toBe(
+        'stopped',
+      );
+      expect(
+        (await caller.xiaohongshu.connectionStatus()).requestAttempts,
+      ).toMatchObject({ profiles: 0, lists: 0, details: 0, media: 0 });
       await held.runDue();
       expect(await readFile(file)).toEqual(originalWx);
-      expect(JSON.parse((await readFile(file)).toString()).items.filter(i=>i.state==='queued')).toHaveLength(8);
-      expect(wxSource).not.toHaveBeenCalled();expect(api).not.toHaveBeenCalled();
+      expect(
+        JSON.parse((await readFile(file)).toString()).items.filter(
+          (i) => i.state === 'queued',
+        ),
+      ).toHaveLength(8);
+      expect(wxSource).not.toHaveBeenCalled();
+      expect(api).not.toHaveBeenCalled();
       expect(await snapshot()).toEqual(historical);
       expect(process.env.WECHAT2RSS_RECOVERY_HOLD).toBe('1');
-    }finally{
-      trpc?.onModuleDestroy();producer.close();process.env=original;
-      (globalThis as any).__weweStartupAudit=priorAudit;
+    } finally {
+      trpc?.onModuleDestroy();
+      producer.close();
+      process.env = original;
+      (globalThis as any).__weweStartupAudit = priorAudit;
     }
   });
   it('audits the exact stopped prepare failure, then the admission-only successor, preserving legacy rows and unknowns', async () => {
     const old = await stoppedUnsentTask();
-    const legacy = await db.$queryRawUnsafe('SELECT * FROM xhs_refresh_jobs ORDER BY owner');
-    batchId = randomUUID(); await batch.create(batchId,[ids[0],ids[2]]); await batch.advance(batchId);
+    const legacy = await db.$queryRawUnsafe(
+      'SELECT * FROM xhs_refresh_jobs ORDER BY owner',
+    );
+    batchId = randomUUID();
+    await batch.create(batchId, [ids[0], ids[2]]);
+    await batch.advance(batchId);
     const next = (await batch.status(batchId)).items[0].operationId!;
-    expect((await service.task({taskId:next})).code).toBe('XHS_SCHEDULE_SOURCE_BLOCKED');
-    const {settle,backup} = localSettler();
-    await expect(settle.prepareLocalCancellation(batchId)).rejects.toBeDefined();
+    expect((await service.task({ taskId: next })).code).toBe(
+      'XHS_SCHEDULE_SOURCE_BLOCKED',
+    );
+    const { settle, backup } = localSettler();
+    await expect(
+      settle.prepareLocalCancellation(batchId),
+    ).rejects.toBeDefined();
     const plan = await settle.prepareLocalCancellation(old.id);
-    const done = await settle.confirmLocalCancellation({batchId:old.id,digest:plan.digest,acknowledgedNotDispatched:true});
-    expect((done.batch.items[0].outcome as any).scheduledProof).toMatchObject({kind:'scheduled-list-prepare-v1',legacyStop:{owner:old.taskId,state:'stopped',outcome:null}});
+    const done = await settle.confirmLocalCancellation({
+      batchId: old.id,
+      digest: plan.digest,
+      acknowledgedNotDispatched: true,
+    });
+    expect((done.batch.items[0].outcome as any).scheduledProof).toMatchObject({
+      kind: 'scheduled-list-prepare-v1',
+      legacyStop: { owner: old.taskId, state: 'stopped', outcome: null },
+    });
     expect(parsePersistentCreatorBatch(done.batch).state).toBe('stopped');
-    const tampered=JSON.parse(JSON.stringify(done.batch));
-    tampered.items[0].outcome.scheduledProof.legacyStop.owner=randomUUID();
-    expect(()=>parsePersistentCreatorBatch(tampered)).toThrow();
-    const repeat = await settle.confirmLocalCancellation({batchId:old.id,digest:plan.digest,acknowledgedNotDispatched:true});
+    const tampered = JSON.parse(JSON.stringify(done.batch));
+    tampered.items[0].outcome.scheduledProof.legacyStop.owner = randomUUID();
+    expect(() => parsePersistentCreatorBatch(tampered)).toThrow();
+    const repeat = await settle.confirmLocalCancellation({
+      batchId: old.id,
+      digest: plan.digest,
+      acknowledgedNotDispatched: true,
+    });
     expect(repeat.alreadyCancelled).toBe(true);
     expect(backup).toHaveBeenCalledTimes(1);
     const newer = await settle.prepareLocalCancellation(batchId);
-    const second = await settle.confirmLocalCancellation({batchId,digest:newer.digest,acknowledgedNotDispatched:true});
-    expect((second.batch.items[0].outcome as any).scheduledProof.kind).toBe('scheduled-list-admission-v1');
-    expect(second.batch.items.every(i=>i.state==='cancelled')).toBe(true);
+    const second = await settle.confirmLocalCancellation({
+      batchId,
+      digest: newer.digest,
+      acknowledgedNotDispatched: true,
+    });
+    expect((second.batch.items[0].outcome as any).scheduledProof.kind).toBe(
+      'scheduled-list-admission-v1',
+    );
+    expect(second.batch.items.every((i) => i.state === 'cancelled')).toBe(true);
     expect(parsePersistentCreatorBatch(second.batch).state).toBe('stopped');
-    expect(await readLegacyXhsSourceFence(db)).toEqual({state:'clear'});
-    expect(await db.$queryRawUnsafe('SELECT * FROM xhs_refresh_jobs ORDER BY owner')).toEqual(legacy);
-    await expect(service.resumeTask({taskId:old.taskId})).rejects.toMatchObject({code:'XHS_TASK_NOT_RESUMABLE'});
-    await expect(service.resumeTask({taskId:next})).rejects.toMatchObject({code:'XHS_TASK_NOT_RESUMABLE'});
+    expect(await readLegacyXhsSourceFence(db)).toEqual({ state: 'clear' });
+    expect(
+      await db.$queryRawUnsafe('SELECT * FROM xhs_refresh_jobs ORDER BY owner'),
+    ).toEqual(legacy);
+    await expect(
+      service.resumeTask({ taskId: old.taskId }),
+    ).rejects.toMatchObject({ code: 'XHS_TASK_NOT_RESUMABLE' });
+    await expect(service.resumeTask({ taskId: next })).rejects.toMatchObject({
+      code: 'XHS_TASK_NOT_RESUMABLE',
+    });
     expect(await snapshot()).toEqual(historical);
     expect(api).not.toHaveBeenCalled();
     // Settlement itself sends nothing. A separately admitted, explicit new
     // two-account batch can then use the normal source lane, without replaying.
     (service as any).prepareScheduledContext.mockRestore();
-    const fresh=randomUUID(); await batch.create(fresh,[ids[0],ids[2]]);
-    for(const _id of [ids[0],ids[2]]) {
-      await batch.advance(fresh); await waitForLane(); await batch.advance(fresh);
+    const fresh = randomUUID();
+    await batch.create(fresh, [ids[0], ids[2]]);
+    for (const _id of [ids[0], ids[2]]) {
+      await batch.advance(fresh);
+      await waitForLane();
+      await batch.advance(fresh);
     }
     expect((await batch.status(fresh)).state).toBe('complete');
     expect(api).toHaveBeenCalledTimes(4);
     expect(await snapshot()).toEqual(historical);
   });
   it('serializes repeated confirmations of a stopped scheduled item without a second backup or source call', async () => {
-    const old=await stoppedUnsentTask(); const {settle,backup}=localSettler();
-    const p=await settle.prepareLocalCancellation(old.id);
-    const results=await Promise.all([1,2].map(()=>settle.confirmLocalCancellation({batchId:old.id,digest:p.digest,acknowledgedNotDispatched:true})));
-    expect(results.filter(r=>r.alreadyCancelled)).toHaveLength(1);
-    expect(backup).toHaveBeenCalledTimes(1); expect(api).not.toHaveBeenCalled();
+    const old = await stoppedUnsentTask();
+    const { settle, backup } = localSettler();
+    const p = await settle.prepareLocalCancellation(old.id);
+    const results = await Promise.all(
+      [1, 2].map(() =>
+        settle.confirmLocalCancellation({
+          batchId: old.id,
+          digest: p.digest,
+          acknowledgedNotDispatched: true,
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.alreadyCancelled)).toHaveLength(1);
+    expect(backup).toHaveBeenCalledTimes(1);
+    expect(api).not.toHaveBeenCalled();
     expect(await snapshot()).toEqual(historical);
   });
-  it.each(['dispatched','phase','missing-proof','budget','stop','binding','running','unknown','active','noncanonical','duplicate-exclusions','invalid-exclusions'])('rejects unproven scheduled cancellation: %s', async bad=>{
-    const old=await stoppedUnsentTask(); const {settle,backup}=localSettler();
-    if(bad==='budget') await db.$executeRawUnsafe("UPDATE xhs_request_budgets SET used=1 WHERE instr(id,?)>0",old.taskId);
-    else if(bad==='stop') await db.$executeRawUnsafe("UPDATE xhs_refresh_jobs SET state='running' WHERE owner=?",old.taskId);
+  it.each([
+    'dispatched',
+    'phase',
+    'missing-proof',
+    'budget',
+    'stop',
+    'binding',
+    'running',
+    'unknown',
+    'active',
+    'noncanonical',
+    'duplicate-exclusions',
+    'invalid-exclusions',
+  ])('rejects unproven scheduled cancellation: %s', async (bad) => {
+    const old = await stoppedUnsentTask();
+    const { settle, backup } = localSettler();
+    if (bad === 'budget')
+      await db.$executeRawUnsafe(
+        'UPDATE xhs_request_budgets SET used=1 WHERE instr(id,?)>0',
+        old.taskId,
+      );
+    else if (bad === 'stop')
+      await db.$executeRawUnsafe(
+        "UPDATE xhs_refresh_jobs SET state='running' WHERE owner=?",
+        old.taskId,
+      );
     else {
-      const [r]=await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?',old.taskId);const d=JSON.parse(r.document);
-      if(bad==='dispatched') d.taskFailure.dispatched=true;
-      if(bad==='phase') d.taskFailure.phase='unknown';
-      if(bad==='missing-proof') delete d.taskFailure;
-      if(bad==='binding') d.schedule.round='batch/'+randomUUID();
-      if(bad==='running') d.state='running';
-      if(bad==='unknown') d.sourceUnknowns=[{phase:'profile',outcome:'unknown'}];
-      if(bad==='active') d.sourceActive={phase:'profile',outcome:'started'};
-        if(bad==='duplicate-exclusions') d.historyExcludedIds=['retained-note-a','retained-note-a'];
-        if(bad==='invalid-exclusions') d.historyExcludedIds=[null];
-      await db.$executeRawUnsafe('UPDATE xhs_subscription_tasks SET document=?,state=? WHERE id=?',JSON.stringify(d)+(bad==='noncanonical'?' ':''),d.state,old.taskId);
+      const [r] = await db.$queryRawUnsafe<any[]>(
+        'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+        old.taskId,
+      );
+      const d = JSON.parse(r.document);
+      if (bad === 'dispatched') d.taskFailure.dispatched = true;
+      if (bad === 'phase') d.taskFailure.phase = 'unknown';
+      if (bad === 'missing-proof') delete d.taskFailure;
+      if (bad === 'binding') d.schedule.round = 'batch/' + randomUUID();
+      if (bad === 'running') d.state = 'running';
+      if (bad === 'unknown')
+        d.sourceUnknowns = [{ phase: 'profile', outcome: 'unknown' }];
+      if (bad === 'active')
+        d.sourceActive = { phase: 'profile', outcome: 'started' };
+      if (bad === 'duplicate-exclusions')
+        d.historyExcludedIds = ['retained-note-a', 'retained-note-a'];
+      if (bad === 'invalid-exclusions') d.historyExcludedIds = [null];
+      await db.$executeRawUnsafe(
+        'UPDATE xhs_subscription_tasks SET document=?,state=? WHERE id=?',
+        JSON.stringify(d) + (bad === 'noncanonical' ? ' ' : ''),
+        d.state,
+        old.taskId,
+      );
     }
     await expect(settle.prepareLocalCancellation(old.id)).rejects.toBeDefined();
-    expect(backup).not.toHaveBeenCalled();expect(api).not.toHaveBeenCalled();
-  });
-  it.each([401,429])('keeps actual source restriction %s during scheduled settlement',async status=>{
-    const old=await stoppedUnsentTask();const {settle}=localSettler();
-    await db.$executeRawUnsafe("UPDATE xhs_source_risk SET state='blocked',code=?,http_status=? WHERE id='source'",status===401?'XHS_SOURCE_AUTHENTICATION_BLOCKED':'XHS_SOURCE_RATE_LIMIT_BLOCKED',status);
-    await expect(settle.prepareLocalCancellation(old.id)).rejects.toBeDefined();
-    expect(await db.$queryRawUnsafe("SELECT state,http_status FROM xhs_source_risk WHERE id='source'")).toEqual([{state:'blocked',http_status:status}]);
+    expect(backup).not.toHaveBeenCalled();
     expect(api).not.toHaveBeenCalled();
   });
-  it('keeps an audited stop closed after policy revocation and rejects changed stop evidence', async()=>{
-    const old=await stoppedUnsentTask();const {settle}=localSettler();const p=await settle.prepareLocalCancellation(old.id);
-    await settle.confirmLocalCancellation({batchId:old.id,digest:p.digest,acknowledgedNotDispatched:true});
-    const [policy]=await db.$queryRawUnsafe<any[]>("SELECT id FROM xhs_unbound_owner_reviews WHERE json_extract(scope_json,'$.reviewKind')='scheduled-recurring-policy-v1'");
-    await db.$executeRawUnsafe('INSERT INTO xhs_unbound_owner_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)','synthetic-revocation','c'.repeat(64),'{}','unknown','[]','[]','{}','[]',JSON.stringify({reviewKind:'scheduled-recurring-revocation-v1',policyId:policy.id}),'b'.repeat(64),BigInt(Date.now()));
-    expect(await readLegacyXhsSourceFence(db)).toEqual({state:'clear'});
-    expect((await settle.prepareLocalCancellation(old.id)).state).toBe('cancelled');
-    await db.$executeRawUnsafe('UPDATE xhs_refresh_jobs SET started_at=started_at+1 WHERE owner=?',old.taskId);
+  it.each([401, 429])(
+    'keeps actual source restriction %s during scheduled settlement',
+    async (status) => {
+      const old = await stoppedUnsentTask();
+      const { settle } = localSettler();
+      await db.$executeRawUnsafe(
+        "UPDATE xhs_source_risk SET state='blocked',code=?,http_status=? WHERE id='source'",
+        status === 401
+          ? 'XHS_SOURCE_AUTHENTICATION_BLOCKED'
+          : 'XHS_SOURCE_RATE_LIMIT_BLOCKED',
+        status,
+      );
+      await expect(
+        settle.prepareLocalCancellation(old.id),
+      ).rejects.toBeDefined();
+      expect(
+        await db.$queryRawUnsafe(
+          "SELECT state,http_status FROM xhs_source_risk WHERE id='source'",
+        ),
+      ).toEqual([{ state: 'blocked', http_status: status }]);
+      expect(api).not.toHaveBeenCalled();
+    },
+  );
+  it('keeps an audited stop closed after policy revocation and rejects changed stop evidence', async () => {
+    const old = await stoppedUnsentTask();
+    const { settle } = localSettler();
+    const p = await settle.prepareLocalCancellation(old.id);
+    await settle.confirmLocalCancellation({
+      batchId: old.id,
+      digest: p.digest,
+      acknowledgedNotDispatched: true,
+    });
+    const [policy] = await db.$queryRawUnsafe<any[]>(
+      "SELECT id FROM xhs_unbound_owner_reviews WHERE json_extract(scope_json,'$.reviewKind')='scheduled-recurring-policy-v1'",
+    );
+    await db.$executeRawUnsafe(
+      'INSERT INTO xhs_unbound_owner_reviews VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+      'synthetic-revocation',
+      'c'.repeat(64),
+      '{}',
+      'unknown',
+      '[]',
+      '[]',
+      '{}',
+      '[]',
+      JSON.stringify({
+        reviewKind: 'scheduled-recurring-revocation-v1',
+        policyId: policy.id,
+      }),
+      'b'.repeat(64),
+      BigInt(Date.now()),
+    );
+    expect(await readLegacyXhsSourceFence(db)).toEqual({ state: 'clear' });
+    expect((await settle.prepareLocalCancellation(old.id)).state).toBe(
+      'cancelled',
+    );
+    await db.$executeRawUnsafe(
+      'UPDATE xhs_refresh_jobs SET started_at=started_at+1 WHERE owner=?',
+      old.taskId,
+    );
     expect((await readLegacyXhsSourceFence(db)).state).toBe('blocked');
     expect(api).not.toHaveBeenCalled();
   });
-  it('rolls back scheduled audit and job protection atomically when batch settlement fails', async()=>{
-    const old=await stoppedUnsentTask();const {settle}=localSettler();
-    await db.$executeRawUnsafe("CREATE TRIGGER settlement_failure BEFORE UPDATE ON xhs_refresh_batches BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END");
-    const p=await settle.prepareLocalCancellation(old.id);
-    await expect(settle.confirmLocalCancellation({batchId:old.id,digest:p.digest,acknowledgedNotDispatched:true})).rejects.toBeDefined();
-    expect((await batch.status(old.id)).items[0]).toMatchObject({state:'reserved',outcome:null});
-    expect((await db.$queryRawUnsafe<any[]>('SELECT state,outcome FROM xhs_refresh_jobs WHERE owner=?',old.taskId))[0]).toEqual({state:'stopped',outcome:null});
-    expect(api).not.toHaveBeenCalled();expect(await snapshot()).toEqual(historical);
+  it('rolls back scheduled audit and job protection atomically when batch settlement fails', async () => {
+    const old = await stoppedUnsentTask();
+    const { settle } = localSettler();
+    await db.$executeRawUnsafe(
+      "CREATE TRIGGER settlement_failure BEFORE UPDATE ON xhs_refresh_batches BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END",
+    );
+    const p = await settle.prepareLocalCancellation(old.id);
+    await expect(
+      settle.confirmLocalCancellation({
+        batchId: old.id,
+        digest: p.digest,
+        acknowledgedNotDispatched: true,
+      }),
+    ).rejects.toBeDefined();
+    expect((await batch.status(old.id)).items[0]).toMatchObject({
+      state: 'reserved',
+      outcome: null,
+    });
+    expect(
+      (
+        await db.$queryRawUnsafe<any[]>(
+          'SELECT state,outcome FROM xhs_refresh_jobs WHERE owner=?',
+          old.taskId,
+        )
+      )[0],
+    ).toEqual({ state: 'stopped', outcome: null });
+    expect(api).not.toHaveBeenCalled();
+    expect(await snapshot()).toEqual(historical);
   });
   it('stops an author-mismatched rebuild before listing and never retries it', async () => {
-    api.mockImplementation(async (r: any) => ({ status: 200, url: r.url,
-      body: { success: true, code: 0, data: { result: { success: true, code: 0 },
-        basic_info: { user_id: 'different-author', nickname: 'synthetic', red_id: 'synthetic' }, interactions: [] } } }));
-    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
+    api.mockImplementation(async (r: any) => ({
+      status: 200,
+      url: r.url,
+      body: {
+        success: true,
+        code: 0,
+        data: {
+          result: { success: true, code: 0 },
+          basic_info: {
+            user_id: 'different-author',
+            nickname: 'synthetic',
+            red_id: 'synthetic',
+          },
+          interactions: [],
+        },
+      },
+    }));
+    await batch.advance(batchId);
+    await waitForLane();
+    await batch.advance(batchId);
     expect((await batch.status(batchId)).state).toBe('paused');
     await batch.advance(batchId);
     await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
     expect(api).toHaveBeenCalledTimes(1);
-    expect(new URL(api.mock.calls[0][0].url).pathname).toMatch(/\/user\/otherinfo$/);
+    expect(new URL(api.mock.calls[0][0].url).pathname).toMatch(
+      /\/user\/otherinfo$/,
+    );
     expect(await db.xhsNote.count()).toBe(0);
     expect(await snapshot()).toEqual(historical);
   });
   it('preserves a newly unknown profile request and never retries its bound task', async () => {
     api.mockRejectedValueOnce(Error('synthetic interrupted profile transport'));
-    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
+    await batch.advance(batchId);
+    await waitForLane();
+    await batch.advance(batchId);
     expect((await batch.status(batchId)).state).toBe('paused');
-    const [saved] = await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?', operation());
-    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({ used: 1, state: 'started' });
+    const [saved] = await db.$queryRawUnsafe<any[]>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+      operation(),
+    );
+    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({
+      used: 1,
+      state: 'started',
+    });
     const unknown = await db.$queryRawUnsafe<any[]>(
-      'SELECT phase,outcome FROM xhs_unbound_owner_requests WHERE task_id=?', operation(),
+      'SELECT phase,outcome FROM xhs_unbound_owner_requests WHERE task_id=?',
+      operation(),
     );
     expect(unknown).toEqual([{ phase: 'profile', outcome: 'unknown' }]);
     await batch.advance(batchId);
@@ -523,10 +862,20 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(await snapshot()).toEqual(historical);
   });
   it('keeps a failed profile-confirmation transaction started and never repeats its source request', async () => {
-    await db.$executeRawUnsafe("CREATE TRIGGER context_confirmation_failure BEFORE UPDATE ON xhs_subscription_tasks WHEN json_extract(NEW.document,'$.scheduledContext.state')='confirmed' BEGIN SELECT RAISE(ABORT,'synthetic confirmation failure'); END");
-    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
-    const [saved] = await db.$queryRawUnsafe<any[]>('SELECT document FROM xhs_subscription_tasks WHERE id=?', operation());
-    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({ used: 1, state: 'started' });
+    await db.$executeRawUnsafe(
+      "CREATE TRIGGER context_confirmation_failure BEFORE UPDATE ON xhs_subscription_tasks WHEN json_extract(NEW.document,'$.scheduledContext.state')='confirmed' BEGIN SELECT RAISE(ABORT,'synthetic confirmation failure'); END",
+    );
+    await batch.advance(batchId);
+    await waitForLane();
+    await batch.advance(batchId);
+    const [saved] = await db.$queryRawUnsafe<any[]>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+      operation(),
+    );
+    expect(JSON.parse(saved.document).scheduledContext).toMatchObject({
+      used: 1,
+      state: 'started',
+    });
     expect((await batch.status(batchId)).state).toBe('paused');
     await db.$executeRawUnsafe('DROP TRIGGER context_confirmation_failure');
     await batch.advance(batchId);
@@ -571,26 +920,63 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
   it('refuses detail dispatch even under the manual batch review context', async () => {
     holdLane();
     await batch.advance(batchId);
-    const [review] = await db.$queryRawUnsafe<any[]>("SELECT id,scope_json FROM xhs_unbound_owner_reviews WHERE json_extract(scope_json,'$.taskBinding.taskId')=?", operation());
+    const [review] = await db.$queryRawUnsafe<any[]>(
+      "SELECT id,scope_json FROM xhs_unbound_owner_reviews WHERE json_extract(scope_json,'$.taskBinding.taskId')=?",
+      operation(),
+    );
     const scope = JSON.parse(review.scope_json);
-    const context = { reviewId: review.id, creatorId: ids[0], jobId: operation(), authorId: authors[ids[0]], sessionBinding: runtime.fullScopeSessionBinding(), budgetId: scope.budgetId };
-    const request = { operationId: randomUUID(), creatorId: ids[0], taskId: operation(), phase: 'detail' as const, target: 'old-note' };
+    const context = {
+      reviewId: review.id,
+      creatorId: ids[0],
+      jobId: operation(),
+      authorId: authors[ids[0]],
+      sessionBinding: runtime.fullScopeSessionBinding(),
+      budgetId: scope.budgetId,
+    };
+    const request = {
+      operationId: randomUUID(),
+      creatorId: ids[0],
+      taskId: operation(),
+      phase: 'detail' as const,
+      target: 'old-note',
+    };
     await fullHistoryContext.run(context, async () => {
-      await expect(db.$transaction(tx => assertScheduledRoundAdmission(tx, review.id, review, request))).rejects.toThrow('SCHEDULED_PHASE_BINDING_CHANGED');
-      await expect(db.$transaction(tx => assertScheduledDispatch(tx, review.id, request))).rejects.toThrow('SCHEDULED_PHASE_BINDING_CHANGED');
+      await expect(
+        db.$transaction((tx) =>
+          assertScheduledRoundAdmission(tx, review.id, review, request),
+        ),
+      ).rejects.toThrow('SCHEDULED_PHASE_BINDING_CHANGED');
+      await expect(
+        db.$transaction((tx) =>
+          assertScheduledDispatch(tx, review.id, request),
+        ),
+      ).rejects.toThrow('SCHEDULED_PHASE_BINDING_CHANGED');
     });
     expect(api).not.toHaveBeenCalled();
   });
   it('rolls back admission when stop wins after review preparation', async () => {
     const prepare = runtime.withScheduledReview.bind(runtime);
-    jest.spyOn(runtime, 'withScheduledReview').mockImplementation((input, work) => prepare(input, async () => {
-      await batch.stop(batchId);
-      return work();
-    }));
+    jest
+      .spyOn(runtime, 'withScheduledReview')
+      .mockImplementation((input, work) =>
+        prepare(input, async () => {
+          await batch.stop(batchId);
+          return work();
+        }),
+      );
     await batch.advance(batchId);
     expect((await batch.status(batchId)).state).toBe('stopped');
-    expect((await batch.status(batchId)).items.every(x => x.state === 'cancelled' && !x.operationId)).toBe(true);
-    expect(await db.$queryRawUnsafe('SELECT id FROM xhs_subscription_tasks WHERE id=?', operation())).toEqual([]);
+    expect(
+      (await batch.status(batchId)).items.every(
+        (x) => x.state === 'cancelled' && !x.operationId,
+      ),
+    ).toBe(true);
+    expect(
+      await db.$queryRawUnsafe(
+        'SELECT id FROM xhs_subscription_tasks WHERE id=?',
+        operation(),
+      ),
+    ).toEqual([]);
     expect(api).not.toHaveBeenCalled();
   });
   it('rolls back a task insert failure and permits one later local retry', async () => {
@@ -618,22 +1004,49 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(await snapshot()).toEqual(historical);
   });
   it('rolls back reservation and blocked task if pausing the batch fails', async () => {
-    await db.$executeRawUnsafe("UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_RATE_LIMIT_BLOCKED',http_status=429,endpoint='list' WHERE id='source'");
-    await db.$executeRawUnsafe("CREATE TRIGGER synthetic_pause_failure BEFORE UPDATE ON xhs_refresh_batches WHEN NEW.state='paused' BEGIN SELECT RAISE(ABORT,'synthetic interruption'); END");
-    await expect(batch.advance(batchId)).rejects.toMatchObject({ code: 'XHS_LOCAL_OPERATION_FAILED' });
-    expect((await batch.status(batchId)).items[0]).toMatchObject({ state: 'queued', operationId: null });
-    expect(await db.$queryRawUnsafe('SELECT id FROM xhs_subscription_tasks WHERE id=?', operation())).toEqual([]);
+    await db.$executeRawUnsafe(
+      "UPDATE xhs_source_risk SET state='blocked',code='XHS_SOURCE_RATE_LIMIT_BLOCKED',http_status=429,endpoint='list' WHERE id='source'",
+    );
+    await db.$executeRawUnsafe(
+      "CREATE TRIGGER synthetic_pause_failure BEFORE UPDATE ON xhs_refresh_batches WHEN NEW.state='paused' BEGIN SELECT RAISE(ABORT,'synthetic interruption'); END",
+    );
+    await expect(batch.advance(batchId)).rejects.toMatchObject({
+      code: 'XHS_LOCAL_OPERATION_FAILED',
+    });
+    expect((await batch.status(batchId)).items[0]).toMatchObject({
+      state: 'queued',
+      operationId: null,
+    });
+    expect(
+      await db.$queryRawUnsafe(
+        'SELECT id FROM xhs_subscription_tasks WHERE id=?',
+        operation(),
+      ),
+    ).toEqual([]);
     expect(api).not.toHaveBeenCalled();
   });
-  it.each([401, 429])('stops after a real runtime restriction response (%s)', async status => {
-    api.mockImplementation(async (request: any) => ({ status, url: request.url, body: { success: false } }));
-    await batch.advance(batchId); await waitForLane(); await batch.advance(batchId);
-    expect((await batch.status(batchId)).state).toBe('paused');
-    await batch.advance(batchId);
-    expect(api).toHaveBeenCalledTimes(1);
-    expect(await db.$queryRawUnsafe("SELECT state FROM xhs_source_risk WHERE id='source'")).toEqual([{ state: 'blocked' }]);
-    expect(await snapshot()).toEqual(historical);
-  });
+  it.each([401, 429])(
+    'stops after a real runtime restriction response (%s)',
+    async (status) => {
+      api.mockImplementation(async (request: any) => ({
+        status,
+        url: request.url,
+        body: { success: false },
+      }));
+      await batch.advance(batchId);
+      await waitForLane();
+      await batch.advance(batchId);
+      expect((await batch.status(batchId)).state).toBe('paused');
+      await batch.advance(batchId);
+      expect(api).toHaveBeenCalledTimes(1);
+      expect(
+        await db.$queryRawUnsafe(
+          "SELECT state FROM xhs_source_risk WHERE id='source'",
+        ),
+      ).toEqual([{ state: 'blocked' }]);
+      expect(await snapshot()).toEqual(historical);
+    },
+  );
   it('rolls back conflicting task binding without reserving or replacing it', async () => {
     const taskId = operation(),
       doc = JSON.stringify({ taskId, creatorId: ids[1], state: 'blocked' });
@@ -664,7 +1077,7 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       service.startBatchItem(input),
       service.startBatchItem(input),
     ]);
-    expect(results.every(x => x.status === 'fulfilled')).toBe(true);
+    expect(results.every((x) => x.status === 'fulfilled')).toBe(true);
     expect(
       await db.$queryRawUnsafe(
         'SELECT id FROM xhs_subscription_tasks WHERE id=?',
@@ -685,9 +1098,16 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
   });
   it('shares one durable candidate across concurrent batch advances', async () => {
     holdLane();
-    const advanced = await Promise.all([batch.advance(batchId), batch.advance(batchId)]);
-    expect(advanced.every(x => x.items[0].operationId === operation())).toBe(true);
-    release!(); release = undefined; await waitForLane();
+    const advanced = await Promise.all([
+      batch.advance(batchId),
+      batch.advance(batchId),
+    ]);
+    expect(advanced.every((x) => x.items[0].operationId === operation())).toBe(
+      true,
+    );
+    release!();
+    release = undefined;
+    await waitForLane();
     expect(api).toHaveBeenCalledTimes(2);
   });
   it.each([

@@ -124,7 +124,10 @@ function copyRuntimeClosure(sourceRoot, release, { legacy = false } = {}) {
       `server/scripts/${name}`,
     ]),
     ...RUNTIME_WRAPPERS.map((name) => [`scripts/local-release/${name}`, name]),
-    ['scripts/local-release/wechat-gate-checkpoint.cjs', 'server/wechat-gate-checkpoint.cjs'],
+    [
+      'scripts/local-release/wechat-gate-checkpoint.cjs',
+      'server/wechat-gate-checkpoint.cjs',
+    ],
     ...updaterEntries,
   ];
   const copied = {};
@@ -269,6 +272,7 @@ function verifyBuildEnvironment(sourceRoot, commit, repository) {
 }
 
 function build(options = {}) {
+  require('./release-scope.cjs').assertWritableSession(['build']);
   if (options.plan && !options.buildOnly)
     throw new Error('--plan requires --build-only');
   if (!options.buildOnly && options.outputRoot)
@@ -482,13 +486,34 @@ function build(options = {}) {
     console.log(JSON.stringify(plan));
     return plan;
   }
-  const reusable = null;
+  const reusable = buildBudget.findReusable(releaseRoot, {
+    sourceHash,
+    sourceCommit: historical ? options.sourceCommit : currentCommit,
+    nodeVersion: process.version,
+    runtimeSha256: fileHash(process.execPath),
+    schemaCompatibility: legacy ? 'legacy-additive' : 'current',
+    executionLayout: options.compact ? 'compact-cjs-v1' : undefined,
+  });
   const requestedBytes = reusable ? 1 : buildBudget.estimate(sourceServer);
-  return (() => {
+  const shared = require('./release-scope.cjs').open(
+    {
+      kind: 'build',
+      root: releaseRoot,
+      reserveBytes: requestedBytes,
+      runtimeCopies: reusable ? 0 : 1,
+      buildOnly: options.buildOnly === true,
+      sourceCommit: historical ? options.sourceCommit : currentCommit,
+      sourceHash,
+    },
+    options.scopeOptions,
+  );
+  return require('./lib.cjs').hostEffects.context.run(shared, () => {
     let reservation;
     let failure;
     try {
       if (reusable) {
+        if (shared.policy.preservingUpdate)
+          throw new Error('RELEASE_PRESERVING_REUSE_FORBIDDEN');
         console.log(
           JSON.stringify({
             release: reusable.directory,
@@ -502,11 +527,9 @@ function build(options = {}) {
       }
       const id = `${new Date().toISOString().replace(/[:.]/g, '-')}-${sourceHash.slice(0, 12)}`;
       const release = path.join(releaseRoot, id);
-      reservation = {
-        create: (directory) => fs.mkdirSync(directory),
-        check: () => {},
-        finish: () => {},
-      };
+      reservation = buildBudget.begin(path.dirname(release), requestedBytes, {
+        shared,
+      });
       reservation.create(release);
       if (options.buildOnly)
         writeJson(path.join(release, 'package.json'), {
@@ -575,7 +598,10 @@ function build(options = {}) {
               ...env,
               PRISMA_QUERY_ENGINE_LIBRARY: engine,
               ...(process.env.WEWE_LOCAL_SCHEMA_ENGINE
-                ? { PRISMA_SCHEMA_ENGINE_BINARY: process.env.WEWE_LOCAL_SCHEMA_ENGINE }
+                ? {
+                    PRISMA_SCHEMA_ENGINE_BINARY:
+                      process.env.WEWE_LOCAL_SCHEMA_ENGINE,
+                  }
                 : {}),
             },
           },
@@ -855,6 +881,11 @@ function build(options = {}) {
       } catch (error) {
         cleanupErrors.push(error);
       }
+      try {
+        shared.close(failure || cleanupErrors[0]);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
       // Keep the first compiler/copy failure visible even if a later scope
       // deadline or preservation check also holds cleanup for review.
       if (cleanupErrors.length)
@@ -864,7 +895,7 @@ function build(options = {}) {
           { cause: failure || cleanupErrors[0] },
         );
     }
-  })();
+  });
 }
 
 if (require.main === module) {

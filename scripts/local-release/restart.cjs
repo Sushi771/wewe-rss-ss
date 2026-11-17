@@ -209,9 +209,21 @@ async function controlledRestartInner(options) {
     };
   }
   if (options.wechatRecordDir !== undefined) {
-    if (options.legacyJobId !== undefined || options.legacyMaintenanceCheckpoint !== undefined || options.mode !== 'restart')
+    if (
+      options.legacyJobId !== undefined ||
+      options.legacyMaintenanceCheckpoint !== undefined ||
+      options.mode !== 'restart'
+    )
       throw Error('WECHAT_MAINTENANCE_UNSUPPORTED');
-    options = { ...options, legacyMaintenanceCheckpoint: require('./wechat-maintenance-loader.cjs').loadWechatMaintenance(release, manifest, options.wechatRecordDir) };
+    options = {
+      ...options,
+      legacyMaintenanceCheckpoint:
+        require('./wechat-maintenance-loader.cjs').loadWechatMaintenance(
+          release,
+          manifest,
+          options.wechatRecordDir,
+        ),
+    };
   }
   let schemaProof;
   const preserving = require('./release-scope.cjs').session()?.policy

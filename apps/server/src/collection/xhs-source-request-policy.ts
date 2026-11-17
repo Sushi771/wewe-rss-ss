@@ -558,10 +558,18 @@ export function bindXhsSourceTotalBudget(
             await ready?.();
             if (
               await write(db, async (tx) =>
-                reserveTotal(tx, now, group?.marker, [
-                  ...(group ? await retainedGenerationMarkers(tx, group) : []),
-                  ...(scoped ? await verifiedUnknownMarkers(tx, scoped) : []),
-                ], scoped),
+                reserveTotal(
+                  tx,
+                  now,
+                  group?.marker,
+                  [
+                    ...(group
+                      ? await retainedGenerationMarkers(tx, group)
+                      : []),
+                    ...(scoped ? await verifiedUnknownMarkers(tx, scoped) : []),
+                  ],
+                  scoped,
+                ),
               )
             ) {
               return true;

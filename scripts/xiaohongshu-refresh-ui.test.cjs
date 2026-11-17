@@ -13,18 +13,58 @@ const moduleObject = { exports: {} };
 new Function('exports', 'module', output)(moduleObject.exports, moduleObject);
 const { refreshCreatorBatch } = moduleObject.exports;
 test('an archived batch clears its matching client identity without advancing or creating work', async () => {
-  const { parsePersistentCreatorBatch, inspectPersistentBatch } = moduleObject.exports;
+  const { parsePersistentCreatorBatch, inspectPersistentBatch } =
+    moduleObject.exports;
   const id = '11111111-1111-4111-8111-111111111111';
-  let saved = id, activeReads = 0;
-  const storage = { getItem: () => saved, removeItem: () => { saved = null; }, setItem: () => assert.fail('unexpected write') };
-  const parsed = parsePersistentCreatorBatch({ id, state: 'running', archived: true, items: [] });
-  assert.equal(await inspectPersistentBatch(storage, async () => parsed, async () => { activeReads++; return null; }), null);
+  let saved = id,
+    activeReads = 0;
+  const storage = {
+    getItem: () => saved,
+    removeItem: () => {
+      saved = null;
+    },
+    setItem: () => assert.fail('unexpected write'),
+  };
+  const parsed = parsePersistentCreatorBatch({
+    id,
+    state: 'running',
+    archived: true,
+    items: [],
+  });
+  assert.equal(
+    await inspectPersistentBatch(
+      storage,
+      async () => parsed,
+      async () => {
+        activeReads++;
+        return null;
+      },
+    ),
+    null,
+  );
   assert.equal(saved, null);
   assert.equal(activeReads, 0);
-  assert.throws(() => parsePersistentCreatorBatch({ id, state: 'running', archived: 'true', items: [] }));
-  const mismatch = parsePersistentCreatorBatch({ ...parsed, id: '22222222-2222-4222-8222-222222222222' });
+  assert.throws(() =>
+    parsePersistentCreatorBatch({
+      id,
+      state: 'running',
+      archived: 'true',
+      items: [],
+    }),
+  );
+  const mismatch = parsePersistentCreatorBatch({
+    ...parsed,
+    id: '22222222-2222-4222-8222-222222222222',
+  });
   saved = id;
-  await assert.rejects(inspectPersistentBatch(storage, async () => mismatch, async () => null), /identity mismatch/);
+  await assert.rejects(
+    inspectPersistentBatch(
+      storage,
+      async () => mismatch,
+      async () => null,
+    ),
+    /identity mismatch/,
+  );
   assert.equal(saved, id);
 });
 test('persistent batch accepts unreserved null IDs and rejects missing reserved IDs', () => {

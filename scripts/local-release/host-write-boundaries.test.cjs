@@ -53,6 +53,8 @@ const catalog = {
     'switch-recovery',
   ],
   readonly: [
+    // Bounded GETs to loopback health endpoints, never collection routes.
+    'held-management-readiness',
     'normal-start-claim-rebind',
     'scope-inventory',
     'verify-source',
@@ -66,6 +68,14 @@ const catalog = {
   ],
   // Identity-bound native writer leases, locks and durable recovery receipts.
   writerCoordination: [
+    // Exact profile pins and opaque lease ownership guard every native effect.
+    // These are reviewed maintenance owners, not general write exemptions.
+    'updater/fixed-cold-start',
+    'updater/fixed-driver-profile',
+    'updater/fixed-maintenance-driver',
+    'updater/fixed-reuse-owner',
+    'updater/prepare-maintenance-binding',
+    'wechat-gate-checkpoint',
     'updater/installed-host',
     'updater/installed-lifecycle',
     'updater/installed-native-primitives',
@@ -81,6 +91,10 @@ const catalog = {
   registry: ['release-scope'],
   // Read native identities, then delegate startup and update effects to reviewed hosts.
   nativeControl: [
+    // Loader pins the entire invocation closure; toolkit verifies native bytes.
+    'updater/fixed-code-loader',
+    'updater/pinned-native-toolkit',
+    'wechat-maintenance-loader',
     'installed-startup-gate',
     'updater/update-entry',
     'updater/maintenance-entry',
@@ -88,6 +102,7 @@ const catalog = {
   // Reviewed TEMP-only native regression tools, never production entrypoints.
   // Keep exact names: a new fixture still requires explicit effect review.
   syntheticOnly: [
+    'updater/fixed-maintenance-fixture',
     'local-cache-full-bootstrap.fixture',
     'local-cache-preserving-scope.fixture',
     'local-cache-preserving-supervisor',

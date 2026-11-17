@@ -1064,13 +1064,23 @@ describe('production XHS router/service → additive SQLite and original export 
     // Exercise old durable receipts without routing new production batches to
     // the legacy source. This adapter is confined to the compatibility fixture.
     const legacyFixture = {
-      startBatchItem: async ({ batchId, position, creatorId: target }: { batchId: string; position: number; creatorId: string }) => {
+      startBatchItem: async ({
+        batchId,
+        position,
+        creatorId: target,
+      }: {
+        batchId: string;
+        position: number;
+        creatorId: string;
+      }) => {
         const taskId = randomUUID();
         await prisma.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${taskId} WHERE batch_id=${batchId} AND position=${position} AND state='queued'`;
         await service.legacyRefresh(target, taskId);
         return { taskId };
       },
-      task: async () => { throw new Error('legacy receipt has no subscription task'); },
+      task: async () => {
+        throw new Error('legacy receipt has no subscription task');
+      },
       cancelTask: async () => {},
     } as unknown as import('./xhs-subscription.service').XhsSubscriptionService;
     const batch = new XiaohongshuBatches(prisma, legacyFixture);

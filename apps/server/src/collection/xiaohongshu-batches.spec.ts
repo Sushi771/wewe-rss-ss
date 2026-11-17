@@ -58,19 +58,21 @@ describe('XHS durable batches on an isolated SQLite database', () => {
           receipt.get(op) || { state: 'missing' },
       ),
     };
-    source.startBatchItem = jest.fn(async ({ batchId, position, creatorId }: any) => {
-      const op = randomUUID();
-      await source.legacyRefresh(creatorId, op);
-      const result = receipt.get(op);
-      await db.$transaction(async (tx) => {
-        await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${op} WHERE batch_id=${batchId} AND position=${position} AND state='queued'`;
-        if (result?.state === 'complete') {
-          const rawOutcome = JSON.stringify(result.outcome);
-          await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES(${creatorId},1,${op},1,'complete',${rawOutcome})`;
-        }
-      });
-      return { taskId: op };
-    });
+    source.startBatchItem = jest.fn(
+      async ({ batchId, position, creatorId }: any) => {
+        const op = randomUUID();
+        await source.legacyRefresh(creatorId, op);
+        const result = receipt.get(op);
+        await db.$transaction(async (tx) => {
+          await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='reserved',operation_id=${op} WHERE batch_id=${batchId} AND position=${position} AND state='queued'`;
+          if (result?.state === 'complete') {
+            const rawOutcome = JSON.stringify(result.outcome);
+            await tx.$executeRaw`INSERT INTO xhs_refresh_jobs(creator_id,generation,owner,started_at,state,outcome) VALUES(${creatorId},1,${op},1,'complete',${rawOutcome})`;
+          }
+        });
+        return { taskId: op };
+      },
+    );
     source.cancelTask = jest.fn();
     batches = new XiaohongshuBatches(db, source);
   });

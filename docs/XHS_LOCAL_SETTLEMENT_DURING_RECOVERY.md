@@ -4,13 +4,13 @@
 
 恢复期间仅允许下列本机同源请求进入原处理链路：
 
-| 请求 | 方法 | 目的 |
-|---|---|---|
-| `/startup-status` | GET | 读取启动/写入门禁状态 |
-| `xiaohongshu.prepareRefreshBatchLocalCancellation` | GET | 原正式未发送结算预览 |
-| `xiaohongshu.confirmRefreshBatchLocalCancellation` | POST | 原正式本地结算 |
-| `xiaohongshu.refreshBatchStatus` | GET | 读取指定批次持久终态 |
-| `xiaohongshu.connectionStatus` | GET | 读取本地来源保护及请求计数 |
+| 请求                                               | 方法 | 目的                       |
+| -------------------------------------------------- | ---- | -------------------------- |
+| `/startup-status`                                  | GET  | 读取启动/写入门禁状态      |
+| `xiaohongshu.prepareRefreshBatchLocalCancellation` | GET  | 原正式未发送结算预览       |
+| `xiaohongshu.confirmRefreshBatchLocalCancellation` | POST | 原正式本地结算             |
+| `xiaohongshu.refreshBatchStatus`                   | GET  | 读取指定批次持久终态       |
+| `xiaohongshu.connectionStatus`                     | GET  | 读取本地来源保护及请求计数 |
 
 tRPC 路径固定为 `/trpc/` 加上表中过程名。HTTP和tRPC两层使用同一份精确过程/类型白名单；混合批处理路径、编码分隔符、其他路径、方法、外部连接及跨域请求继续拒绝。GET可按原本机状态查询约定省略Origin，POST必须有明确同源Origin。鉴权失败仍拒绝，原本机访问、参数校验、启动写入门禁及受保护备份事务没有旁路。
 
