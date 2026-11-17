@@ -1731,6 +1731,29 @@ test('build retirement: verified archive stays charged, exact source advances, r
     );
     lease.close();
   }));
+test('build retirement: replay obeys the real observer config and claim envelope contract', () =>
+  retirementFixture((x) => {
+    const query = () => {
+      const state = JSON.parse(fs.readFileSync(x.ledger)).payload;
+      const lock = JSON.parse(
+        fs.readFileSync(path.join(x.f.base, x.f.policy.scopeId + '.lock')),
+      );
+      assert.equal(
+        state.configSha,
+        lock.configSha,
+        'native observer requires current policy',
+      );
+      if (state.claim)
+        assert(
+          Array.isArray(state.claim.outputs),
+          'native observer requires standard output list',
+        );
+      return x.f.facts;
+    };
+    const r = x.retire({ query });
+    assert(r.retired);
+    assert(x.retire({ query }).alreadyRetired);
+  }));
 
 test(
   'build retirement: internal Windows dependency junctions are actually restored without copying targets twice',

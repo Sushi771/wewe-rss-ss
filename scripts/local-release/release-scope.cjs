@@ -3229,7 +3229,42 @@ function recoverFailedBuild(options) {
 }
 // A separately reviewed maintenance operation. It never grants an install lease.
 function retireBuildOutput(options) {
-  const policy = read(options.configPath);
+  let policy = read(options.configPath);
+  if (fileHash(options.configPath) !== options.configSha256)
+    throw Error('RELEASE_SCOPE_POLICY_CHANGED');
+  const ledger = path.join(
+    policy.registryDirectory,
+    policy.scopeId + '.state.json',
+  );
+  const prior = state(ledger);
+  if (
+    !prior.claim &&
+    prior.buildRetirement?.approvalSha256 === options.buildRetirement?.sha256
+  ) {
+    const expected =
+      ledger + '.retirement-' + options.buildRetirement.sha256 + '.json.result';
+    if (prior.buildRetirement.result.path !== expected)
+      throw Error('RELEASE_SCOPE_RETIREMENT_RESULT_CHANGED');
+    const result = JSON.parse(
+      recoveryBytes(prior.buildRetirement.result, 1024 * 1024),
+    );
+    if (
+      result.nextPolicy.path !==
+        path.join(
+          policy.registryDirectory,
+          'retirement-policy-' + options.buildRetirement.sha256 + '.json',
+        ) ||
+      result.nextPolicy.sha256 !== prior.configSha
+    )
+      throw Error('RELEASE_SCOPE_RETIREMENT_RESULT_CHANGED');
+    recoveryBytes(result.nextPolicy, 1024 * 1024);
+    options = {
+      ...options,
+      configPath: result.nextPolicy.path,
+      configSha256: result.nextPolicy.sha256,
+    };
+    policy = read(options.configPath);
+  }
   return open(
     {
       kind: 'build',

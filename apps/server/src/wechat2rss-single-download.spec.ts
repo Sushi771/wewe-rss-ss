@@ -38,6 +38,17 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
   let listed: unknown;
   let feed: unknown;
   let calls: string[];
+  async function expectNoSavedContent() {
+    expect(
+      (await readdir(folder)).filter((name) => name !== 'fixture.db'),
+    ).toEqual(['.collection-channel-control']);
+    expect(await readdir(join(folder, '.collection-channel-control'))).toEqual([
+      'wechat',
+    ]);
+    expect(
+      await readdir(join(folder, '.collection-channel-control', 'wechat')),
+    ).toEqual([]);
+  }
   beforeEach(async () => {
     folder = await mkdtemp(join(tmpdir(), 'wewe-single-w2r-'));
     await writeFile(join(folder, 'fixture.db'), '');
@@ -302,9 +313,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       expect(calls).toEqual(['/feed/all.json']);
       expect(images.fetchAllowedImage).not.toHaveBeenCalled();
       expect(axios.get).not.toHaveBeenCalled();
-      expect(
-        (await readdir(folder)).filter((name) => name !== 'fixture.db'),
-      ).toEqual([]);
+      await expectNoSavedContent();
     },
   );
 
@@ -389,9 +398,7 @@ describe('Wechat2RSS-only single download; synthetic private cache and media', (
       });
       expect(images.fetchAllowedImage).not.toHaveBeenCalled();
       expect(axios.get).not.toHaveBeenCalled();
-      expect(
-        (await readdir(folder)).filter((name) => name !== 'fixture.db'),
-      ).toEqual([]);
+      await expectNoSavedContent();
       expect(calls).toEqual(['/list', `/feed/${number}.json`]);
     },
   );

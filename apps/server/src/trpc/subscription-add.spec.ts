@@ -847,6 +847,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
     let txCalls = 0;
     const db = {
       feed: prisma.feed,
+      $queryRawUnsafe: prisma.$queryRawUnsafe.bind(prisma),
       article: prisma.article,
       account: prisma.account,
       $transaction: async (fn: any) => {
@@ -1234,6 +1235,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
   it('restores the private binding and removes only the staged row when actual activation fails', async () => {
     const db = {
       account: prisma.account,
+      $queryRawUnsafe: prisma.$queryRawUnsafe.bind(prisma),
       feed: prisma.feed,
       article: prisma.article,
       $transaction: (action: any) =>
@@ -1295,6 +1297,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
   it('retains the inactive recovery row when published binding compensation also fails', async () => {
     const db = {
       account: prisma.account,
+      $queryRawUnsafe: prisma.$queryRawUnsafe.bind(prisma),
       feed: prisma.feed,
       article: prisma.article,
       $transaction: (action: any) =>
@@ -1494,6 +1497,7 @@ describe('new-publisher discovery through original add entry (offline SQLite)', 
     const f = fixture();
     const db = {
       feed: prisma.feed,
+      $queryRawUnsafe: prisma.$queryRawUnsafe.bind(prisma),
       article: prisma.article,
       account: prisma.account,
       $transaction: jest

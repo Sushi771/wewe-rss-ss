@@ -53,6 +53,7 @@ describe('scheduled basic detail transaction (synthetic SQLite)', () => {
   function wrap(q: any) {
     return {
       $queryRaw: q.$queryRaw.bind(q),
+      $queryRawUnsafe: q.$queryRawUnsafe.bind(q),
       $executeRaw: q.$executeRaw.bind(q),
       xhsCreator: {
         findUnique: async () => ({

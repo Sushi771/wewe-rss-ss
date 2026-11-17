@@ -1,12 +1,19 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname, basename } from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { Wechat2RssSourceGate } from '../wechat2rss-source-gate';
 import { Wechat2RssProvider } from './wechat2rss';
 import { fetchAllowedImage } from '../image-fetch';
 import { archiveProviderImages } from '../archive-provider-images';
 import { ProviderPage } from '../subscription-provider';
+const clients = new Set<PrismaClient>();
+const fixtureRoots = new Set<string>();
+function openClient(url: string) {
+  const db = new PrismaClient({ datasources: { db: { url } } });
+  clients.add(db);
+  return db;
+}
 
 function operation<T>(provider: Wechat2RssProvider, body: () => Promise<T>) {
   return (
@@ -17,12 +24,11 @@ function operation<T>(provider: Wechat2RssProvider, body: () => Promise<T>) {
 }
 
 async function fixture() {
-  const file = join(
-    mkdtempSync(join(tmpdir(), 'wewe-source-gate-')),
-    'fixture.sqlite',
-  );
+  const root = mkdtempSync(join(tmpdir(), 'wewe-source-gate-'));
+  fixtureRoots.add(root);
+  const file = join(root, 'fixture.sqlite');
   const url = `file:${file.replace(/\\/g, '/')}`;
-  const db = new PrismaClient({ datasources: { db: { url } } });
+  const db = openClient(url);
   const sql = readFileSync(
     resolve(
       process.cwd(),
@@ -35,11 +41,31 @@ async function fixture() {
     .map((s) => s.trim())
     .filter(Boolean))
     await db.$executeRawUnsafe(statement);
+  process.env.DATABASE_URL = url;
   return { db, url };
 }
 
 describe('persistent source gate using synthetic responses', () => {
-  afterEach(() => jest.restoreAllMocks());
+  let previousDatabaseUrl: string | undefined;
+  beforeEach(() => {
+    previousDatabaseUrl = process.env.DATABASE_URL;
+  });
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    try {
+      await Promise.all([...clients].map((db) => db.$disconnect()));
+      clients.clear();
+      for (const root of fixtureRoots) {
+        expect(dirname(root)).toBe(tmpdir());
+        expect(basename(root)).toMatch(/^wewe-source-gate-/);
+        rmSync(root, { recursive: true, force: true });
+      }
+      fixtureRoots.clear();
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+  });
 
   it('clears after a validated response, persists restriction and blocks a restarted provider', async () => {
     const { db, url } = await fixture();
@@ -62,7 +88,7 @@ describe('persistent source gate using synthetic responses', () => {
       'WECHAT2RSS_SOURCE_RESTRICTED',
     );
     await db.$disconnect();
-    const reopened = new PrismaClient({ datasources: { db: { url } } });
+    const reopened = openClient(url);
     const restarted = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'synthetic',
@@ -91,7 +117,7 @@ describe('persistent source gate using synthetic responses', () => {
       'WECHAT2RSS_LIST_INVALID',
     );
     await db.$disconnect();
-    const reopened = new PrismaClient({ datasources: { db: { url } } });
+    const reopened = openClient(url);
     const restarted = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'synthetic',
@@ -130,7 +156,7 @@ describe('persistent source gate using synthetic responses', () => {
     ).rejects.toThrow('WECHAT2RSS_SOURCE_RESTRICTED');
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await db.$disconnect();
-    const reopened = new PrismaClient({ datasources: { db: { url } } });
+    const reopened = openClient(url);
     const rows = await reopened.$queryRaw<
       Array<{ state: string; status: number }>
     >`SELECT state, status FROM Wechat2RssSourceGate WHERE id = 1`;
@@ -215,7 +241,7 @@ describe('persistent source gate using synthetic responses', () => {
       fetchAllowedImage('https://mmbiz.qpic.cn/synthetic', undefined, gate),
     ).rejects.toThrow('IMAGE_REQUEST_BLOCKED');
     await db.$disconnect();
-    const reopened = new PrismaClient({ datasources: { db: { url } } });
+    const reopened = openClient(url);
     const provider = new Wechat2RssProvider(
       'http://127.0.0.1:18080/',
       'synthetic',

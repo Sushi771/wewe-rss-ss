@@ -10,7 +10,9 @@ describe('prepared update interface (offline)', () => {
   let database: PrismaClient;
   let gate: Wechat2RssSourceGate;
   let root: string;
+  let previousDatabaseUrl: string | undefined;
   beforeEach(async () => {
+    previousDatabaseUrl = process.env.DATABASE_URL;
     root = mkdtempSync(join(tmpdir(), 'wewe-prepared-gate-'));
     database = new PrismaClient({
       datasources: {
@@ -30,6 +32,7 @@ describe('prepared update interface (offline)', () => {
       .filter(Boolean))
       await database.$executeRawUnsafe(statement);
     gate = new Wechat2RssSourceGate(database);
+    process.env.DATABASE_URL = `file:${join(root, 'fixture.sqlite').replace(/\\/g, '/')}`;
   });
   afterEach(async () => {
     jest.restoreAllMocks();
@@ -37,6 +40,8 @@ describe('prepared update interface (offline)', () => {
     expect(dirname(root)).toBe(tmpdir());
     expect(basename(root)).toMatch(/^wewe-prepared-gate-/);
     rmSync(root, { recursive: true, force: true });
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
   });
   it('prepares subscribed identities without updates, then sends one GET per closure', async () => {
     const provider = new Wechat2RssProvider(

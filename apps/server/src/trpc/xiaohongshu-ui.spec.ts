@@ -398,7 +398,7 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
       items: ['a', 'b'].map((creatorId, position) => ({
         position,
         creatorId,
-        operationId: 'operation-' + position,
+        operationId: null,
         state: 'queued',
       })),
     };
@@ -439,7 +439,10 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     scope.advanceBatch.mutateAsync.mockResolvedValue({
       ...initial,
       state: 'paused',
-      items: [{ ...initial.items[0], state: 'partial' }, initial.items[1]],
+      items: [
+        { ...initial.items[0], state: 'partial', operationId: 'operation-0' },
+        initial.items[1],
+      ],
     });
     await evaluate('handleRefreshAll', scope)();
     expect(scope.createBatch.mutateAsync).toHaveBeenCalledWith({
@@ -455,12 +458,23 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     scope.advanceBatch.mutateAsync
       .mockResolvedValueOnce({
         ...initial,
-        items: [{ ...initial.items[0], state: 'complete' }, initial.items[1]],
+        items: [
+          {
+            ...initial.items[0],
+            state: 'complete',
+            operationId: 'operation-0',
+          },
+          initial.items[1],
+        ],
       })
       .mockResolvedValueOnce({
         ...initial,
         state: 'complete',
-        items: initial.items.map((i: any) => ({ ...i, state: 'complete' })),
+        items: initial.items.map((i: any) => ({
+          ...i,
+          state: 'complete',
+          operationId: 'operation-' + i.position,
+        })),
       });
     await evaluate('handleRefreshAll', scope)();
     expect(scope.advanceBatch.mutateAsync.mock.calls).toEqual([
@@ -470,7 +484,11 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     expect(scope.createBatch.mutateAsync).toHaveBeenCalledTimes(1);
     expect(updates[updates.length - 1]).toMatchObject({
       state: 'complete',
-      items: initial.items.map((i: any) => ({ ...i, state: 'complete' })),
+      items: initial.items.map((i: any) => ({
+        ...i,
+        state: 'complete',
+        operationId: 'operation-' + i.position,
+      })),
     });
   });
   it('retains completed durable receipts and saved batch identity when the next advance fails', async () => {
@@ -478,7 +496,14 @@ describe('formal XHS async subscription UI actual handlers (offline, not visual 
     scope.advanceBatch.mutateAsync
       .mockResolvedValueOnce({
         ...initial,
-        items: [{ ...initial.items[0], state: 'complete' }, initial.items[1]],
+        items: [
+          {
+            ...initial.items[0],
+            state: 'complete',
+            operationId: 'operation-0',
+          },
+          initial.items[1],
+        ],
       })
       .mockRejectedValueOnce(Error('synthetic queue failure'));
     await evaluate('handleRefreshAll', scope)();

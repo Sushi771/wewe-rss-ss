@@ -46,7 +46,14 @@ describe('private owner accounts', () => {
   it('reports disabled new-subscription source before provider, backup, or writes and protects the read-only capability', async () => {
     process.env.WECHAT2RSS_ENABLED = '0';
     const create = jest.fn();
-    const { router, service } = setup({ feed: { create } });
+    const database = path.join(dir, 'fixture.sqlite');
+    await fs.writeFile(database, '');
+    const { router, service } = setup({
+      feed: { create },
+      $queryRawUnsafe: jest
+        .fn()
+        .mockResolvedValue([{ name: 'main', file: database }]),
+    });
     const caller = router.appRouter.createCaller({
       errorMsg: null,
       isLocal: true,

@@ -78,6 +78,21 @@ restores the actual prior state, runs the unchanged full reference and native
 checks, and records an audit. A refusal reinstates the held intent. It cannot
 abort another claim, a started archive, or changed/unknown output history.
 
+Completed retirement replay observes the generated current policy. It verifies
+the original immutable approval/snapshot, current frozen archive and result,
+then runs the unchanged native/reference checks; it never re-applies retirement.
+Tests enforce the real observer's matching lock/ledger policy and standard
+`claim.outputs` envelope, rather than accepting an unconditional reference mock.
+
+Provider response fixtures bind channel registration to the same temporary
+SQLite file as their durable source gate. Fault-injection Prisma wrappers keep
+real database-identity queries while retaining their original write failures.
+The UI fixture leaves queued operation IDs null and assigns stable IDs only in
+reserved/settled receipts. Rejection tests verify that only an empty per-channel
+registration directory may remain, with no execution claim or saved content.
+Source-gate clients are disconnected in teardown even when an assertion fails;
+the full CI must exit naturally, without force-exit or disabled diagnostics.
+
 `release-scope.recoverFailedBuild` handles one explicitly reviewed interrupted
 build with a retained nonempty output. Its pinned review binds the original
 ledger, adoption marker, output inventory, owner, failure log and next policy.

@@ -25,6 +25,38 @@ function underScope(c) {
   const spec = options.buildRetirement;
   const raw = c.readPin(spec, 65536),
     a = JSON.parse(raw);
+  const completedRetirement = c.prior.buildRetirement;
+  if (!c.prior.claim && completedRetirement?.approvalSha256 === spec.sha256) {
+    const snapshotFile = ledger + '.retirement-' + spec.sha256 + '.json';
+    const snapshot = JSON.parse(
+      c.readPin(
+        {
+          path: snapshotFile,
+          identity: c.fileIdentity(snapshotFile),
+          sha256: completedRetirement.snapshotSha256,
+        },
+        4 * 1024 * 1024,
+      ),
+    );
+    if (
+      a.kind !== 'retire-retained-build-output' ||
+      a.scopeId !== policy.scopeId ||
+      completedRetirement.nextPolicySha256 !== configSha ||
+      sha(Buffer.from(snapshot.approvalBase64, 'base64')) !== spec.sha256 ||
+      sha(Buffer.from(snapshot.policyBase64, 'base64')) !== a.policySha256 ||
+      !origin(c.prior, configSha, ledger, c.readPin, c.fileIdentity) ||
+      fs.existsSync(a.target)
+    )
+      refuse('REPLAY_CHANGED');
+    c.readPin(completedRetirement.archive, policy.maxBytes);
+    c.guard(a);
+    c.checkFrozen();
+    const receipt = JSON.parse(
+      c.readPin(completedRetirement.result, 1024 * 1024),
+    );
+    if (receipt.nextPolicy.sha256 !== configSha) refuse('REPLAY_CHANGED');
+    return { ...receipt, alreadyRetired: true };
+  }
   const root = policy.buildOnly?.outputRoot;
   if (
     a.format !== 1 ||
@@ -113,34 +145,6 @@ function underScope(c) {
     return value;
   };
   let current = c.prior;
-  const head = current.buildRetirement;
-  if (head?.approvalSha256 === spec.sha256 && !current.claim) {
-    const saved = c.readPin(
-      {
-        path: snapshotFile,
-        identity: c.fileIdentity(snapshotFile),
-        sha256: head.snapshotSha256,
-      },
-      4 * 1024 * 1024,
-    );
-    const journal = JSON.parse(saved);
-    if (
-      sha(Buffer.from(journal.approvalBase64, 'base64')) !== spec.sha256 ||
-      current.configSha !== head.nextPolicySha256 ||
-      fs.existsSync(a.target)
-    )
-      refuse('REPLAY_CHANGED');
-    c.readPin(head.archive, policy.maxBytes);
-    tool('verify');
-    c.guard(a);
-    const receipt = JSON.parse(c.readPin(head.result, 1024 * 1024));
-    if (
-      receipt.nextPolicy.sha256 !== current.configSha ||
-      fileSha(receipt.nextPolicy.path) !== current.configSha
-    )
-      refuse('REPLAY_CHANGED');
-    return { ...receipt, alreadyRetired: true };
-  }
   let before, snapshot, oldRaw;
   if (current.claim) {
     if (

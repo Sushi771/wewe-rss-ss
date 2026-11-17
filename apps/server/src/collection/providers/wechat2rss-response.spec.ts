@@ -38,6 +38,7 @@ async function client() {
     .map((s) => s.trim())
     .filter(Boolean))
     await db.$executeRawUnsafe(statement);
+  process.env.DATABASE_URL = `file:${join(root, 'fixture.sqlite').replace(/\\/g, '/')}`;
   return new Wechat2RssProvider(
     'http://127.0.0.1:18080/',
     'synthetic-secret',
@@ -83,16 +84,25 @@ function streamResponse(text: string, status = 200, chunk = 65536) {
   );
 }
 describe('bounded cached-feed HTTP responses (synthetic streams only)', () => {
+  let previousDatabaseUrl: string | undefined;
+  beforeEach(() => {
+    previousDatabaseUrl = process.env.DATABASE_URL;
+  });
   afterEach(async () => {
     jest.restoreAllMocks();
-    await Promise.all(
-      databases.splice(0).map(async ({ db, root }) => {
-        await db.$disconnect();
-        expect(dirname(root)).toBe(tmpdir());
-        expect(basename(root)).toMatch(/^wewe-response-gate-/);
-        rmSync(root, { recursive: true, force: true });
-      }),
-    );
+    try {
+      await Promise.all(
+        databases.splice(0).map(async ({ db, root }) => {
+          await db.$disconnect();
+          expect(dirname(root)).toBe(tmpdir());
+          expect(basename(root)).toMatch(/^wewe-response-gate-/);
+          rmSync(root, { recursive: true, force: true });
+        }),
+      );
+    } finally {
+      if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previousDatabaseUrl;
+    }
   });
   it('accepts every article in a 4,003,033-byte HTML-escaped JSON feed without another request', async () => {
     const feed = largeFeed(),
