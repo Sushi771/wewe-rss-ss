@@ -1,4 +1,5 @@
 import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';
+import { recoveryHoldLocalProcedure } from '../recovery-hold-http';
 import { refreshCacheFailure } from '../collection/refresh-cache-failure';
 import { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';
 import {
@@ -181,9 +182,10 @@ export class TrpcService {
     if (errorMsg) {
       throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });
     }
-    // Recovery hold is a fail-closed inspection mode, not a single-target
-    // release. Some queries contact the provider, so block the whole router.
-    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
+    // Match the HTTP gate without bypassing authentication or the write gate.
+    // No source procedure or background recovery is released by local settlement.
+    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1' &&
+      !recoveryHoldLocalProcedure(path, type, ctx))
       throw new TRPCError({
         code: 'PRECONDITION_FAILED',
         message: '任务恢复检查中，操作暂不可用。',

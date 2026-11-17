@@ -19,6 +19,7 @@ export class XhsScheduledService {
   @Cron('* * * * *', { name: 'xhsScheduledRefresh', timeZone: 'Asia/Shanghai' })
   async tick(now = Date.now()) {
     if (
+      process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
       process.env.ENABLE_SCHEDULED_UPDATES !== '1' ||
       process.env.DISABLE_SCHEDULED_UPDATES === '1' ||
       process.env.XHS_SUBSCRIPTION_LIVE_ENABLED !== '1' ||

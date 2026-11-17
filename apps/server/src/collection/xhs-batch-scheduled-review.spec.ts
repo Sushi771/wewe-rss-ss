@@ -1,6 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { applyFixtureMigrations } from '../../test/redbook-isolated/fixture-migrations';
@@ -22,6 +22,9 @@ import { parseXhsProfile } from './xhs-profile';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
 import { parsePersistentCreatorBatch } from '../../../web/src/utils/xiaohongshu-refresh';
+import { TrpcService } from '../trpc/trpc.service';
+import { TrpcRouter } from '../trpc/trpc.router';
+import { Wechat2RssSubscriptionBatches } from './wechat2rss-subscription-batches';
 
 // Real Prisma, production migrations, admission, protected writes, recurring
 // review, batch/task orchestration and runtime. Only the source is synthetic.
@@ -335,6 +338,65 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(await db.$queryRawUnsafe('SELECT owner FROM xhs_refresh_jobs WHERE owner=?',old.taskId)).toEqual([]);
     expect(api).not.toHaveBeenCalled();
     expect(await snapshot()).toEqual(historical);
+  });
+  it('permits only authenticated local settlement while eight queued WeChat items and all source work remain held', async()=>{
+    const old=await stoppedUnsentTask();
+    const original={...process.env};const priorAudit=(globalThis as any).__weweStartupAudit;
+    let trpc:TrpcService|undefined;
+    const wxSource=jest.fn().mockRejectedValue(new Error('unexpected source'));
+    const database=path.join(dir,'fixture.sqlite');
+    const producer=new Wechat2RssSubscriptionBatches(()=>database,()=> 'synthetic-instance',wxSource,wxSource,wxSource);
+    producer.attachRefresh(wxSource);
+    const wx=await producer.enqueueRefresh(Array.from({length:8},(_,i)=>'MP_WXS_'+(1234500000+i)),'e'.repeat(64),'scheduled-refresh');
+    producer.close();
+    const file=path.join(dir,'.wechat2rss-subscription-batches',wx.batchId+'.json');
+    const pending=JSON.parse(await readFile(file,'utf8'));pending.state='running';
+    await writeFile(file,JSON.stringify(pending));const originalWx=await readFile(file);
+    const {settle,backup}=localSettler();
+    try{
+      Object.assign(process.env,{NODE_ENV:'production',PRIVATE_ONLINE_MODE:'0',WEWE_ACCEPTANCE_MODE:'0',WECHAT2RSS_RECOVERY_HOLD:'1'});
+      const config={get:(key:string)=>key==='platform'?{url:''}:{updateDelayTime:0}} as any;
+      trpc=new TrpcService(db as any,config,{} as any,{} as any);
+      const router=new TrpcRouter(trpc,db as any,config,{} as any,{} as any,undefined,service,runtime);
+      jest.spyOn(router as any,'xhsBatches','get').mockReturnValue(settle);
+      // The real startup hooks and worker retain the original hold; allowing a
+      // local procedure never toggles it or starts a consumer/timer.
+      await trpc.onModuleInit();
+      const held=(trpc as any).subscriptionBatches;
+      await held.runDue();expect(held.timer).toBeUndefined();
+      const ctx={errorMsg:null,isLocalSave:true,isLocalXhsRead:true};
+      const caller=router.appRouter.createCaller(ctx);
+      const input={batchId:old.id};
+      const plan=await caller.xiaohongshu.prepareRefreshBatchLocalCancellation(input);
+      const confirm={...input,digest:plan.digest,acknowledgedNotDispatched:true as const};
+      await expect(router.appRouter.createCaller({...ctx,errorMsg:'bad auth'}).xiaohongshu.prepareRefreshBatchLocalCancellation(input)).rejects.toMatchObject({code:'UNAUTHORIZED'});
+      await expect(router.appRouter.createCaller({errorMsg:null,isLocalSave:false,isLocalXhsRead:false}).xiaohongshu.prepareRefreshBatchLocalCancellation(input)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      await expect(router.appRouter.createCaller({errorMsg:null,isLocalSave:false,isLocalXhsRead:true}).xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation({...confirm,acknowledgedNotDispatched:false} as any)).rejects.toMatchObject({code:'BAD_REQUEST'});
+      await expect(caller.xiaohongshu.prepareRefreshBatchLocalCancellation({...input,extra:true} as any)).rejects.toMatchObject({code:'BAD_REQUEST'});
+      await expect(caller.xiaohongshu.advanceRefreshBatch(input)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      await expect(caller.xiaohongshu.restoreSession()).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      (globalThis as any).__weweStartupAudit={status:'failed',reason:'fixture-write-hold'};
+      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      (globalThis as any).__weweStartupAudit=priorAudit;
+      expect(backup).not.toHaveBeenCalled();
+      backup.mockResolvedValueOnce(undefined as any); // Deliberately invalid external backup report.
+      await expect(caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm)).rejects.toMatchObject({code:'PRECONDITION_FAILED'});
+      expect((await batch.status(old.id)).items[0]).toMatchObject({state:'reserved',outcome:null});
+      const result=await caller.xiaohongshu.confirmRefreshBatchLocalCancellation(confirm);
+      expect(result.batch.items.every(i=>i.state==='cancelled')).toBe(true);
+      expect((await caller.xiaohongshu.refreshBatchStatus(input)).state).toBe('stopped');
+      expect((await caller.xiaohongshu.connectionStatus()).requestAttempts).toMatchObject({profiles:0,lists:0,details:0,media:0});
+      await held.runDue();
+      expect(await readFile(file)).toEqual(originalWx);
+      expect(JSON.parse((await readFile(file)).toString()).items.filter(i=>i.state==='queued')).toHaveLength(8);
+      expect(wxSource).not.toHaveBeenCalled();expect(api).not.toHaveBeenCalled();
+      expect(await snapshot()).toEqual(historical);
+      expect(process.env.WECHAT2RSS_RECOVERY_HOLD).toBe('1');
+    }finally{
+      trpc?.onModuleDestroy();producer.close();process.env=original;
+      (globalThis as any).__weweStartupAudit=priorAudit;
+    }
   });
   it('audits the exact stopped prepare failure, then the admission-only successor, preserving legacy rows and unknowns', async () => {
     const old = await stoppedUnsentTask();
