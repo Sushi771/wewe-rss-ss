@@ -11,6 +11,7 @@ const context = require('./lib.cjs').hostEffects.context;
 const WRITE_KINDS = ['build', 'install', 'activate', 'restart', 'switch'];
 const BOUND_OPERATION = Symbol('bound-operation');
 const FAILED_BUILD_RECOVERY = Symbol('failed-build-recovery');
+const BUILD_OUTPUT_RETIREMENT = Symbol('build-output-retirement');
 const hash = (v) =>
   crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
 const hashBytes = (v) => crypto.createHash('sha256').update(v).digest('hex');
@@ -1923,6 +1924,18 @@ function open(request, options = {}, boundOperation) {
     const adoption = recoveryBytes(a.adoption, 64);
     const verifyOrigin = (payload, expected, depth = 0) => {
       if (depth > 16 || payload.configSha !== expected) refuse();
+      if (payload.buildRetirement?.nextPolicySha256 === expected) {
+        const old = require('./retire-build-output.cjs').origin(
+          payload,
+          expected,
+          ledger,
+          recoveryBytes,
+          fileIdentity,
+        );
+        if (!old) refuse();
+        verifyOrigin(old.payload, old.policySha256, depth + 1);
+        return;
+      }
       const h = payload.failedBuildRecovery;
       if (!h) {
         if (expected !== adoption.toString('utf8')) refuse();
@@ -2219,6 +2232,74 @@ function open(request, options = {}, boundOperation) {
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
+      if (boundOperation === BUILD_OUTPUT_RETIREMENT) {
+        const receipt = require('./retire-build-output.cjs').underScope({
+          options,
+          policy,
+          file,
+          configSha,
+          ledger,
+          prior,
+          directory,
+          owner,
+          readPin: recoveryBytes,
+          fileIdentity,
+          identity,
+          atomic,
+          checkFrozen: () => check(),
+          measure: (outputs) => measureScope(outputs),
+          scan: (row) =>
+            verifier.scan([{ path: row.path, identity: identity(row.path) }]),
+          guard: (approval) => {
+            owner();
+            recoveryBytes(options.buildRetirement, 65536);
+            recoveryBytes(approval.entry, 1024 * 1024);
+            recoveryBytes(approval.adoption, 64);
+            checkRoots(referenceRoots);
+            checkControls((n) => verifier.chargeExternal(n));
+            if (
+              verifier.scan(protectedPackages, [], { metadataOnly: true })
+                .metadataDigest !== protectedSnapshot.metadataDigest
+            )
+              throw Error('RELEASE_PRESERVING_PROTECTED_CHANGED');
+            if (
+              present(
+                path.join(policy.buildOnly.outputRoot, '.build-budget.lock'),
+              )
+            )
+              throw Error('RELEASE_SCOPE_BUILD_BUDGET_BUSY');
+            for (const root of policy.roots) {
+              const disk = fs.statfsSync(root.path, { bigint: true });
+              if (disk.bavail * disk.bsize < BigInt(MIN_FREE))
+                throw Error('RELEASE_SCOPE_PHYSICAL_RESERVE_EXCEEDED');
+            }
+            const observed = options.observeBuildRecovery
+              ? options.observeBuildRecovery(approval)
+              : observeBuildRecovery(
+                  approval,
+                  directory,
+                  policy.buildOnly.outputRoot,
+                );
+            if (
+              observed?.complete !== true ||
+              observed.ownerAbsent !== true ||
+              !Array.isArray(observed.writers) ||
+              observed.writers.length
+            )
+              throw Error('RELEASE_SCOPE_BUILD_OWNER_NOT_PROVEN_EXITED');
+            references();
+          },
+          save: (payload) => {
+            owner();
+            atomic(ledger, payload);
+            ledgerIdentity = fileIdentity(ledger);
+            prior = payload;
+          },
+        });
+        owner();
+        fs.unlinkSync(lock);
+        return receipt;
+      }
       if (boundOperation === FAILED_BUILD_RECOVERY) {
         const receipt = recoverBuild();
         owner();
@@ -3142,6 +3223,23 @@ function recoverFailedBuild(options) {
     FAILED_BUILD_RECOVERY,
   );
 }
+// A separately reviewed maintenance operation. It never grants an install lease.
+function retireBuildOutput(options) {
+  const policy = read(options.configPath);
+  return open(
+    {
+      kind: 'build',
+      root: policy.buildOnly?.outputRoot,
+      reserveBytes: 1,
+      runtimeCopies: 0,
+      buildOnly: true,
+      sourceCommit: policy.buildOnly?.sourceCommit,
+      sourceHash: policy.buildOnly?.sourceHash,
+    },
+    options,
+    BUILD_OUTPUT_RETIREMENT,
+  );
+}
 module.exports = {
   inspect,
   open,
@@ -3150,6 +3248,7 @@ module.exports = {
   requireSession,
   assertWritableSession,
   recoverFailedBuild,
+  retireBuildOutput,
   inspectFailedBuildWriters: observeBuildRecovery,
   DEFAULT_BYTES,
   MIN_FREE,

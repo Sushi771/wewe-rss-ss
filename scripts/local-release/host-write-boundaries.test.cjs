@@ -88,7 +88,9 @@ const catalog = {
     'start-current',
     'writer-exit-recovery',
   ],
-  registry: ['release-scope'],
+  // Exact pinned build-artifact archive/retirement; shared registry lock,
+  // original reference probe, full readback and unchanged cumulative caps.
+  registry: ['release-scope', 'retire-build-output'],
   // Read native identities, then delegate startup and update effects to reviewed hosts.
   nativeControl: [
     // Loader pins the entire invocation closure; toolkit verifies native bytes.

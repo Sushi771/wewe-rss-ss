@@ -36,6 +36,39 @@ Build the final candidate from the exact CI-verified commit. Retain a local
 receipt mapping every source input and packaged control file to that commit and
 verify the complete immutable release before handing it to the sole installer.
 
+`release-scope.retireBuildOutput` is a separate, exact reviewed maintenance
+operation for an unused `retainedFailure` output, never an installed release or
+an active build. It holds the existing registry mutex, checks the original
+reference probe and complete native writer census, and freezes the approval,
+old policy and ledger before changing that output. A full archive stays inside
+the same accounting root and consumes the unchanged byte/growth/free-space
+budgets. The archive is fully read back against the source, then actually
+restored and checked in the vacated original package slot before final
+retirement. No fourth runtime/package copy is created during that rehearsal.
+
+The archive contract covers regular files/directories, content, modes, basic
+timestamps and Windows attributes/owner/group/DACL. Only internal directory
+junctions targeting a physical directory in the same artifact are supported;
+they are not traversed or counted twice. Other links, alternate data streams,
+EFS, sparse and compressed NTFS objects are refused. Junction metadata is read
+through a non-following handle; named ACL writes never pass through a junction.
+Windows ACLs are
+restored before timestamps and compared as full SDDL, including inheritance
+flags; see Microsoft's [SetNamedSecurityInfoW documentation](https://learn.microsoft.com/en-us/windows/win32/api/aclapi/nf-aclapi-setnamedsecurityinfow).
+Unknown or changed restore destinations are never overwritten. A failure
+before commit restores the original logical data/metadata and keeps a durable
+intent; an incomplete or unverified recovery blocks ordinary builds. A killed
+mutex owner remains fail-closed and requires the existing owner review; the
+entry never clears an unexplained lock. Replays verify the immutable archive
+and return the prior result without a second retirement.
+
+Only the reviewed source commit/hash and the precisely verified archive's
+frozen baseline advance. All other policy fields, roots, protected packages,
+references, capacity limits and scan limits remain unchanged. The archived
+original ledger/policy and retained failure diagnostics remain available for
+recovery. A maintenance-tool commit and the exact candidate commit may differ;
+this grants no exception to the candidate's exact-commit CI requirement.
+
 `release-scope.recoverFailedBuild` handles one explicitly reviewed interrupted
 build with a retained nonempty output. Its pinned review binds the original
 ledger, adoption marker, output inventory, owner, failure log and next policy.

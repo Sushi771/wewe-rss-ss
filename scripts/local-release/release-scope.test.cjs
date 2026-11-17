@@ -1540,6 +1540,358 @@ function failedBuildFixture(run) {
   });
 }
 
+function retirementFixture(run, prepare) {
+  return failedBuildFixture((x) => {
+    if (prepare) {
+      prepare(x);
+      x.approval.output = {
+        ...x.approval.output,
+        ...scope.inspect([x.at], { privateAccounting: 'private-names-v1' })
+          .baseline,
+      };
+      x.save();
+    }
+    x.recover();
+    const f = x.f;
+    // Use the recovered next policy through the same registry/root.
+    fs.copyFileSync(x.nextFile, f.config);
+    f.policy = JSON.parse(fs.readFileSync(f.config));
+    const python = require('node:child_process')
+      .execFileSync('python', ['-c', 'import sys; print(sys.executable)'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      })
+      .trim();
+    const review = path.join(f.base, 'retirement-review.json');
+    const row = JSON.parse(fs.readFileSync(x.ledger)).payload.outputs.find(
+      (o) => o.path === x.at,
+    );
+    const a = {
+      format: 1,
+      kind: 'retire-retained-build-output',
+      scopeId: f.policy.scopeId,
+      policySha256: fileHash(f.config),
+      registryDirectory: f.base,
+      registryIdentity: f.policy.registryIdentity,
+      moduleSha256: fileHash(path.join(__dirname, 'retire-build-output.cjs')),
+      scopeModuleSha256: fileHash(path.join(__dirname, 'release-scope.cjs')),
+      reviewEvidence:
+        'Synthetic exact retained-output retirement, no source requests',
+      target: x.at,
+      output: row,
+      owner: { pid: null, entry: x.approval.failureLog.path },
+      entry: x.pin(x.approval.failureLog.path),
+      python: x.pin(fs.realpathSync.native(python)),
+      archiveTool: x.pin(path.join(__dirname, 'build-retirement-archive.py')),
+      ledger: x.pin(x.ledger),
+      adoption: x.pin(x.ledger + '.adopted'),
+      nextBuild: { sourceCommit: '8'.repeat(40), sourceHash: '9'.repeat(64) },
+    };
+    const save = () => fs.writeFileSync(review, JSON.stringify(a));
+    save();
+    const opts = () => ({
+      ...f.options(),
+      buildRetirement: x.pin(review),
+      observeBuildRecovery: () => ({
+        complete: true,
+        ownerAbsent: true,
+        writers: [],
+      }),
+    });
+    run({
+      ...x,
+      a,
+      review,
+      save,
+      opts,
+      retire: (extra) => scope.retireBuildOutput({ ...opts(), ...extra }),
+    });
+  });
+}
+
+test('build retirement: verified archive stays charged, exact source advances, replay is read-only', () =>
+  retirementFixture((x) => {
+    const old = fs.readFileSync(x.ledger);
+    const r = x.retire();
+    assert(r.retired);
+    assert(!fs.existsSync(x.at));
+    const p = JSON.parse(fs.readFileSync(r.nextPolicy.path));
+    assert.equal(p.maxBytes, x.f.policy.maxBytes);
+    assert.equal(p.maxNewRuntimeCopies, x.f.policy.maxNewRuntimeCopies);
+    assert.equal(p.buildOnly.sourceCommit, x.a.nextBuild.sourceCommit);
+    assert(p.baseline.bytes >= fs.statSync(r.archive.path).size);
+    assert(fs.existsSync(r.originalLedgerSnapshot));
+    assert(!old.equals(fs.readFileSync(x.ledger)));
+    const after = fs.readFileSync(x.ledger);
+    assert(x.retire().alreadyRetired);
+    assert(fs.readFileSync(x.ledger).equals(after));
+    const lease = scope.open(
+      {
+        kind: 'build',
+        root: x.f.build,
+        reserveBytes: 16,
+        runtimeCopies: 1,
+        buildOnly: true,
+        ...x.a.nextBuild,
+      },
+      {
+        ...x.f.options(),
+        configPath: r.nextPolicy.path,
+        configSha256: r.nextPolicy.sha256,
+      },
+    );
+    lease.close();
+  }));
+
+test(
+  'build retirement: internal Windows dependency junctions are actually restored without copying targets twice',
+  { skip: process.platform !== 'win32' },
+  () =>
+    retirementFixture(
+      (x) => {
+        const r = x.retire();
+        assert(r.actualRestoreVerified);
+        assert(r.restoreRehearsal.actualRestoreVerified);
+        assert(x.retire().alreadyRetired);
+      },
+      (x) => {
+        const target = path.join(x.at, 'physical');
+        fs.mkdirSync(target);
+        fs.writeFileSync(path.join(target, 'text'), 'inert');
+        fs.symlinkSync(target, path.join(x.at, 'alias'), 'junction');
+      },
+    ),
+);
+
+test('build retirement: shared lock rejects concurrency and verified interruption resumes once', () =>
+  retirementFixture((x) => {
+    assert.throws(
+      () =>
+        x.retire({
+          onBuildRetirementStep: (step) => {
+            if (step === 'before-delete') {
+              assert.throws(() => x.retire(), /EEXIST|lock/i);
+              throw Error('synthetic interruption');
+            }
+          },
+        }),
+      /synthetic interruption/,
+    );
+    assert(fs.existsSync(x.at));
+    assert(JSON.parse(fs.readFileSync(x.ledger)).payload.claim);
+    assert(x.retire().retired);
+    assert(x.retire().alreadyRetired);
+  }));
+
+test('build retirement: actual archive restore rolls back a post-delete failure without losing bytes or metadata', () =>
+  retirementFixture((x) => {
+    const content = fs.readFileSync(path.join(x.at, 'node.exe'));
+    assert.throws(
+      () =>
+        x.retire({
+          onBuildRetirementStep: (step) => {
+            if (step === 'after-delete') throw Error('synthetic rollback');
+          },
+        }),
+      /synthetic rollback/,
+    );
+    assert(fs.readFileSync(path.join(x.at, 'node.exe')).equals(content));
+    assert(
+      JSON.parse(fs.readFileSync(x.ledger)).payload.claim.rollbackVerified,
+    );
+    assert(x.retire().retired);
+  }));
+
+for (const mutation of [
+  'writer',
+  'unknown',
+  'source',
+  'policy',
+  'not-retained',
+])
+  test('build retirement: fails closed before data change: ' + mutation, () =>
+    retirementFixture((x) => {
+      let extra = {};
+      if (mutation === 'writer')
+        extra.observeBuildRecovery = () => ({
+          complete: true,
+          ownerAbsent: false,
+          writers: [{ pid: 7 }],
+        });
+      if (mutation === 'unknown')
+        extra.observeBuildRecovery = () => ({
+          complete: false,
+          ownerAbsent: true,
+          writers: [],
+        });
+      if (mutation === 'source') {
+        x.a.nextBuild.sourceCommit = 'bad';
+        x.save();
+      }
+      if (mutation === 'policy') {
+        x.a.policySha256 = '0'.repeat(64);
+        x.save();
+      }
+      if (mutation === 'not-retained') {
+        x.a.output = { ...x.a.output, retainedFailure: undefined };
+        x.save();
+      }
+      const before = fs.readFileSync(x.ledger);
+      assert.throws(() => x.retire(extra));
+      assert(fs.existsSync(x.at));
+      assert(fs.readFileSync(x.ledger).equals(before));
+    }),
+  );
+
+test('build retirement: a corrupted frozen archive blocks replay and later builds', () =>
+  retirementFixture((x) => {
+    const r = x.retire();
+    fs.appendFileSync(r.archive.path, 'changed');
+    assert.throws(() => x.retire());
+    assert.throws(
+      () =>
+        scope.open(
+          {
+            kind: 'build',
+            root: x.f.build,
+            reserveBytes: 1,
+            runtimeCopies: 0,
+            buildOnly: true,
+            ...x.a.nextBuild,
+          },
+          {
+            ...x.f.options(),
+            configPath: r.nextPolicy.path,
+            configSha256: r.nextPolicy.sha256,
+          },
+        ),
+      /FROZEN_HISTORY/,
+    );
+  }));
+
+test('build retirement: postcommit interruption replays without restoring or deleting twice', () =>
+  retirementFixture((x) => {
+    assert.throws(
+      () =>
+        x.retire({
+          onBuildRetirementStep: (step) => {
+            if (step === 'after-commit') throw Error('after committed');
+          },
+        }),
+      /after committed/,
+    );
+    assert(!fs.existsSync(x.at));
+    assert.equal(JSON.parse(fs.readFileSync(x.ledger)).payload.claim, null);
+    assert(x.retire().alreadyRetired);
+  }));
+
+test('build retirement: normal capacity still refuses archive creation and holds its intent', () =>
+  retirementFixture((x) => {
+    x.f.policy.maxBytes =
+      scope.inspect([x.f.build], { privateAccounting: 'private-names-v1' })
+        .baseline.bytes + 16;
+    fs.writeFileSync(x.f.config, JSON.stringify(x.f.policy));
+    x.a.policySha256 = fileHash(x.f.config);
+    x.save();
+    // Bind the synthetic preexisting ledger to this deliberately tighter policy.
+    const doc = JSON.parse(fs.readFileSync(x.ledger));
+    doc.payload.configSha = x.a.policySha256;
+    doc.digest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(doc.payload))
+      .digest('hex');
+    fs.writeFileSync(x.ledger, JSON.stringify(doc));
+    x.a.ledger = x.pin(x.ledger);
+    x.save();
+    assert.throws(() => x.retire(), /ARCHIVE_CAPACITY_EXCEEDED|CAPACITY/);
+    assert(fs.existsSync(x.at));
+    assert(JSON.parse(fs.readFileSync(x.ledger)).payload.claim);
+  }));
+
+test('build retirement: new unknown files after restore are not deleted or silently adopted', () =>
+  retirementFixture((x) => {
+    assert.throws(() =>
+      x.retire({
+        onBuildRetirementStep: (step) => {
+          if (step === 'after-restore')
+            fs.writeFileSync(path.join(x.at, 'foreign'), 'keep unknown');
+        },
+      }),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(x.at, 'foreign'), 'utf8'),
+      'keep unknown',
+    );
+    assert(JSON.parse(fs.readFileSync(x.ledger)).payload.claim);
+  }));
+
+test('build retirement: subsequent failed build can follow the preserved retirement and recovery lineage', () =>
+  retirementFixture((x) => {
+    const r = x.retire();
+    const next = JSON.parse(fs.readFileSync(r.nextPolicy.path));
+    const opts = {
+      ...x.f.options(),
+      configPath: r.nextPolicy.path,
+      configSha256: r.nextPolicy.sha256,
+    };
+    const lease = scope.open(
+      {
+        kind: 'build',
+        root: x.f.build,
+        reserveBytes: 4096,
+        runtimeCopies: 1,
+        buildOnly: true,
+        ...x.a.nextBuild,
+      },
+      opts,
+    );
+    const at = path.join(x.f.build, 'after-retirement');
+    lease.registerOutput(at);
+    fs.mkdirSync(at);
+    lease.createdOutput(at);
+    fs.writeFileSync(
+      path.join(at, 'node.exe'),
+      'inert subsequent failed runtime',
+    );
+    assert.throws(
+      () => lease.close(new Error('synthetic next failure')),
+      /FAILED_OUTPUT/,
+    );
+    const state = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    const target = state.outputs.find((o) => o.path === at);
+    const future = structuredClone(next);
+    future.buildOnly.sourceCommit = '7'.repeat(40);
+    future.buildOnly.sourceHash = '6'.repeat(64);
+    future.maxNewRuntimeCopies++;
+    const futureFile = path.join(x.f.base, 'future-policy.json');
+    fs.writeFileSync(futureFile, JSON.stringify(future));
+    const review = {
+      ...x.approval,
+      policySha256: r.nextPolicy.sha256,
+      ledger: x.pin(x.ledger),
+      claimId: state.claim.id,
+      nextPolicy: x.pin(futureFile),
+      output: {
+        ...target,
+        ...scope.inspect([at], { privateAccounting: 'private-names-v1' })
+          .baseline,
+      },
+    };
+    const reviewFile = path.join(x.f.base, 'future-review.json');
+    fs.writeFileSync(reviewFile, JSON.stringify(review));
+    assert(
+      scope.recoverFailedBuild({
+        ...opts,
+        failedBuildRecovery: x.pin(reviewFile),
+        observeBuildRecovery: () => ({
+          complete: true,
+          ownerAbsent: true,
+          writers: [],
+        }),
+      }).recovered,
+    );
+  }));
+
 test('failed build recovery freezes exact output, retains diagnostics, and admits a new build in the same root', () =>
   failedBuildFixture((x) => {
     assert.equal(x.recover().recovered, true);
