@@ -1,0 +1,115 @@
+{
+  "scripts/local-release/restart.cjs": {
+    "reviewedThroughCommit": "90556e912e275c2bf33e18f06c869b7b47edeb40",
+    "originalGitBlob": "61340afe77510210b1a2c6008d7986babfba7465",
+    "beforeSha256": "219c6a327e58c40608692ee1c2efe042371271f419e6744335c20edd55c8054d",
+    "afterSha256": "d5223d4c3939eed028bf5887199128f9a5e839c75388b01651ffa3af41d4621e",
+    "rationale": "Reviewed maintenance checkpoint and formatting; native tests cover ownership and rollback. Historical preimage is independently pinned.",
+    "hunks": [
+      {
+        "before": "        manifest,\n        options.legacyJobId,\n      ),\n    };\n  }\n  let schemaProof;\n",
+        "after": "        manifest,\n        options.legacyJobId,\n      ),\n    };\n  }\n  if (options.wechatRecordDir !== undefined) {\n    if (\n      options.legacyJobId !== undefined ||\n      options.legacyMaintenanceCheckpoint !== undefined ||\n      options.mode !== 'restart'\n    )\n      throw Error('WECHAT_MAINTENANCE_UNSUPPORTED');\n    options = {\n      ...options,\n      legacyMaintenanceCheckpoint:\n        require('./wechat-maintenance-loader.cjs').loadWechatMaintenance(\n          release,\n          manifest,\n          options.wechatRecordDir,\n        ),\n    };\n  }\n  let schemaProof;\n"
+      },
+      {
+        "before": "      'prepared-rehearsal': { type: 'boolean', default: false },\n      'cold-launch-rehearsal': { type: 'boolean', default: false },\n      'legacy-job-id': { type: 'string' },\n    },\n  });\n  if (!values.release || (values.production && !values.database))\n",
+        "after": "      'prepared-rehearsal': { type: 'boolean', default: false },\n      'cold-launch-rehearsal': { type: 'boolean', default: false },\n      'legacy-job-id': { type: 'string' },\n      'wechat-record-dir': { type: 'string' },\n    },\n  });\n  if (!values.release || (values.production && !values.database))\n"
+      },
+      {
+        "before": "    preparedRehearsal: values['prepared-rehearsal'],\n    coldLaunchRehearsal: values['cold-launch-rehearsal'],\n    legacyJobId: values['legacy-job-id'],\n    expected:\n      values.production && values.mode === 'restart'\n        ? {\n",
+        "after": "    preparedRehearsal: values['prepared-rehearsal'],\n    coldLaunchRehearsal: values['cold-launch-rehearsal'],\n    legacyJobId: values['legacy-job-id'],\n    wechatRecordDir: values['wechat-record-dir'],\n    expected:\n      values.production && values.mode === 'restart'\n        ? {\n"
+      }
+    ]
+  },
+  "apps/server/src/trpc/trpc.service.ts": {
+    "reviewedThroughCommit": "90556e912e275c2bf33e18f06c869b7b47edeb40",
+    "originalGitBlob": "25820f50a0ad37e072e515f572117d7f41257098",
+    "beforeSha256": "f8318433986bab485fb155fbd8b652df64f06ed3a730505c95e9fbc0b1022dc4",
+    "afterSha256": "73416bf28c2ea4956712207c9653db801e4621bbbc15f461524b37d247410a73",
+    "rationale": "Reviewed bounded XHS recovery and per-channel execution wrappers; earlier auth and export assertions remain unchanged.",
+    "hunks": [
+      {
+        "before": "import { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\nimport { refreshCacheFailure } from '../collection/refresh-cache-failure';\nimport { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';\nimport {\n",
+        "after": "import {\n  withChannelExecution,\n  taskDatabaseFor,\n} from '../collection/channel-task-control';\nimport { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\nimport { recoveryHoldLocalProcedure } from '../recovery-hold-http';\nimport { refreshCacheFailure } from '../collection/refresh-cache-failure';\nimport { refreshFeedSourceDigest } from '../collection/refresh-occupancy-release';\nimport {\n"
+      },
+      {
+        "before": "    if (errorMsg) {\n      throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });\n    }\n    // Recovery hold is a fail-closed inspection mode, not a single-target\n    // release. Some queries contact the provider, so block the whole router.\n    if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')\n      throw new TRPCError({\n        code: 'PRECONDITION_FAILED',\n        message: '任务恢复检查中，操作暂不可用。',\n",
+        "after": "    if (errorMsg) {\n      throw new TRPCError({ code: 'UNAUTHORIZED', message: errorMsg });\n    }\n    // Match the HTTP gate without bypassing authentication or the write gate.\n    // No source procedure or background recovery is released by local settlement.\n    if (\n      process.env.WECHAT2RSS_RECOVERY_HOLD === '1' &&\n      !recoveryHoldLocalProcedure(path, type, ctx)\n    )\n      throw new TRPCError({\n        code: 'PRECONDITION_FAILED',\n        message: '任务恢复检查中，操作暂不可用。',\n"
+      },
+      {
+        "before": "  }\n\n  async refreshMpArticlesAndUpdateFeed(\n    mpId: string,\n    page = 1,\n    trigger: 'local-manual' | 'scheduled' | 'public' = 'public',\n",
+        "after": "  }\n\n  async refreshMpArticlesAndUpdateFeed(\n    ...input: Parameters<TrpcService['refreshMpArticlesAndUpdateFeedOwned']>\n  ) {\n    return withChannelExecution(\n      'wechat',\n      () => this.refreshMpArticlesAndUpdateFeedOwned(...input),\n      undefined,\n      await taskDatabaseFor(this.prismaService),\n    );\n  }\n  private async refreshMpArticlesAndUpdateFeedOwned(\n    mpId: string,\n    page = 1,\n    trigger: 'local-manual' | 'scheduled' | 'public' = 'public',\n"
+      },
+      {
+        "before": "    page: 1,\n  };\n\n  async getHistoryMpArticles(mpId: string) {\n    return this.recordCollectionResult(\n      mpId,\n      (feed) => this.collectHistory(feed),\n",
+        "after": "    page: 1,\n  };\n\n  async getHistoryMpArticles(\n    ...input: Parameters<TrpcService['getHistoryMpArticlesOwned']>\n  ) {\n    return withChannelExecution(\n      'wechat',\n      () => this.getHistoryMpArticlesOwned(...input),\n      undefined,\n      await taskDatabaseFor(this.prismaService),\n    );\n  }\n  private async getHistoryMpArticlesOwned(mpId: string) {\n    return this.recordCollectionResult(\n      mpId,\n      (feed) => this.collectHistory(feed),\n"
+      },
+      {
+        "before": "  private readonly activeSubscriptionAdds = new Set<string>();\n\n  async repairExistingSubscription(\n    feedId: string,\n    accountId: string,\n    isLocal = false,\n",
+        "after": "  private readonly activeSubscriptionAdds = new Set<string>();\n\n  async repairExistingSubscription(\n    ...input: Parameters<TrpcService['repairExistingSubscriptionOwned']>\n  ) {\n    return withChannelExecution(\n      'wechat',\n      () => this.repairExistingSubscriptionOwned(...input),\n      undefined,\n      await taskDatabaseFor(this.prismaService),\n    );\n  }\n  private async repairExistingSubscriptionOwned(\n    feedId: string,\n    accountId: string,\n    isLocal = false,\n"
+      },
+      {
+        "before": "  }\n\n  async addSubscriptionFromArticle(\n    articleUrl: string,\n    accountId?: string,\n    isLocal = false,\n",
+        "after": "  }\n\n  async addSubscriptionFromArticle(\n    ...input: Parameters<TrpcService['addSubscriptionFromArticleOwned']>\n  ) {\n    return withChannelExecution(\n      'wechat',\n      () => this.addSubscriptionFromArticleOwned(...input),\n      undefined,\n      await taskDatabaseFor(this.prismaService),\n    );\n  }\n  private async addSubscriptionFromArticleOwned(\n    articleUrl: string,\n    accountId?: string,\n    isLocal = false,\n"
+      }
+    ]
+  },
+  "apps/server/src/trpc/trpc.router.ts": {
+    "reviewedThroughCommit": "90556e912e275c2bf33e18f06c869b7b47edeb40",
+    "originalGitBlob": "836b488fa6a501e2031112d0bf92e113070506e3",
+    "beforeSha256": "00c8c5470819f3e7497e0d3959112e00c3972edfbfaaaa605bfedab499dfb4b7",
+    "afterSha256": "a22dd6a92a79db237072ca4e7d144244ff12c0212ed3476bdb41da4f63fe8a49",
+    "rationale": "Reviewed local unsent settlement, scheduler and channel management routes; strict input, protected procedures, local access and acknowledgement remain covered by runtime tests.",
+    "hunks": [
+      {
+        "before": "import {\n  readXhsSourceBudget,\n  configureXhsSourceBudget,\n",
+        "after": "import { ChannelTaskHistory } from '../collection/channel-task-history';\nimport {\n  readXhsSourceBudget,\n  configureXhsSourceBudget,\n"
+      },
+      {
+        "before": "  }\n\n  private get xhsBatches() {\n    return new XiaohongshuBatches(this.prismaService, this.xhs);\n  }\n\n  private readonly logger = new Logger(this.constructor.name);\n",
+        "after": "  }\n\n  private get xhsBatches() {\n    return new XiaohongshuBatches(this.prismaService, this.xhsSubscriptions!);\n  }\n\n  private readonly logger = new Logger(this.constructor.name);\n"
+      },
+      {
+        "before": "      .mutation(({ input }) =>\n        this.xhs.stopRefresh(input.id, input.operationId),\n      ),\n    createRefreshBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n",
+        "after": "      .mutation(({ input }) =>\n        this.xhs.stopRefresh(input.id, input.operationId),\n      ),\n    prepareRefreshBatchLocalCancellation: this.trpcService.protectedProcedure\n      .input(z.object({ batchId: z.string().uuid() }).strict())\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx, true);\n        return this.xhsSourceOperation(() =>\n          this.xhsBatches.prepareLocalCancellation(input.batchId),\n        );\n      }),\n    confirmRefreshBatchLocalCancellation: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            batchId: z.string().uuid(),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledgedNotDispatched: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsConnection(ctx);\n        return this.xhsSourceOperation(() =>\n          this.xhsBatches.confirmLocalCancellation(input),\n        );\n      }),\n    createRefreshBatch: this.trpcService.protectedProcedure\n      .input(\n        z\n"
+      },
+      {
+        "before": "      ),\n  });\n\n  appRouter = this.trpcService.router({\n    feed: this.feedRouter,\n    account: this.accountRouter,\n    article: this.articleRouter,\n",
+        "after": "      ),\n  });\n\n  channelTasksRouter = this.trpcService.router({\n    status: this.trpcService.protectedProcedure\n      .input(z.object({ channel: z.enum(['wechat', 'xiaohongshu']) }).strict())\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx, true);\n        return new ChannelTaskHistory(this.prismaService).status(input.channel);\n      }),\n    preview: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            channel: z.enum(['wechat', 'xiaohongshu']),\n            action: z.enum(['archive', 'pause', 'resume']),\n          })\n          .strict(),\n      )\n      .query(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx, true);\n        return new ChannelTaskHistory(this.prismaService).preview(\n          input.channel,\n          input.action,\n        );\n      }),\n    confirm: this.trpcService.protectedProcedure\n      .input(\n        z\n          .object({\n            channel: z.enum(['wechat', 'xiaohongshu']),\n            action: z.enum(['archive', 'pause', 'resume']),\n            digest: z.string().regex(/^[a-f0-9]{64}$/),\n            acknowledged: z.literal(true),\n          })\n          .strict(),\n      )\n      .mutation(({ input, ctx }) => {\n        this.requireLocalXhsAccess(ctx);\n        return new ChannelTaskHistory(this.prismaService).confirm(input);\n      }),\n  });\n\n  appRouter = this.trpcService.router({\n    channelTasks: this.channelTasksRouter,\n    feed: this.feedRouter,\n    account: this.accountRouter,\n    article: this.articleRouter,\n"
+      }
+    ]
+  },
+  "apps/web/src/pages/feeds/index.tsx": {
+    "reviewedThroughCommit": "90556e912e275c2bf33e18f06c869b7b47edeb40",
+    "originalGitBlob": "3df2291d2f5c2384eb2b5c4b0df6fb068f9f5d71",
+    "beforeSha256": "503421388d8e04d2284bf1d2699d91e151f1108c9ebdacdeb8c210279b56c10e",
+    "afterSha256": "2fdebebd65fb58261c11e4b5e0d8c3e0d8d8fc0a84fd8dcd9b0dab7d798df9b5",
+    "rationale": "Reviewed channel task controls; all earlier export dialog and reading layout assertions remain pinned.",
+    "hunks": [
+      {
+        "before": "import { Modal, Tooltip } from '@web/components/AppOverlays';\nimport {\n  ContentExportScope,\n",
+        "after": "import { ChannelTaskControls } from './channel-task-controls';\nimport { Modal, Tooltip } from '@web/components/AppOverlays';\nimport {\n  ContentExportScope,\n"
+      },
+      {
+        "before": "          ) : null}\n        </div>\n        <div className=\"mac-content feed-content !min-w-0 !overflow-y-auto\">\n          <SubscriptionTasks\n            feeds={feedData?.items || []}\n            adding={isAddingSubscriptions}\n",
+        "after": "          ) : null}\n        </div>\n        <div className=\"mac-content feed-content !min-w-0 !overflow-y-auto\">\n          <ChannelTaskControls channel=\"wechat\" />\n          <SubscriptionTasks\n            feeds={feedData?.items || []}\n            adding={isAddingSubscriptions}\n"
+      }
+    ]
+  },
+  "apps/server/src/collection/xiaohongshu.service.ts": {
+    "reviewedThroughCommit": "90556e912e275c2bf33e18f06c869b7b47edeb40",
+    "originalGitBlob": "3b33f95389a069cd68f180aab9e5706518ac3c02",
+    "beforeSha256": "f8859d1141e014aac15d3c13630d2738ba6c31667affa40232303e330bd7bf53",
+    "afterSha256": "53a95ad402036f2bd5d0608b82e1b6934f4e364a04f625a3d3cc2ed887d855b2",
+    "rationale": "Reviewed source-runtime delegate and per-channel admission/visibility preserve unknown controls; all original platform assertions remain unchanged.",
+    "hunks": [
+      {
+        "before": "import { ArticlePreparation } from '../article-local-save';\nimport { xhsOriginalLink } from './xhs-original-link';\nimport { Inject, Injectable, Optional } from '@nestjs/common';\n",
+        "after": "import {\n  assertChannelRunnable,\n  taskDatabaseFor,\n  withChannelExecution,\n} from './channel-task-control';\nimport { ArticlePreparation } from '../article-local-save';\nimport { xhsOriginalLink } from './xhs-original-link';\nimport { Inject, Injectable, Optional } from '@nestjs/common';\n"
+      },
+      {
+        "before": "    return this.legacyRefresh(...args);\n  }\n\n  async legacyRefresh(id: string, operationId?: string) {\n    if (this.active.has(id))\n      return fail('该博主正在处理，不会重复发送请求。', 'CONFLICT');\n    this.active.add(id);\n",
+        "after": "    return this.legacyRefresh(...args);\n  }\n\n  async legacyRefresh(\n    ...input: Parameters<XiaohongshuService['legacyRefreshOwned']>\n  ) {\n    return withChannelExecution(\n      'xiaohongshu',\n      () => this.legacyRefreshOwned(...input),\n      input[1] ? { kind: 'xhs-job', id: input[1] } : undefined,\n      await taskDatabaseFor(this.prisma),\n    );\n  }\n  private async legacyRefreshOwned(id: string, operationId?: string) {\n    await assertChannelRunnable(\n      'xiaohongshu',\n      operationId ? { kind: 'xhs-job', id: operationId } : undefined,\n      await taskDatabaseFor(this.prisma),\n    );\n    if (this.active.has(id))\n      return fail('该博主正在处理，不会重复发送请求。', 'CONFLICT');\n    this.active.add(id);\n"
+      }
+    ]
+  }
+}

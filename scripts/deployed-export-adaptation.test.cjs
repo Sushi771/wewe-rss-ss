@@ -15,8 +15,41 @@ const xhsCompatibility = require('./fixtures/xhs-integration-router-compatibilit
 const { restoreXhsReaderRoute } = require('./xhs-reader-removal.cjs');
 const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
-const read = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+const restoreHeldChannel = require('./held-channel-deployment-seams.cjs');
+const read = (file) =>
+  restoreHeldChannel(
+    file,
+    fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+  );
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+test('reviewed held/channel deltas preserve original blobs and reject every unknown or partially reverted edit', () => {
+  const entries = require('./fixtures/held-channel-deployment-compat.json');
+  assert.deepEqual(Object.keys(entries).sort(), [
+    'apps/server/src/collection/xiaohongshu.service.ts',
+    'apps/server/src/trpc/trpc.router.ts',
+    'apps/server/src/trpc/trpc.service.ts',
+    'apps/web/src/pages/feeds/index.tsx',
+    'scripts/local-release/restart.cjs',
+  ]);
+  for (const [file, entry] of Object.entries(entries)) {
+    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(hash(raw), entry.afterSha256);
+    const historical = restoreHeldChannel(file, raw);
+    assert.equal(hash(historical), entry.beforeSha256);
+    assert.equal(restoreHeldChannel(file, historical), historical);
+    for (const changed of [
+      raw + '// unreviewed statement\n',
+      ...entry.hunks.map((h) => raw.replace(h.after, h.before)),
+    ]) {
+      assert.notEqual(changed, raw);
+      assert.throws(
+        () => restoreHeldChannel(file, changed),
+        /exact reviewed held\/channel delta/,
+      );
+    }
+  }
+});
 
 test('error-retention inverse preserves complete original lifecycle sources and refuses every unknown delta', () => {
   const fixtures = require('./fixtures/lifecycle-error-chain-compat.json');
