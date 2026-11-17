@@ -18,7 +18,7 @@ test(
         assert.equal(f.profile.oldProcess, undefined);
         const queue = fs.readFileSync(f.retainedQueue);
         const result = await runFixedProfile(f.profilePin);
-        assert.equal(result.status, 'completed');
+        assert.equal(result.status, 'completed', result.error);
         assert.equal(result.journal.backup.reused, true);
         assert.deepEqual(fs.readFileSync(f.database), f.before);
         assert.deepEqual(fs.readFileSync(f.retainedQueue), queue);
