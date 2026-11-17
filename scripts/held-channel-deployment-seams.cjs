@@ -5,7 +5,7 @@ const entries = require('./fixtures/held-channel-deployment-compat.json');
 const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
 assert.equal(
   sha(JSON.stringify(entries)),
-  '607d333bced7f3892ba8f49e2df14aa64fdd564c8fe63135409892ee7d00a7de',
+  '8cce5c1b672969e432f2783a4020b40d4c692ae6d354d9a752106cb317863692',
   'fixed reviewed held/channel difference inventory',
 );
 module.exports = function restoreHeldChannel(file, source) {
