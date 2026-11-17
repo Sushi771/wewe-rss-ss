@@ -52,3 +52,13 @@ tRPC 路径固定为 `/trpc/` 加上表中过程名。HTTP和tRPC两层使用同
 `scripts/local-release/updater/installer/installed-adapter.test.cjs` 联合实际宿主、控制器和更新引擎，使用 SQLite backup API 对全新临时数据库执行备份与恢复。测试固定清单只授权本测试自己创建的合成文件；其 node.exe、runtime 和原生进程观察都是不可执行的合成材料，不能用于任何真实安装。覆盖重复、并发、独立更新器共享启动锁、回滚、提交后失败、快照篡改和不完整 writer 观察；临时 queued/unknown 文档逐字节保留且禁止网络访问。
 
 现有构建仅复制 updater 核心，正式接线仍需构建所有者提供独立固定信任、完整受审工具闭包及真实维护授权。只读预提交健康、提交后暂停期管理健康、真实生产安装、本地结算及外部采集分别验收，任何一个阶段成功都不能替代后续阶段。
+
+## 原正式维护入口及严格备份复用
+
+`maintenance-driver-v1` 已支持固定计划与外部受审驱动的分派。其真实执行者仍负责原生身份、全 writer 排除、共享控制锁、任务暂停、写前备份、恢复和活动指针授权；不需要通过伪造普通 updater 的 writer registry 来接管旧实例。
+
+`prepareMaintenanceBinding` 仅编译数据提案。调用者须分别提供固定计划/驱动针和独立审查期待的当前/候选身份；函数验证包的实际完整字节，拒绝候选自报信任、草稿升格、被改动证据、缺失依赖、链接输入及以应用包代码充当独立控制驱动。它不加载驱动、不发布配置、不转换旧回执。返回的 declared closure 只表示列出的针匹配，完整传递依赖仍由构建和审查所有者确认。
+
+内部 Python API `require_reusable(database, backup_root, expected_backup, expected_sha256, timeout=55)` 只验证指定 protected 来源的既有快照。它复用原全 schema/typed rows、完整性和哈希验证，持有既有 full-snapshot OS 锁并重核数据/回执/文件状态；普通备份函数的“复用失败则新建”行为不会被调用。该 API 没有新增 CLI、没有创建备份或更新引用的回退路径，只可能创建原标准锁路径。返回真实 `reused=true` 的证明，不能改写成新建快照回执。
+
+验证快照与获得维护授权是不同的条件。真实驱动须在该调用前后持有原正式维护租约、全 writer 停止证明及正常审批/预算，并一直保留至后续操作结束。历史 unknown、认证/限流、请求未结算、后台暂停以及原本地结算的写前备份门禁仍由各原入口检查。新 helper 没有接管或放行它们。
