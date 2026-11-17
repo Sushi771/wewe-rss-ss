@@ -10,8 +10,10 @@ const DEFAULT_BYTES = 768 * 1024 ** 2,
 const context = require('./lib.cjs').hostEffects.context;
 const WRITE_KINDS = ['build', 'install', 'activate', 'restart', 'switch'];
 const BOUND_OPERATION = Symbol('bound-operation');
+const FAILED_BUILD_RECOVERY = Symbol('failed-build-recovery');
 const hash = (v) =>
   crypto.createHash('sha256').update(JSON.stringify(v)).digest('hex');
+const hashBytes = (v) => crypto.createHash('sha256').update(v).digest('hex');
 const {
   createVerifier,
   FORMAT: INVENTORY_FORMAT,
@@ -74,6 +76,124 @@ function state(file) {
   if (!v.payload || v.digest !== hash(v.payload))
     throw new Error('RELEASE_SCOPE_STATE_CORRUPT');
   return v.payload;
+}
+// Read an explicitly reviewed recovery input through one pinned descriptor.
+function recoveryBytes(pin, max) {
+  const reject = () => {
+    throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PIN_CHANGED');
+  };
+  if (
+    !pin ||
+    !path.isAbsolute(pin.path || '') ||
+    !/^[a-f0-9]{64}$/.test(pin.sha256 || '') ||
+    !Array.isArray(pin.identity) ||
+    pin.identity.length !== 3 ||
+    canonical(pin.path) !== pin.path
+  )
+    reject();
+  const before = fs.lstatSync(pin.path, { bigint: true });
+  const key = (s) =>
+    [s.dev, s.ino, s.birthtimeNs, s.size, s.mtimeNs, s.ctimeNs, s.nlink].map(
+      String,
+    );
+  if (
+    !before.isFile() ||
+    before.isSymbolicLink() ||
+    before.nlink !== 1n ||
+    before.size > BigInt(max) ||
+    hash([before.dev, before.ino, before.birthtimeNs].map(String)) !==
+      hash(pin.identity)
+  )
+    reject();
+  const fd = fs.openSync(pin.path, 'r');
+  try {
+    if (hash(key(fs.fstatSync(fd, { bigint: true }))) !== hash(key(before)))
+      reject();
+    const data = Buffer.alloc(Number(before.size));
+    let offset = 0;
+    while (offset < data.length) {
+      const n = fs.readSync(fd, data, offset, data.length - offset, null);
+      if (!n) reject();
+      offset += n;
+    }
+    if (
+      hash(key(fs.fstatSync(fd, { bigint: true }))) !== hash(key(before)) ||
+      hash(key(fs.lstatSync(pin.path, { bigint: true }))) !==
+        hash(key(before)) ||
+      hashBytes(data) !== pin.sha256
+    )
+      reject();
+    return data;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function observeBuildRecovery(approval, registry, outputRoot) {
+  if (process.platform !== 'win32')
+    throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_NATIVE_REQUIRED');
+  // This is an observation only. Neither a process nor a task is stopped.
+  const command =
+    "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $processRows=@(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object { [PSCustomObject]@{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;name=[string]$_.Name;executable=[string]$_.ExecutablePath;commandLine=[string]$_.CommandLine} }); if ($processRows.Count -gt 8192) { throw 'PROCESS_LIMIT' }; [PSCustomObject]@{observerPid=$PID;rows=$processRows} | ConvertTo-Json -Depth 4 -Compress";
+  const doc = JSON.parse(
+    execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', command],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 20000,
+        maxBuffer: 8 * 1024 ** 2,
+      },
+    ),
+  );
+  if (!Array.isArray(doc.rows) || doc.rows.length > 8192)
+    throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PROCESS_QUERY_INCOMPLETE');
+  const rows = new Map(doc.rows.map((r) => [r.pid, r]));
+  const observer = rows.get(doc.observerPid);
+  if (
+    rows.size !== doc.rows.length ||
+    !rows.has(process.pid) ||
+    observer?.parentPid !== process.pid
+  )
+    throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PROCESS_QUERY_INCOMPLETE');
+  const ancestors = new Set([doc.observerPid]);
+  let current = rows.get(process.pid);
+  for (let n = 0; current && n < 64; n++) {
+    if (ancestors.has(current.pid))
+      throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PROCESS_QUERY_INCOMPLETE');
+    ancestors.add(current.pid);
+    current = rows.get(current.parentPid);
+  }
+  const needles = [
+    registry,
+    outputRoot,
+    approval.owner.entry,
+    path.resolve(__dirname, '../..'),
+  ].map((v) => v.replace(/\//g, '\\').toLowerCase());
+  const writers = [];
+  for (const r of rows.values()) {
+    if (ancestors.has(r.pid)) continue;
+    if (
+      /^(node|python\d*|powershell|pwsh|cmd)(\.exe)?$/i.test(r.name) &&
+      (!r.commandLine || !r.executable)
+    )
+      throw new Error('RELEASE_SCOPE_BUILD_RECOVERY_PROCESS_QUERY_INCOMPLETE');
+    const text = (r.executable + '\n' + r.commandLine)
+      .replace(/\//g, '\\')
+      .toLowerCase();
+    if (
+      needles.some((v) => text.includes(v)) ||
+      /(?:^|[\\/\s"'])(?:build|ci-final-build-review)\.cjs(?:[\s"']|$)|[\\/](?:tsc|vite)(?:\.js)?(?:[\s"']|$)|prisma[^\n]*\bgenerate\b/i.test(
+        text,
+      )
+    )
+      writers.push({ pid: r.pid });
+  }
+  return {
+    complete: true,
+    ownerAbsent: !rows.has(approval.owner.pid),
+    writers,
+  };
 }
 function inspect(paths, options = {}) {
   const roots = paths
@@ -406,7 +526,7 @@ function open(request, options = {}, boundOperation) {
   if (session()) throw new Error('RELEASE_SCOPE_NESTED_OPEN_FORBIDDEN');
   request = { runtimeCopies: 0, ...request };
   if (
-    boundOperation !== BOUND_OPERATION &&
+    ![BOUND_OPERATION, FAILED_BUILD_RECOVERY].includes(boundOperation) &&
     (!WRITE_KINDS.includes(request.kind) || request.reserveBytes < 1)
   )
     throw new Error('RELEASE_SCOPE_OBSERVATION_REQUIRES_WITHIN');
@@ -540,8 +660,8 @@ function open(request, options = {}, boundOperation) {
         throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED');
       try {
         require('./private-artifact-proof.cjs').verifyControl(c, charge);
-      } catch {
-        throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED');
+      } catch (error) {
+        throw new Error('RELEASE_PRESERVING_CONTROL_CHANGED', { cause: error });
       }
     }
   };
@@ -1742,7 +1862,230 @@ function open(request, options = {}, boundOperation) {
     fullValidated = true;
     return measure;
   };
+  // Recovery only freezes the failed output. It neither publishes a package nor
+  // forgives its bytes/runtime copy. The old policy and original ledger survive.
+  const recoverBuild = () => {
+    const refuse = (cause) => {
+      throw new Error('RELEASE_SCOPE_FAILED_BUILD_RECOVERY_REFUSED', { cause });
+    };
+    const spec = options.failedBuildRecovery;
+    const raw = recoveryBytes(spec, 65536);
+    const a = JSON.parse(raw);
+    if (
+      a.format !== 1 ||
+      a.kind !== 'retain-failed-build' ||
+      policy.phase !== 'build-only' ||
+      policy.format !== 2 ||
+      !rootRoles ||
+      effectScope ||
+      a.scopeId !== policy.scopeId ||
+      a.policySha256 !== configSha ||
+      a.registryDirectory !== directory ||
+      hash(a.registryIdentity) !== hash(policy.registryIdentity) ||
+      a.recoveryModuleSha256 !== fileHash(__filename) ||
+      !a.reviewEvidence ||
+      typeof a.reviewEvidence !== 'string' ||
+      !Number.isSafeInteger(a.owner?.pid) ||
+      a.owner.pid < 1 ||
+      !/^\d{4}-\d\d-\d\dT/.test(a.owner.startUtc || '') ||
+      !path.isAbsolute(a.owner.entry || '')
+    )
+      refuse();
+    const snapshotFile = ledger + '.failed-build-' + spec.sha256 + '.json';
+    const replay = prior.failedBuildRecovery?.approvalSha256 === spec.sha256;
+    const saved = replay
+      ? recoveryBytes(
+          {
+            path: snapshotFile,
+            identity: fileIdentity(snapshotFile),
+            sha256: prior.failedBuildRecovery.snapshotSha256,
+          },
+          4 * 1024 ** 2,
+        )
+      : undefined;
+    const oldRaw = replay
+      ? Buffer.from(JSON.parse(saved).ledgerBase64, 'base64')
+      : recoveryBytes(a.ledger, 4 * 1024 ** 2);
+    const before = JSON.parse(oldRaw);
+    const adoption = recoveryBytes(a.adoption, 64);
+    if (
+      a.ledger.path !== ledger ||
+      hashBytes(oldRaw) !== a.ledger.sha256 ||
+      a.adoption.path !== ledger + '.adopted' ||
+      adoption.toString('utf8') !== configSha ||
+      before.digest !== hash(before.payload) ||
+      before.payload.configSha !== configSha ||
+      before.payload.format !== 2 ||
+      before.payload.claim?.id !== a.claimId ||
+      before.payload.claim?.kind !== 'build' ||
+      before.payload.claim.root !== policy.buildOnly.outputRoot ||
+      before.payload.outputs.length !== 1 ||
+      before.payload.claim.outputs.length !== 1 ||
+      before.payload.claim.outputs[0] !== a.output.path ||
+      before.payload.outputs[0].path !== a.output.path ||
+      before.payload.outputs[0].claim !== a.claimId ||
+      before.payload.outputs[0].complete !== false ||
+      hash(before.payload.outputs[0].identity) !== hash(a.output.identity) ||
+      !contains(policy.buildOnly.outputRoot, a.output.path) ||
+      path.dirname(a.output.path) !== policy.buildOnly.outputRoot
+    )
+      refuse();
+    const nextRaw = recoveryBytes(a.nextPolicy, 1024 * 1024);
+    const next = JSON.parse(nextRaw);
+    // Only exact source bindings and existing finite inventory-profile settings
+    // may change. Capacity, history, roots, protected inputs and probes stay pinned.
+    const oldShape = structuredClone(policy);
+    const nextShape = structuredClone(next);
+    for (const shape of [oldShape, nextShape]) {
+      delete shape.buildOnly.sourceCommit;
+      delete shape.buildOnly.sourceHash;
+      delete shape.scanBudget;
+      delete shape.maxNewRuntimeCopies;
+    }
+    const selected = require('./scope-inventory.cjs').settings(next.scanBudget);
+    if (
+      hash(oldShape) !== hash(nextShape) ||
+      next.scanBudget?.profile !== policy.scanBudget?.profile ||
+      selected.checkpointMode !== verifier.limits.checkpointMode ||
+      selected.durationMs < verifier.limits.durationMs ||
+      !/^[a-f0-9]{40}$/.test(next.buildOnly.sourceCommit || '') ||
+      !/^[a-f0-9]{64}$/.test(next.buildOnly.sourceHash || '') ||
+      !Number.isInteger(a.output.runtimeCopies) ||
+      next.maxNewRuntimeCopies !==
+        policy.maxNewRuntimeCopies + a.output.runtimeCopies ||
+      next.maxNewRuntimeCopies > 4 ||
+      a.nextPolicy.path === file
+    )
+      refuse();
+    const snapshot = Buffer.from(
+      JSON.stringify({
+        format: 1,
+        ledgerBase64: oldRaw.toString('base64'),
+        policyBase64: fs.readFileSync(file).toString('base64'),
+        nextPolicyBase64: nextRaw.toString('base64'),
+        approvalBase64: raw.toString('base64'),
+        failureLogBase64: recoveryBytes(a.failureLog, 1024 * 1024).toString(
+          'base64',
+        ),
+      }),
+    );
+    const after = {
+      ...before.payload,
+      configSha: a.nextPolicy.sha256,
+      claim: null,
+      outputs: [
+        {
+          ...before.payload.outputs[0],
+          complete: true,
+          digest: a.output.digest,
+          metadataDigest: a.output.metadataDigest,
+          retainedFailure: { claimId: a.claimId, approvalSha256: spec.sha256 },
+        },
+      ],
+      failedBuildRecovery: {
+        approvalSha256: spec.sha256,
+        snapshotSha256: hashBytes(snapshot),
+        oldPolicySha256: configSha,
+        nextPolicySha256: a.nextPolicy.sha256,
+        claimId: a.claimId,
+      },
+    };
+    const validate = () => {
+      owner();
+      recoveryBytes(spec, 65536);
+      recoveryBytes(a.failureLog, 1024 * 1024);
+      recoveryBytes(a.owner.entryPin, 1024 * 1024);
+      if (a.owner.entryPin.path !== a.owner.entry) refuse();
+      recoveryBytes(a.nextPolicy, 1024 * 1024);
+      recoveryBytes(a.adoption, 64);
+      checkRoots(referenceRoots);
+      checkControls((n) => verifier.chargeExternal(n));
+      if (present(path.join(policy.buildOnly.outputRoot, '.build-budget.lock')))
+        refuse();
+      const observation = options.observeBuildRecovery
+        ? options.observeBuildRecovery(a)
+        : observeBuildRecovery(a, directory, policy.buildOnly.outputRoot);
+      if (
+        observation?.complete !== true ||
+        observation.ownerAbsent !== true ||
+        !Array.isArray(observation.writers) ||
+        observation.writers.length
+      )
+        refuse(new Error('RELEASE_SCOPE_BUILD_OWNER_NOT_PROVEN_EXITED'));
+      const output = verifier.scan([
+        { path: a.output.path, identity: a.output.identity },
+      ]);
+      if (
+        output.privateEntries ||
+        ['digest', 'metadataDigest', 'bytes', 'runtimeCopies'].some(
+          (key) => output[key] !== a.output[key],
+        ) ||
+        verifier.scan(protectedPackages, [], { metadataOnly: true })
+          .metadataDigest !== protectedSnapshot.metadataDigest
+      )
+        refuse(new Error('RELEASE_SCOPE_FAILED_OUTPUT_CHANGED'));
+      const measured = measureScope(before.payload.outputs);
+      if (
+        measured.digest !== policy.baseline.digest ||
+        measured.metadataDigest !== policy.baseline.metadataDigest ||
+        measured.bytes > policy.maxBytes ||
+        measured.runtimeCopies - policy.baseline.runtimeCopies >
+          policy.maxNewRuntimeCopies
+      )
+        refuse();
+      if (!replay) {
+        if (!recoveryBytes(a.ledger, 4 * 1024 ** 2).equals(oldRaw)) refuse();
+        // The original observer validates current locks, process references and
+        // frozen inputs against the unchanged old policy before any commit.
+        if (references().digest !== before.payload.claim.refs) refuse();
+      }
+    };
+    if (replay) {
+      if (
+        prior.configSha !== a.nextPolicy.sha256 ||
+        hash(prior.failedBuildRecovery) !== hash(after.failedBuildRecovery) ||
+        hash(prior.outputs.find((o) => o.path === a.output.path)) !==
+          hash(after.outputs[0]) ||
+        !saved.equals(snapshot)
+      )
+        refuse();
+      validate();
+      return { recovered: true, alreadyRecovered: true, claimId: a.claimId };
+    }
+    validate();
+    options.onFailedBuildRecoveryStep?.('before-snapshot');
+    validate();
+    if (present(snapshotFile)) {
+      recoveryBytes(
+        {
+          path: snapshotFile,
+          identity: fileIdentity(snapshotFile),
+          sha256: hashBytes(snapshot),
+        },
+        4 * 1024 ** 2,
+      );
+    } else {
+      const fd = fs.openSync(snapshotFile, 'wx', 0o600);
+      try {
+        fs.writeFileSync(fd, snapshot);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+    options.onFailedBuildRecoveryStep?.('before-commit');
+    validate();
+    owner();
+    recoveryBytes(a.ledger, 4 * 1024 ** 2);
+    atomic(ledger, after);
+    ledgerIdentity = fileIdentity(ledger);
+    prior = after;
+    options.onFailedBuildRecoveryStep?.('after-commit');
+    return { recovered: true, alreadyRecovered: false, claimId: a.claimId };
+  };
   try {
+    if (boundOperation === FAILED_BUILD_RECOVERY && !present(ledger))
+      throw new Error('RELEASE_SCOPE_FAILED_BUILD_RECOVERY_REFUSED');
     if (
       (repairPath || repairSha) &&
       (!present(ledger) || !present(ledger + '.adopted'))
@@ -1813,6 +2156,12 @@ function open(request, options = {}, boundOperation) {
     if (present(ledger)) {
       ledgerIdentity = fileIdentity(ledger);
       prior = state(ledger);
+      if (boundOperation === FAILED_BUILD_RECOVERY) {
+        const receipt = recoverBuild();
+        owner();
+        fs.unlinkSync(lock);
+        return receipt;
+      }
       repairBinding();
       if (
         prior.format !== policy.format ||
@@ -2448,6 +2797,12 @@ function open(request, options = {}, boundOperation) {
       },
       authorizePackage(folder) {
         owner();
+        if (
+          prior.outputs.some(
+            (o) => o.retainedFailure && contains(o.path, canonical(folder)),
+          )
+        )
+          throw new Error('RELEASE_SCOPE_RETAINED_FAILURE_NOT_PUBLISHABLE');
         if (policy.phase === 'build-only')
           throw new Error('RELEASE_SCOPE_BUILD_ONLY_NO_INSTALL');
         const m = read(
@@ -2707,6 +3062,23 @@ function within(request, run, options) {
   lease.close(undefined, { transition: request.transition === true });
   return result;
 }
+// Callers supply an action-specific pinned review, never a stale-lock override.
+function recoverFailedBuild(options) {
+  const policy = read(options.configPath);
+  return open(
+    {
+      kind: 'build',
+      root: policy.buildOnly?.outputRoot,
+      reserveBytes: 1,
+      runtimeCopies: 0,
+      buildOnly: true,
+      sourceCommit: policy.buildOnly?.sourceCommit,
+      sourceHash: policy.buildOnly?.sourceHash,
+    },
+    options,
+    FAILED_BUILD_RECOVERY,
+  );
+}
 module.exports = {
   inspect,
   open,
@@ -2714,6 +3086,8 @@ module.exports = {
   session,
   requireSession,
   assertWritableSession,
+  recoverFailedBuild,
+  inspectFailedBuildWriters: observeBuildRecovery,
   DEFAULT_BYTES,
   MIN_FREE,
 };

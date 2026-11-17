@@ -35,3 +35,17 @@ require a new freeze. Fixture receipts never grant authority to a real host.
 Build the final candidate from the exact CI-verified commit. Retain a local
 receipt mapping every source input and packaged control file to that commit and
 verify the complete immutable release before handing it to the sole installer.
+
+`release-scope.recoverFailedBuild` handles one explicitly reviewed interrupted
+build with a retained nonempty output. Its pinned review binds the original
+ledger, adoption marker, output inventory, owner, failure log and next policy.
+The existing registry mutex, native process census and original reference probe
+must all pass before an atomic registry update. The failed output remains at its
+original path, is frozen and charged to the same capacity, and cannot be
+published. Original ledger/policy/log bytes are retained in a recovery snapshot.
+The next policy may update exact source bindings and finite existing inventory
+profile limits; byte capacity, roots, protected controls and physical reserve
+remain fixed. Its runtime allowance includes the retained failed copy explicitly.
+Repeated recovery is read-only; an interrupted precommit leaves the original
+claim intact. This local build recovery grants no production installation or
+source-collection authority. Budget refusals retain their original error cause.

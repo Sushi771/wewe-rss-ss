@@ -1378,6 +1378,65 @@ test('preserving split build accounts only fresh output and keeps old roots read
     );
     assert.equal(fs.readFileSync(archive, 'utf8'), 'synthetic old history');
   }));
+test('preserving control diagnostics retain an expired verifier budget and hold unfinished output', () =>
+  fixture((f) => {
+    const { request, pointer } = splitPreservingBuild(f);
+    const before = fs.readFileSync(pointer);
+    const originalNow = performance.now.bind(performance);
+    let expired = false;
+    patch(
+      performance,
+      'now',
+      () => originalNow() + (expired ? 31000 : 0),
+      () => {
+        const lease = scope.open(request, f.options());
+        const at = output(f, lease);
+        expired = true;
+        const check = (error) => {
+          assert.equal(error.message, 'RELEASE_PRESERVING_CONTROL_CHANGED');
+          assert.equal(error.cause?.message, 'RELEASE_SCOPE_SCAN_TIME_BUDGET');
+          return true;
+        };
+        assert.throws(() => lease.check(), check);
+        assert.throws(() => lease.close(new Error('synthetic failure')), check);
+        const ledger = JSON.parse(
+          fs.readFileSync(path.join(f.base, f.policy.scopeId + '.state.json')),
+        ).payload;
+        assert(ledger.claim, 'expired operation must not release its claim');
+        assert.equal(ledger.outputs[0].complete, false);
+        assert(fs.existsSync(at), 'unfinished output remains for review');
+        assert(fs.readFileSync(pointer).equals(before));
+      },
+    );
+  }));
+
+test('preserving control diagnostics retain read-budget refusals without admitting a write', () =>
+  fixture((f) => {
+    const { request } = splitPreservingBuild(f);
+    const lease = scope.open(request, f.options());
+    const proof = require('./private-artifact-proof.cjs');
+    patch(
+      proof,
+      'verifyControl',
+      (_spec, charge) => charge(2 * 1024 ** 3 + 1),
+      () => {
+        assert.throws(
+          () => lease.check(),
+          (error) => {
+            assert.equal(error.message, 'RELEASE_PRESERVING_CONTROL_CHANGED');
+            assert.equal(
+              error.cause?.message,
+              'RELEASE_SCOPE_SCAN_READ_BUDGET',
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(fs.readdirSync(f.build), []);
+        assert.throws(() => lease.close(), /CONTROL_CHANGED/);
+      },
+    );
+  }));
+
 for (const mutation of ['runtime', 'manifest', 'control'])
   test(`preserving split build rejects changed protected ${mutation}`, () =>
     fixture((f) => {
@@ -1397,6 +1456,266 @@ for (const mutation of ['runtime', 'manifest', 'control'])
         /PROTECTED_CHANGED|CONTROL_CHANGED/,
       );
     }));
+function failedBuildFixture(run) {
+  return fixture((f) => {
+    const { request } = splitPreservingBuild(f);
+    const lease = scope.open(request, f.options());
+    const at = output(f, lease);
+    fs.writeFileSync(path.join(at, 'node.exe'), 'inert retained runtime');
+    assert.throws(
+      () => lease.close(new Error('synthetic failed build')),
+      /FAILED_OUTPUT/,
+    );
+    const ledger = path.join(f.base, f.policy.scopeId + '.state.json');
+    const pin = (file) => {
+      const s = fs.lstatSync(file, { bigint: true });
+      return {
+        path: fs.realpathSync.native(file),
+        identity: [s.dev, s.ino, s.birthtimeNs].map(String),
+        sha256: fileHash(file),
+      };
+    };
+    const inventory = scope.inspect([at], {
+      privateAccounting: 'private-names-v1',
+    }).baseline;
+    const next = structuredClone(f.policy);
+    next.buildOnly.sourceCommit = 'c'.repeat(40);
+    next.buildOnly.sourceHash = 'd'.repeat(64);
+    next.maxNewRuntimeCopies += inventory.runtimeCopies;
+    const nextFile = path.join(f.base, 'next-policy.json');
+    fs.writeFileSync(nextFile, JSON.stringify(next));
+    const failureLog = path.join(f.base, 'failed.log');
+    fs.writeFileSync(failureLog, 'synthetic failed build evidence');
+    const original = fs.readFileSync(ledger);
+    const state = JSON.parse(original).payload;
+    const approval = {
+      format: 1,
+      kind: 'retain-failed-build',
+      scopeId: f.policy.scopeId,
+      policySha256: fileHash(f.config),
+      registryDirectory: f.base,
+      registryIdentity: f.policy.registryIdentity,
+      recoveryModuleSha256: fileHash(path.join(__dirname, 'release-scope.cjs')),
+      reviewEvidence: 'synthetic exact failed build review',
+      owner: {
+        pid: 2147483000,
+        startUtc: '2026-11-17T00:00:00Z',
+        entry: failureLog,
+        entryPin: pin(failureLog),
+      },
+      claimId: state.claim.id,
+      ledger: pin(ledger),
+      adoption: pin(ledger + '.adopted'),
+      failureLog: pin(failureLog),
+      nextPolicy: pin(nextFile),
+      output: { path: at, identity: state.outputs[0].identity, ...inventory },
+    };
+    const reviewFile = path.join(f.base, 'recovery-review.json');
+    const save = () => fs.writeFileSync(reviewFile, JSON.stringify(approval));
+    save();
+    const options = () => ({
+      ...f.options(),
+      failedBuildRecovery: pin(reviewFile),
+      observeBuildRecovery: () => ({
+        complete: true,
+        ownerAbsent: true,
+        writers: [],
+      }),
+    });
+    return run({
+      f,
+      at,
+      ledger,
+      original,
+      approval,
+      save,
+      pin,
+      next,
+      nextFile,
+      reviewFile,
+      options,
+      recover: (changes) =>
+        scope.recoverFailedBuild({ ...options(), ...changes }),
+    });
+  });
+}
+
+test('failed build recovery freezes exact output, retains diagnostics, and admits a new build in the same root', () =>
+  failedBuildFixture((x) => {
+    assert.equal(x.recover().recovered, true);
+    const first = fs.readFileSync(x.ledger);
+    const retained = JSON.parse(first).payload;
+    assert.equal(retained.claim, null);
+    assert.equal(
+      retained.outputs[0].retainedFailure.claimId,
+      x.approval.claimId,
+    );
+    assert.equal(retained.outputs[0].complete, true);
+    assert.equal(
+      fs.readFileSync(x.approval.failureLog.path, 'utf8'),
+      'synthetic failed build evidence',
+    );
+    assert.equal(x.recover().alreadyRecovered, true);
+    assert(fs.readFileSync(x.ledger).equals(first));
+    const snapshot =
+      x.ledger + '.failed-build-' + x.pin(x.reviewFile).sha256 + '.json';
+    assert(
+      Buffer.from(
+        JSON.parse(fs.readFileSync(snapshot)).ledgerBase64,
+        'base64',
+      ).equals(x.original),
+    );
+    const request = {
+      kind: 'build',
+      root: x.f.build,
+      reserveBytes: 4096,
+      runtimeCopies: 1,
+      buildOnly: true,
+      sourceCommit: x.next.buildOnly.sourceCommit,
+      sourceHash: x.next.buildOnly.sourceHash,
+    };
+    const lease = scope.open(request, {
+      ...x.f.options(),
+      configPath: x.nextFile,
+      configSha256: fileHash(x.nextFile),
+    });
+    assert.equal(
+      lease.check().runtimeCopies,
+      1,
+      'retained failed runtime still consumes capacity',
+    );
+    assert.throws(() => lease.authorizePackage(x.at), /RETAINED_FAILURE/);
+    output(x.f, lease, 'new-build');
+    lease.close();
+    assert(fs.existsSync(path.join(x.at, 'node.exe')));
+  }));
+
+for (const mutation of [
+  'live owner',
+  'writer',
+  'incomplete census',
+  'output',
+  'log',
+  'policy',
+  'ledger',
+  'adoption',
+  'module',
+])
+  test(`failed build recovery refuses ${mutation} without clearing its claim`, () =>
+    failedBuildFixture((x) => {
+      const opts = {};
+      if (mutation === 'live owner')
+        opts.observeBuildRecovery = () => ({
+          complete: true,
+          ownerAbsent: false,
+          writers: [],
+        });
+      if (mutation === 'writer')
+        opts.observeBuildRecovery = () => ({
+          complete: true,
+          ownerAbsent: true,
+          writers: [{ pid: 123 }],
+        });
+      if (mutation === 'incomplete census')
+        opts.observeBuildRecovery = () => ({
+          complete: false,
+          ownerAbsent: true,
+          writers: [],
+        });
+      if (mutation === 'output')
+        fs.appendFileSync(path.join(x.at, 'runtime'), 'late');
+      if (mutation === 'log')
+        fs.appendFileSync(x.approval.failureLog.path, 'late');
+      if (mutation === 'policy') {
+        x.next.maxBytes++;
+        fs.writeFileSync(x.nextFile, JSON.stringify(x.next));
+        x.approval.nextPolicy = x.pin(x.nextFile);
+        x.save();
+      }
+      if (mutation === 'ledger') x.approval.ledger.sha256 = '0'.repeat(64);
+      if (mutation === 'adoption') x.approval.adoption.sha256 = '0'.repeat(64);
+      if (mutation === 'module')
+        x.approval.recoveryModuleSha256 = '0'.repeat(64);
+      x.save();
+      assert.throws(() => x.recover(opts), /RECOVERY/);
+      assert(fs.readFileSync(x.ledger).equals(x.original));
+      assert(fs.existsSync(x.at));
+    }));
+
+for (const step of ['before-snapshot', 'before-commit', 'after-commit'])
+  test(`failed build recovery is recoverable after interruption at ${step}`, () =>
+    failedBuildFixture((x) => {
+      assert.throws(
+        () =>
+          x.recover({
+            onFailedBuildRecoveryStep: (actual) => {
+              if (actual === step) throw new Error('synthetic interruption');
+            },
+          }),
+        /synthetic interruption/,
+      );
+      if (step !== 'after-commit')
+        assert(fs.readFileSync(x.ledger).equals(x.original));
+      assert.equal(x.recover().recovered, true);
+      assert(fs.existsSync(x.at));
+    }));
+
+test('failed build recovery holds the original lock and refuses a late output mutation', () =>
+  failedBuildFixture((x) => {
+    let contended = false;
+    assert.throws(
+      () =>
+        x.recover({
+          onFailedBuildRecoveryStep: (step) => {
+            if (step !== 'before-commit') return;
+            assert.throws(() => x.recover(), /EEXIST/);
+            contended = true;
+            fs.appendFileSync(path.join(x.at, 'runtime'), 'late');
+          },
+        }),
+      /RECOVERY/,
+    );
+    assert(contended);
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+  }));
+
+for (const kind of ['install', 'unknown'])
+  test(`failed build recovery refuses a ${kind} claim even with an exact refreshed record pin`, () =>
+    failedBuildFixture((x) => {
+      const doc = JSON.parse(x.original);
+      doc.payload.claim.kind = kind;
+      doc.digest = crypto
+        .createHash('sha256')
+        .update(JSON.stringify(doc.payload))
+        .digest('hex');
+      fs.writeFileSync(x.ledger, JSON.stringify(doc));
+      const unchanged = fs.readFileSync(x.ledger);
+      x.approval.ledger = x.pin(x.ledger);
+      x.save();
+      assert.throws(() => x.recover(), /RECOVERY/);
+      assert(fs.readFileSync(x.ledger).equals(unchanged));
+    }));
+
+test('failed build recovery never overwrites an incomplete diagnostic snapshot', () =>
+  failedBuildFixture((x) => {
+    const snapshot =
+      x.ledger + '.failed-build-' + x.pin(x.reviewFile).sha256 + '.json';
+    fs.writeFileSync(snapshot, 'interrupted snapshot');
+    assert.throws(() => x.recover(), /RECOVERY/);
+    assert.equal(fs.readFileSync(snapshot, 'utf8'), 'interrupted snapshot');
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+  }));
+
+test('failed build recovery cannot raise the existing finite profile ceiling', () =>
+  failedBuildFixture((x) => {
+    x.next.scanBudget = { durationMs: 30001 };
+    fs.writeFileSync(x.nextFile, JSON.stringify(x.next));
+    x.approval.nextPolicy = x.pin(x.nextFile);
+    x.save();
+    assert.throws(() => x.recover(), /SCAN_BUDGET_INVALID/);
+    assert(fs.readFileSync(x.ledger).equals(x.original));
+  }));
+
 test('preserving split build rejects replaced protected root and overlapping roles', () =>
   fixture((f) => {
     const { request } = splitPreservingBuild(f);
