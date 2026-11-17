@@ -20,6 +20,7 @@ function writeNew(file, data) {
   }
 }
 function underScope(c) {
+  if (c.options.abortBuildRetirementPreparation) return abortPreparation(c);
   const { options, policy, configSha, ledger, directory } = c;
   const spec = options.buildRetirement;
   const raw = c.readPin(spec, 65536),
@@ -209,12 +210,14 @@ function underScope(c) {
       claim: {
         id: spec.sha256,
         kind: 'build-retirement',
+        outputs: [],
         root,
         snapshotFile,
         snapshotSha256: sha(snapshot),
       },
     };
     c.save(current);
+    options.onBuildRetirementStep?.('after-intent');
   }
   const row = before.outputs.find((o) => o.path === a.target);
   if (
@@ -498,5 +501,147 @@ function origin(payload, expected, ledger, readPin, fileIdentity) {
   }
   if (!same(before, next)) refuse('ORIGIN_CHANGED');
   return { payload: old.payload, policySha256: old.payload.configSha };
+}
+// Exact rollback of this entry's defective, never-started preparation. The
+// original full reference check runs against the actually restored prior state
+// while the SAME mutex remains owned; failure reinstates the held intent.
+function abortPreparation(c) {
+  const spec = c.options.abortBuildRetirementPreparation;
+  const raw = c.readPin(spec, 65536),
+    a = JSON.parse(raw),
+    held = c.prior;
+  if (
+    a.format !== 1 ||
+    a.kind !== 'abort-unstarted-build-retirement' ||
+    a.scopeId !== c.policy.scopeId ||
+    a.policySha256 !== c.configSha ||
+    a.moduleSha256 !== fileSha(__filename) ||
+    !a.reviewEvidence
+  )
+    refuse('PREPARATION_ABORT_REVIEW_REQUIRED');
+  if (
+    a.entry?.path !== a.owner?.entry ||
+    a.adoption?.path !== c.ledger + '.adopted'
+  )
+    refuse('PREPARATION_ABORT_REVIEW_REQUIRED');
+  if (
+    held.buildRetirementPreparationAbort?.approvalSha256 === spec.sha256 &&
+    !held.claim &&
+    held.configSha === c.configSha
+  ) {
+    const audit = c.ledger + '.preparation-abort-' + spec.sha256 + '.json';
+    if (fileSha(audit) !== held.buildRetirementPreparationAbort.auditSha256)
+      refuse('SNAPSHOT_CHANGED');
+    c.guard(a);
+    c.checkFrozen();
+    return { aborted: true, alreadyAborted: true, audit };
+  }
+  if (
+    held.claim?.kind !== 'build-retirement' ||
+    held.claim.outputs !== undefined ||
+    held.claim.progress ||
+    Object.keys(held.claim).sort().join('|') !==
+      'id|kind|root|snapshotFile|snapshotSha256' ||
+    held.claim.root !== c.policy.buildOnly.outputRoot ||
+    !/^[a-f0-9]{64}$/.test(held.claim.id) ||
+    held.claim.id !== a.originalApproval.sha256 ||
+    a.ledger.path !== c.ledger
+  )
+    refuse('PREPARATION_ABORT_REVIEW_REQUIRED');
+  const heldRaw = c.readPin(a.ledger, 4 * 1024 * 1024);
+  if (!same(JSON.parse(heldRaw).payload, held)) refuse('LEDGER_CHANGED');
+  const oldReview = c.readPin(a.originalApproval, 65536);
+  const snapshot = c.readPin(a.snapshot, 4 * 1024 * 1024);
+  if (
+    a.snapshot.path !== held.claim.snapshotFile ||
+    a.snapshot.path !== c.ledger + '.retirement-' + held.claim.id + '.json' ||
+    a.snapshot.sha256 !== held.claim.snapshotSha256
+  )
+    refuse('SNAPSHOT_CHANGED');
+  const snap = JSON.parse(snapshot),
+    beforeRaw = Buffer.from(snap.ledgerBase64, 'base64'),
+    beforeDoc = JSON.parse(beforeRaw);
+  const original = JSON.parse(oldReview);
+  if (
+    sha(Buffer.from(snap.approvalBase64, 'base64')) !==
+      a.originalApproval.sha256 ||
+    !Buffer.from(snap.approvalBase64, 'base64').equals(oldReview) ||
+    sha(Buffer.from(snap.policyBase64, 'base64')) !== c.configSha ||
+    beforeDoc.digest !== sha(Buffer.from(JSON.stringify(beforeDoc.payload))) ||
+    beforeDoc.payload.claim !== null ||
+    original.ledger.sha256 !== sha(beforeRaw) ||
+    original.policySha256 !== c.configSha ||
+    original.kind !== 'retire-retained-build-output' ||
+    original.scopeId !== c.policy.scopeId ||
+    !same(
+      beforeDoc.payload.outputs.find((o) => o.path === original.target),
+      original.output,
+    ) ||
+    !same({ ...held, claim: null }, beforeDoc.payload)
+  )
+    refuse('SNAPSHOT_CHANGED');
+  const root = c.policy.buildOnly.outputRoot;
+  for (const file of [
+    path.join(root, '.retired-' + held.claim.id + '.tgz'),
+    held.claim.snapshotFile + '.progress',
+    held.claim.snapshotFile + '.result',
+    path.join(c.directory, 'retirement-policy-' + held.claim.id + '.json'),
+  ])
+    if (fs.existsSync(file)) refuse('PREPARATION_ALREADY_STARTED');
+  for (const row of held.outputs) {
+    const measured = c.scan(row);
+    if (
+      !row.complete ||
+      !same(c.identity(row.path), row.identity) ||
+      measured.digest !== row.digest ||
+      measured.metadataDigest !== row.metadataDigest
+    )
+      refuse('OUTPUT_CHANGED');
+  }
+  const measured = c.measure(held.outputs);
+  if (
+    measured.digest !== c.policy.baseline.digest ||
+    measured.metadataDigest !== c.policy.baseline.metadataDigest
+  )
+    refuse('FROZEN_HISTORY_CHANGED');
+  c.readPin(a.entry, 1024 * 1024);
+  c.readPin(a.adoption, 64);
+  const audit = c.ledger + '.preparation-abort-' + spec.sha256 + '.json';
+  writeNew(
+    audit,
+    Buffer.from(
+      JSON.stringify({
+        format: 1,
+        heldLedgerBase64: heldRaw.toString('base64'),
+        originalSnapshotBase64: snapshot.toString('base64'),
+        reviewBase64: raw.toString('base64'),
+      }),
+    ),
+  );
+  c.save(beforeDoc.payload);
+  try {
+    c.guard(a);
+    c.checkFrozen();
+    c.save({
+      ...beforeDoc.payload,
+      buildRetirementPreparationAbort: {
+        approvalSha256: spec.sha256,
+        auditSha256: fileSha(audit),
+        oldIntentId: held.claim.id,
+      },
+    });
+  } catch (error) {
+    c.save(held);
+    throw error;
+  }
+  return {
+    aborted: true,
+    sourceUnchanged: true,
+    archiveNeverCreated: true,
+    audit,
+    oldIntentId: held.claim.id,
+    productionChanged: false,
+    sourceRequests: 0,
+  };
 }
 module.exports = { underScope, origin };

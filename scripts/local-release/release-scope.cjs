@@ -2252,7 +2252,11 @@ function open(request, options = {}, boundOperation) {
             verifier.scan([{ path: row.path, identity: identity(row.path) }]),
           guard: (approval) => {
             owner();
-            recoveryBytes(options.buildRetirement, 65536);
+            recoveryBytes(
+              options.buildRetirement ||
+                options.abortBuildRetirementPreparation,
+              65536,
+            );
             recoveryBytes(approval.entry, 1024 * 1024);
             recoveryBytes(approval.adoption, 64);
             checkRoots(referenceRoots);
@@ -3240,6 +3244,22 @@ function retireBuildOutput(options) {
     BUILD_OUTPUT_RETIREMENT,
   );
 }
+function abortBuildRetirementPreparation(options) {
+  const policy = read(options.configPath);
+  return open(
+    {
+      kind: 'build',
+      root: policy.buildOnly?.outputRoot,
+      reserveBytes: 1,
+      runtimeCopies: 0,
+      buildOnly: true,
+      sourceCommit: policy.buildOnly?.sourceCommit,
+      sourceHash: policy.buildOnly?.sourceHash,
+    },
+    options,
+    BUILD_OUTPUT_RETIREMENT,
+  );
+}
 module.exports = {
   inspect,
   open,
@@ -3249,6 +3269,7 @@ module.exports = {
   assertWritableSession,
   recoverFailedBuild,
   retireBuildOutput,
+  abortBuildRetirementPreparation,
   inspectFailedBuildWriters: observeBuildRecovery,
   DEFAULT_BYTES,
   MIN_FREE,

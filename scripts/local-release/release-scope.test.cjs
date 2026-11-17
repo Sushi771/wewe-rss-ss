@@ -1609,6 +1609,95 @@ function retirementFixture(run, prepare) {
   });
 }
 
+function unstartedRetirementFixture(run) {
+  return retirementFixture((x) => {
+    assert.throws(
+      () =>
+        x.retire({
+          onBuildRetirementStep: (step) => {
+            if (step === 'after-intent') throw Error('prepared only');
+          },
+        }),
+      /prepared only/,
+    );
+    const doc = JSON.parse(fs.readFileSync(x.ledger));
+    assert.deepEqual(doc.payload.claim.outputs, []);
+    // Exact synthetic reproduction of the first local implementation's omitted
+    // standard empty output list, before any artifact/archive mutation.
+    delete doc.payload.claim.outputs;
+    doc.digest = crypto
+      .createHash('sha256')
+      .update(JSON.stringify(doc.payload))
+      .digest('hex');
+    fs.writeFileSync(x.ledger, JSON.stringify(doc));
+    const review = path.join(x.f.base, 'abort-preparation-review.json');
+    const a = {
+      format: 1,
+      kind: 'abort-unstarted-build-retirement',
+      scopeId: x.f.policy.scopeId,
+      policySha256: fileHash(x.f.config),
+      moduleSha256: fileHash(path.join(__dirname, 'retire-build-output.cjs')),
+      reviewEvidence: 'Exact synthetic pre-archive schema defect rollback',
+      originalApproval: x.pin(x.review),
+      ledger: x.pin(x.ledger),
+      snapshot: x.pin(doc.payload.claim.snapshotFile),
+      owner: x.a.owner,
+      entry: x.a.entry,
+      adoption: x.a.adoption,
+    };
+    const save = () => fs.writeFileSync(review, JSON.stringify(a));
+    save();
+    run({
+      ...x,
+      a,
+      save,
+      abort: (extra) =>
+        scope.abortBuildRetirementPreparation({
+          ...x.f.options(),
+          abortBuildRetirementPreparation: x.pin(review),
+          observeBuildRecovery: () => ({
+            complete: true,
+            ownerAbsent: true,
+            writers: [],
+          }),
+          ...extra,
+        }),
+    });
+  });
+}
+test('build retirement: formally aborts only its unchanged pre-archive schema defect and retains audit', () =>
+  unstartedRetirementFixture((x) => {
+    const before = fs.readFileSync(path.join(x.at, 'node.exe'));
+    const r = x.abort();
+    assert(r.aborted);
+    assert(fs.existsSync(r.audit));
+    assert.equal(JSON.parse(fs.readFileSync(x.ledger)).payload.claim, null);
+    assert(fs.readFileSync(path.join(x.at, 'node.exe')).equals(before));
+    assert(x.abort().alreadyAborted);
+  }));
+test('build retirement: an unknown file prevents aborting the preparation', () =>
+  unstartedRetirementFixture((x) => {
+    fs.writeFileSync(path.join(x.f.build, 'foreign'), 'retain');
+    const state = fs.readFileSync(x.ledger);
+    assert.throws(() => x.abort(), /FROZEN_HISTORY_CHANGED/);
+    assert(fs.readFileSync(x.ledger).equals(state));
+  }));
+test('build retirement: native/reference failure reinstates the held preparation without touching outputs', () =>
+  unstartedRetirementFixture((x) => {
+    const state = JSON.parse(fs.readFileSync(x.ledger)).payload;
+    assert.throws(() =>
+      x.abort({
+        observeBuildRecovery: () => ({
+          complete: false,
+          ownerAbsent: true,
+          writers: [],
+        }),
+      }),
+    );
+    assert.deepEqual(JSON.parse(fs.readFileSync(x.ledger)).payload, state);
+    assert(fs.existsSync(x.at));
+  }));
+
 test('build retirement: verified archive stays charged, exact source advances, replay is read-only', () =>
   retirementFixture((x) => {
     const old = fs.readFileSync(x.ledger);

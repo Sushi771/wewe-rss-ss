@@ -69,6 +69,15 @@ original ledger/policy and retained failure diagnostics remain available for
 recovery. A maintenance-tool commit and the exact candidate commit may differ;
 this grants no exception to the candidate's exact-commit CI requirement.
 
+An exact, unstarted preparation from the initial implementation omitted the
+standard empty `claim.outputs` list and was correctly rejected by the original
+reference observer. `abortBuildRetirementPreparation` accepts only that pinned
+pre-archive defect, with unchanged complete outputs, no archive/progress/result,
+and its original immutable review/ledger snapshot. Under the same mutex it
+restores the actual prior state, runs the unchanged full reference and native
+checks, and records an audit. A refusal reinstates the held intent. It cannot
+abort another claim, a started archive, or changed/unknown output history.
+
 `release-scope.recoverFailedBuild` handles one explicitly reviewed interrupted
 build with a retained nonempty output. Its pinned review binds the original
 ledger, adoption marker, output inventory, owner, failure log and next policy.
