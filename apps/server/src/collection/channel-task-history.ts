@@ -54,7 +54,7 @@ export class ChannelTaskHistory {
   constructor(
     private readonly db: Pick<PrismaClient, '$queryRawUnsafe'>,
     private readonly database: () => string = configuredTaskDatabase,
-    private readonly backup: () => Promise<unknown> = createVerifiedSqliteBackup,
+    private readonly backup?: () => Promise<unknown>,
     private readonly writeAllowed: () => void = assertDatabaseWritesAllowed,
   ) {}
   async inventory(channel: CollectionChannel): Promise<RecordEntry[]> {
@@ -312,7 +312,9 @@ export class ChannelTaskHistory {
           async () => {
             this.writeAllowed();
             sourceVersion = await fingerprint();
-            const report = (await this.backup()) as Backup;
+            const report = (await (this.backup
+              ? this.backup()
+              : createVerifiedSqliteBackup())) as Backup;
             if (
               !report ||
               typeof report.source !== 'string' ||

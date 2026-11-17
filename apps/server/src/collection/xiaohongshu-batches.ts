@@ -37,7 +37,7 @@ export class XiaohongshuBatches {
   constructor(
     private readonly db: PrismaClient,
     private readonly xhs: XhsSubscriptionService,
-    private readonly cancellationBackup: () => Promise<unknown> = createVerifiedSqliteBackup,
+    private readonly cancellationBackup?: () => Promise<unknown>,
   ) {}
 
   /** Read-only preview: returns only a digest and the exact cancelled scope. */
@@ -121,7 +121,9 @@ export class XiaohongshuBatches {
           throw new XhsSubscriptionError('XHS_BATCH_LOCAL_REVIEW_REQUIRED');
         database = await realpath(main.file);
         version = await fingerprint(database);
-        const report = (await this.cancellationBackup()) as any;
+        const report = (await (this.cancellationBackup
+          ? this.cancellationBackup()
+          : createVerifiedSqliteBackup())) as any;
         if (
           !report ||
           typeof report.source !== 'string' ||

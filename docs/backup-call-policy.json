@@ -39,7 +39,7 @@
     },
     {
       "file": "apps/server/src/collection/collection.service.ts",
-      "scope": "CollectionService.collectPublicAlbums",
+      "scope": "CollectionService.collectPublicAlbumsOwned",
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Only a real collection-channel or normalized album-binding change; unchanged routine updates have zero calls. Runtime conditional matrix required."
@@ -130,14 +130,14 @@
     },
     {
       "file": "apps/server/src/trpc/trpc.service.ts",
-      "scope": "TrpcService.repairExistingSubscription",
+      "scope": "TrpcService.repairExistingSubscriptionOwned",
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Only explicit native private-source activation callback, including staged rollback deletion. Ordinary Wechat2RSS creation does not enter this gate."
     },
     {
       "file": "apps/server/src/trpc/trpc.service.ts",
-      "scope": "TrpcService.addSubscriptionFromArticle",
+      "scope": "TrpcService.addSubscriptionFromArticleOwned",
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 1,
       "rationale": "Only explicit native private-source activation callback, including staged rollback deletion. Ordinary Wechat2RSS creation does not enter this gate."
@@ -309,6 +309,20 @@
       "gate": "createVerifiedSqliteBackup",
       "maxCalls": 0,
       "rationale": "Exact two-row control metadata review uses exclusive coordinator admission and durable incremental SQLite transaction. Original task bytes and all risk fields are retained in the appended audit; exact CAS and rollback preserve history/budgets. It creates no grant, source request, or full database snapshot."
+    },
+    {
+      "file": "apps/server/src/collection/channel-task-history.ts",
+      "scope": "ChannelTaskHistory.confirm",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit local channel history archive/pause/resume: one validated recovery point inside the exclusive protected-write boundary; never a source request."
+    },
+    {
+      "file": "apps/server/src/collection/xiaohongshu-batches.ts",
+      "scope": "XiaohongshuBatches.confirmLocalCancellation",
+      "gate": "createVerifiedSqliteBackup",
+      "maxCalls": 1,
+      "rationale": "Explicit acknowledgement-based settlement of proven-unsent local XHS tasks: one validated recovery point before commit; unknown records and source protections retained."
     }
   ]
 }
