@@ -14,8 +14,15 @@ const { createInstalledHost } = require('../installed-host.cjs');
 const { createController } = require('../installed-lifecycle.cjs');
 const { createSqliteHooks } = require('../sqlite-hooks.cjs');
 const { createUpdater } = require('./update-engine.cjs');
-const python =
-  process.platform === 'win32' ? 'C:\\Python314\\python.exe' : 'python3';
+// Exercise the real absolute-executable admission on every test host. A PATH
+// command is only used to resolve the interpreter, never supplied as a binding.
+const python = execFileSync(
+  process.env.WEWE_TEST_PYTHON ||
+    (process.platform === 'win32' ? 'python' : 'python3'),
+  ['-c', 'import sys; print(sys.executable)'],
+  { encoding: 'utf8', windowsHide: true },
+).trim();
+assert(path.isAbsolute(python), 'ABSOLUTE_FIXTURE_PYTHON_REQUIRED');
 const hash = (bytes) => crypto.createHash('sha256').update(bytes).digest('hex');
 const json = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
 const write = (file, value) => fs.writeFileSync(file, JSON.stringify(value));
