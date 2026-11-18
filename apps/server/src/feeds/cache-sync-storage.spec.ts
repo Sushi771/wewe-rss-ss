@@ -2,6 +2,7 @@ import { withFixtureMigrationConnection } from '../../test/fixture-migration-con
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as sourceGateModule from '../collection/wechat2rss-source-gate';
@@ -92,7 +93,7 @@ describe('cache delta through original SQLite merge', () => {
     let now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
     try {
-      const { DatabaseSync } = require('node:sqlite');
+      const { DatabaseSync } = createRequire(__filename)('node:sqlite');
       const cache = new DatabaseSync(cachePath);
       try {
         cache.exec(
