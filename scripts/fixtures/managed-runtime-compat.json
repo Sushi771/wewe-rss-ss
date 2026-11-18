@@ -1,0 +1,32 @@
+{
+  "scripts/local-release/runtime.cjs": {
+    "beforeSha256": "1399931733edc330adc1d30665ed78914078fdc0b6014bf50e92ace6a170f90d",
+    "afterSha256": "c73c87aebcd5b638323b1a3a4232a1546824ec3861c7c237087df6e5cb0a37d2",
+    "hunks": [
+      {
+        "before": "  const database = fs.realpathSync(values.database);\n  if (!fs.statSync(database).isFile()) throw new Error('���ݿⲻ���ļ�');\n  if (command === 'start') {\n    const writer = require('./project-writer-gate.cjs');\n    if (\n      manifest.installedLifecycle?.protocol === 'wewe-installed-lifecycle-v1'\n",
+        "after": "  const database = fs.realpathSync(values.database);\n  if (!fs.statSync(database).isFile()) throw new Error('���ݿⲻ���ļ�');\n  if (command === 'start') {\n    // Enforce the committed mode even through an older stable logon launcher.\n    Object.assign(\n      process.env,\n      require('./managed-runtime-mode.cjs').committed({\n        journalFile: path.join(path.dirname(database), '.wewe-update.json'),\n        releaseId: manifest.id,\n        manifestSha256: fileHash(path.join(release, 'release.json')),\n        database,\n      }),\n    );\n    const writer = require('./project-writer-gate.cjs');\n    if (\n      manifest.installedLifecycle?.protocol === 'wewe-installed-lifecycle-v1'\n"
+      }
+    ]
+  },
+  "scripts/local-release/start-current.cjs": {
+    "beforeSha256": "7f3484728ce11bf1e4676e6cb54945c19b57581acc31c604d7915bc89a5ba182",
+    "afterSha256": "23e477404dfa251f370cc73b8ad56455342c1fb3d3ba58d093baafe2c9c0ab87",
+    "hunks": [
+      {
+        "before": "        rehearsal.guardReport,\n      );\n    else args.push('--production');\n    const env = lib.cleanEnvironment({\n      NODE_ENV: 'production',\n      XHS_SUBSCRIPTION_LIVE_ENABLED: rehearsal ? '0' : '1',\n      XHS_COMMENT_COLLECTION_ENABLED: '0',\n      PYTHONDONTWRITEBYTECODE: '1',\n      LOCAL_RELEASE_CONTROLLED_START: manifest.id,\n      LOCAL_RELEASE_STARTUP_AUDIT_ROOT: '',\n",
+        "after": "        rehearsal.guardReport,\n      );\n    else args.push('--production');\n    const managedEnv = require('./managed-runtime-mode.cjs').committed({\n      journalFile: path.join(path.dirname(database), '.wewe-update.json'),\n      releaseId: manifest.id,\n      manifestSha256: hash(path.join(release, 'release.json')),\n      database,\n    });\n    const env = lib.cleanEnvironment({\n      NODE_ENV: 'production',\n      XHS_SUBSCRIPTION_LIVE_ENABLED: rehearsal ? '0' : '1',\n      XHS_COMMENT_COLLECTION_ENABLED: '0',\n      ...managedEnv,\n      PYTHONDONTWRITEBYTECODE: '1',\n      LOCAL_RELEASE_CONTROLLED_START: manifest.id,\n      LOCAL_RELEASE_STARTUP_AUDIT_ROOT: '',\n"
+      }
+    ]
+  },
+  "scripts/local-release/installed-startup-gate.cjs": {
+    "beforeSha256": "ab0073f3c5d11bf24f1c5234af7fd39e6e5cc708c6af2a32a200dc2d6d79d2ea",
+    "afterSha256": "b000a33d6d15c2ee07d8c5f5d4deacc52734a1996a59f4324b33de2378e1dc1b",
+    "hunks": [
+      {
+        "before": "        readOnly: !writesAllowed(),\n        databaseReadable: databaseReadable === true,\n        httpReady: true,\n      };\n    },\n  };\n",
+        "after": "        readOnly: !writesAllowed(),\n        databaseReadable: databaseReadable === true,\n        httpReady: true,\n        managedRuntime: {\n          mode: process.env.WEWE_MANAGED_RUNTIME_MODE || 'held',\n          recoveryHeld: process.env.WECHAT2RSS_RECOVERY_HOLD === '1',\n          xhsLive: process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1',\n          localMode:\n            process.env.PRIVATE_ONLINE_MODE !== '1' &&\n            process.env.WEWE_ACCEPTANCE_MODE !== '1',\n          automaticDisabled:\n            process.env.ENABLE_SCHEDULED_UPDATES === '0' &&\n            process.env.DISABLE_SCHEDULED_UPDATES === '1' &&\n            [\n              'WECHAT2RSS_ACTIVE_SCHEDULE',\n              'WECHAT2RSS_ACTIVE_SCHEDULE_ENABLED',\n              'WECHAT2RSS_CACHE_SYNC_ENABLED',\n              'WECHAT2RSS_CACHE_MEDIA_ENABLED',\n              'WECHAT_DESKTOP_ALLOW_SCHEDULED',\n              'XHS_COMMENT_COLLECTION_ENABLED',\n              'SQLITE_PERIODIC_LIFECYCLE_ENABLED',\n              'SQLITE_RETENTION_SCAN_ENABLED',\n            ].every((k) => process.env[k] === '0'),\n        },\n      };\n    },\n  };\n"
+      }
+    ]
+  }
+}

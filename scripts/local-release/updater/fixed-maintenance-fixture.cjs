@@ -504,8 +504,55 @@ server.listen(port,'127.0.0.1');
     }
     runtimeMode = { kind: 'manual-xhs-v1', channelArchives: archives };
   }
+  let previousCompletion;
+  if (options.previousCompletion) {
+    if (!oldProcess) throw Error('FIXTURE_PREVIOUS_LIVE_PROCESS_REQUIRED');
+    const transactionId = crypto.randomUUID(),
+      journal = path.join(path.dirname(database), '.wewe-update.json');
+    const values = {
+      journal: {
+        format: 1,
+        transactionId,
+        stage: options.previousCompletionStage || 'completed',
+        package: { ...roles.current, database },
+        old: { id: 'synthetic-ancestor', sha256: 'f'.repeat(64) },
+      },
+      permit: {
+        format: 1,
+        transactionId,
+        stage: 'completed',
+        id: roles.current.id,
+        sha256: roles.current.sha256,
+      },
+      registry: {
+        format: 1,
+        database,
+        processes: [
+          { transactionId, releaseId: roles.current.id, identity: oldProcess },
+        ],
+      },
+      control: {
+        format: 1,
+        profileSha256: 'e'.repeat(64),
+        taskBefore: { definitionSha256: taskDefinitionSha256 },
+        events: [],
+      },
+    };
+    previousCompletion = {};
+    for (const [key, suffix] of Object.entries({
+      journal: '',
+      control: '.control',
+      registry: '.native-processes',
+      permit: '.permit',
+    }))
+      previousCompletion[key] = write(
+        journal + suffix,
+        JSON.stringify(values[key]),
+      );
+  }
   const rawProfile = {
     ...(runtimeMode ? { runtimeMode } : {}),
+    ...(previousCompletion ? { previousCompletion } : {}),
     kind: 'fixed-held-same-schema-maintenance-v1',
     executionMode: 'final-install',
     projectRoot,
@@ -553,6 +600,7 @@ server.listen(port,'127.0.0.1');
       ...roles,
       controlCommit: trustedControlSource.commit,
       ...(runtimeMode ? { runtimeMode } : {}),
+      ...(previousCompletion ? { previousCompletion } : {}),
     },
   });
   const profile = proposal.profile;

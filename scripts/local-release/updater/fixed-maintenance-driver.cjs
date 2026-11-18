@@ -81,7 +81,8 @@ async function runProfileInner(token, report) {
     scopeLease,
     native,
     taskBefore,
-    taskPaused = false;
+    taskPaused = false,
+    previousCompletion;
   const own = () => {
     sessions.forEach((session) => session.assertOwned());
     if (scopeLease) scopeLease.check(true);
@@ -329,6 +330,30 @@ async function runProfileInner(token, report) {
     if (read(pointer).id === next.id && fs.existsSync(p.journalFile)) {
       const j = read(p.journalFile);
       const permit = fs.existsSync(permitFile) && read(permitFile);
+      if (p.previousCompletion) {
+        const preserved = read(controlFile).previousCompletionArchive;
+        if (!preserved) fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_MISSING');
+        pin(preserved);
+        const saved = read(preserved.path);
+        if (
+          saved.kind !== 'preserved-completed-fixed-install-v1' ||
+          !/^[a-f0-9-]{36}$/.test(saved.transactionId) ||
+          preserved.path !==
+            p.journalFile + '.completed-' + saved.transactionId + '.json'
+        )
+          fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
+        for (const [key, input] of Object.entries(p.previousCompletion)) {
+          const item = saved.records?.[key];
+          if (
+            item?.sha256 !== input.sha256 ||
+            crypto
+              .createHash('sha256')
+              .update(Buffer.from(item.raw || '', 'base64'))
+              .digest('hex') !== input.sha256
+          )
+            fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
+        }
+      }
       if (
         j.stage === 'completed' &&
         JSON.stringify(j.runtimeMode) !== JSON.stringify(p.runtimeMode)
@@ -349,13 +374,15 @@ async function runProfileInner(token, report) {
         return { status: 'already-current', scope: 'fixed-profile-read-only' };
       fail('FIXED_CURRENT_OUTCOME_REQUIRES_REVIEW');
     }
-    if (
-      fs.existsSync(lockFile) ||
-      fs.existsSync(registryFile) ||
-      fs.existsSync(p.journalFile) ||
-      read(pointer).id !== current.id
-    )
+    if (fs.existsSync(lockFile) || read(pointer).id !== current.id)
       fail('FIXED_PRIOR_CONTROL_REQUIRES_REVIEW');
+    const priorPresent = [registryFile, p.journalFile, controlFile].some(
+      fs.existsSync,
+    );
+    if (priorPresent && !p.previousCompletion)
+      fail('FIXED_PRIOR_CONTROL_REQUIRES_REVIEW');
+    if (!priorPresent && p.previousCompletion)
+      fail('FIXED_PREVIOUS_COMPLETION_MISSING');
     pin({ path: pointer, sha256: p.activePointerSha256 });
     pin(p.scopePolicy);
     const fresh = cold
@@ -373,6 +400,50 @@ async function runProfileInner(token, report) {
         JSON.stringify(fresh.localAddresses) !== JSON.stringify(['127.0.0.1']))
     )
       fail('FIXED_FRESH_OLD_IDENTITY_CHANGED');
+    if (p.previousCompletion) {
+      const records = {};
+      let bytes = 0;
+      for (const [key, input] of Object.entries(p.previousCompletion)) {
+        pin(input);
+        const raw = fs.readFileSync(input.path);
+        bytes += raw.length;
+        records[key] = {
+          sha256: input.sha256,
+          raw: raw.toString('base64'),
+          value: JSON.parse(raw),
+        };
+      }
+      if (bytes > 32768) fail('FIXED_PREVIOUS_COMPLETION_LIMIT');
+      const j = records.journal.value,
+        permit = records.permit.value,
+        r = records.registry.value,
+        c = records.control.value;
+      if (
+        j.format !== 1 ||
+        !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
+          j.transactionId,
+        ) ||
+        j.stage !== 'completed' ||
+        j.package?.id !== current.id ||
+        j.package?.sha256 !== current.sha256 ||
+        j.package?.path !== current.path ||
+        j.package?.database !== p.database ||
+        permit.stage !== 'completed' ||
+        permit.transactionId !== j.transactionId ||
+        permit.id !== current.id ||
+        permit.sha256 !== current.sha256 ||
+        r.database !== p.database ||
+        r.processes?.length !== 1 ||
+        r.processes[0].releaseId !== current.id ||
+        r.processes[0].transactionId !== j.transactionId ||
+        c.format !== 1 ||
+        c.taskBefore?.definitionSha256 !== p.taskDefinitionSha256 ||
+        !/^[a-f0-9]{64}$/.test(c.profileSha256)
+      )
+        fail('FIXED_PREVIOUS_COMPLETION_UNPROVEN');
+      api.toolkit.sameIdentity(fresh, r.processes[0].identity);
+      previousCompletion = { transactionId: j.transactionId, records };
+    }
     taskBefore = api.tasks.control('Snapshot');
     api.tasks.assertSnapshot(taskBefore, p.taskDefinitionSha256);
     modeEnvironment(p.runtimeMode, p.database, { initial: true });
@@ -423,6 +494,44 @@ async function runProfileInner(token, report) {
     const adapter = {
       async acquireLock() {
         own();
+        let previousCompletionArchive;
+        if (previousCompletion) {
+          for (const input of Object.values(p.previousCompletion)) pin(input);
+          const file =
+            p.journalFile +
+            '.completed-' +
+            previousCompletion.transactionId +
+            '.json';
+          const bytes =
+            JSON.stringify({
+              kind: 'preserved-completed-fixed-install-v1',
+              transactionId: previousCompletion.transactionId,
+              records: Object.fromEntries(
+                Object.entries(previousCompletion.records).map(
+                  ([key, item]) => [
+                    key,
+                    { sha256: item.sha256, raw: item.raw },
+                  ],
+                ),
+              ),
+            }) + '\n';
+          if (fs.existsSync(file)) {
+            if (fs.readFileSync(file, 'utf8') !== bytes)
+              fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
+          } else {
+            const fd = fs.openSync(file, 'wx', 0o600);
+            try {
+              fs.writeFileSync(fd, bytes);
+              fs.fsyncSync(fd);
+            } finally {
+              fs.closeSync(fd);
+            }
+          }
+          previousCompletionArchive = {
+            path: file,
+            sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+          };
+        }
         startupToken = crypto.randomUUID();
         const fd = fs.openSync(lockFile, 'wx', 0o600);
         try {
@@ -449,6 +558,7 @@ async function runProfileInner(token, report) {
         atomic(controlFile, {
           format: 1,
           profileSha256: data.fixed.sha256,
+          ...(previousCompletionArchive ? { previousCompletionArchive } : {}),
           taskBefore,
           events: [],
         });
@@ -552,6 +662,29 @@ async function runProfileInner(token, report) {
       startOld: (ctx) => start(ctx, current),
       oldHealth: (ctx) => health(ctx, current),
       async enableNew(ctx) {
+        // The kernel rechecks a prior completed installation before beginning a
+        // new update. This proves that existing commit; it does not replay it.
+        if (
+          previousCompletion &&
+          ctx.transactionId === previousCompletion.transactionId &&
+          ctx.package.id === current.id &&
+          ctx.package.sha256 === current.sha256
+        ) {
+          own();
+          pin(p.previousCompletion.journal);
+          pin(p.previousCompletion.permit);
+          api.toolkit.sameIdentity(
+            await native.processIdentity(
+              'OwnedSnapshot',
+              oldProcess.pid,
+              p.port || 4000,
+              oldProcess,
+            ),
+            oldProcess,
+          );
+          return;
+        }
+
         const completed = journalStage(ctx, 'completed');
         if (p.runtimeMode) {
           modeEnvironment(p.runtimeMode, p.database, { initial: true });
@@ -606,6 +739,7 @@ async function run(plan, report = () => {}) {
     'current',
     'candidate',
     'runtimeMode',
+    'previousCompletion',
   ])
     if (JSON.stringify(plan[key]) !== JSON.stringify(p[key]))
       fail('FIXED_DISPATCH_PROFILE_CHANGED');

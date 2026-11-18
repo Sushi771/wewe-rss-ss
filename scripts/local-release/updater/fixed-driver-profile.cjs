@@ -207,6 +207,30 @@ function verifyFixedProfile(profileFile, expectedSha256) {
       fail('FIXED_START_MODE_INVALID');
     pin(profile.oldProcess);
   }
+  if (profile.previousCompletion) {
+    if (
+      profile.startMode === 'cold-empty' ||
+      Object.keys(profile.previousCompletion).sort().join(',') !==
+        'control,journal,permit,registry'
+    )
+      fail('FIXED_PREVIOUS_COMPLETION_INVALID');
+    for (const [key, suffix] of Object.entries({
+      journal: '',
+      control: '.control',
+      registry: '.native-processes',
+      permit: '.permit',
+    })) {
+      if (
+        profile.previousCompletion[key]?.path !==
+        profile.journalFile + suffix
+      )
+        fail('FIXED_PREVIOUS_COMPLETION_PATH_CHANGED');
+      if (!/^[a-f0-9]{64}$/.test(profile.previousCompletion[key].sha256))
+        fail('FIXED_PREVIOUS_COMPLETION_INVALID');
+      // Fresh bytes are pinned under the installation sessions before effects.
+      // After commit those bytes live in the retained handoff archive.
+    }
+  }
   pin(profile.scopePolicy);
   if (
     !path.isAbsolute(profile.backup.path || '') ||
@@ -318,6 +342,11 @@ function freezeFixedProfile({ profile, controlSource, expected }) {
     JSON.stringify(profile.runtimeMode) !== JSON.stringify(expected.runtimeMode)
   )
     fail('INDEPENDENT_RUNTIME_MODE_REQUIRED');
+  if (
+    JSON.stringify(profile.previousCompletion) !==
+    JSON.stringify(expected.previousCompletion)
+  )
+    fail('INDEPENDENT_PREVIOUS_COMPLETION_REQUIRED');
   const closure = profile.closure.map(pin);
   if (new Set(closure.map((item) => item.path)).size !== closure.length)
     fail('DUPLICATE_PROFILE_CODE_PIN');
@@ -366,6 +395,11 @@ function prepareFixedDispatch({ profile: profilePin, driver, expected }) {
   }
   if (JSON.stringify(p.runtimeMode) !== JSON.stringify(expected.runtimeMode))
     fail('INDEPENDENT_RUNTIME_MODE_REQUIRED');
+  if (
+    JSON.stringify(p.previousCompletion) !==
+    JSON.stringify(expected.previousCompletion)
+  )
+    fail('INDEPENDENT_PREVIOUS_COMPLETION_REQUIRED');
   const entry = pin(driver);
   if (
     entry.path !== path.join(__dirname, 'fixed-maintenance-driver.cjs') ||
@@ -385,6 +419,9 @@ function prepareFixedDispatch({ profile: profilePin, driver, expected }) {
     current: p.current,
     candidate: p.candidate,
     ...(p.runtimeMode ? { runtimeMode: p.runtimeMode } : {}),
+    ...(p.previousCompletion
+      ? { previousCompletion: p.previousCompletion }
+      : {}),
     profile: data.fixed,
     dependencyPins: p.closure,
   });

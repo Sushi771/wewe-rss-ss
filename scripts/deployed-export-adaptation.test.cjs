@@ -52,6 +52,35 @@ test('reviewed held/channel deltas preserve original blobs and reject every unkn
   }
 });
 
+test('manual runtime inverse pins complete sources and refuses unknown or partial startup changes', () => {
+  const entries = require('./fixtures/managed-runtime-compat.json');
+  assert.deepEqual(Object.keys(entries).sort(), [
+    'scripts/local-release/installed-startup-gate.cjs',
+    'scripts/local-release/runtime.cjs',
+    'scripts/local-release/start-current.cjs',
+  ]);
+  for (const [file, entry] of Object.entries(entries)) {
+    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(hash(raw), entry.afterSha256);
+    const original = restoreLegacyWriter.restoreManagedRuntime(file, raw);
+    assert.equal(hash(original), entry.beforeSha256);
+    assert.equal(
+      restoreLegacyWriter.restoreManagedRuntime(file, original),
+      original,
+    );
+    for (const changed of [
+      raw + '// unreviewed\n',
+      ...entry.hunks.map(
+        (h) => raw.replace(h.after, h.before) + '// partial\n',
+      ),
+    ])
+      assert.throws(
+        () => restoreLegacyWriter.restoreManagedRuntime(file, changed),
+        /exact reviewed managed runtime source/,
+      );
+  }
+});
+
 test('error-retention inverse preserves complete original lifecycle sources and refuses every unknown delta', () => {
   const fixtures = require('./fixtures/lifecycle-error-chain-compat.json');
   assert.deepEqual(Object.keys(fixtures).sort(), [

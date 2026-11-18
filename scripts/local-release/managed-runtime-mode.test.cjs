@@ -216,3 +216,72 @@ test(
       { coldStart: true, manualMode: true },
     ),
 );
+
+test(
+  'a reviewed completed live installation hands off through the original updater without deleting prior evidence',
+  { timeout: 240000 },
+  () =>
+    fixture(
+      async (f) => {
+        const prior = read(f.profile.previousCompletion.journal.path);
+        const result = await runFixedProfile(f.profilePin);
+        assert.equal(result.status, 'completed');
+        assert.notEqual(result.journal.transactionId, prior.transactionId);
+        const control = read(f.profile.journalFile + '.control');
+        const saved = read(control.previousCompletionArchive.path);
+        for (const key of ['journal', 'control', 'registry', 'permit'])
+          assert.equal(
+            saved.records[key].sha256,
+            f.profile.previousCompletion[key].sha256,
+          );
+        assert.equal(saved.transactionId, prior.transactionId);
+        assert.equal(
+          (await runFixedProfile(f.profilePin)).status,
+          'already-current',
+        );
+        assert.equal(
+          read(f.profile.journalFile).runtimeMode.kind,
+          'manual-xhs-v1',
+        );
+        assert.deepEqual(fs.readFileSync(f.database), f.before);
+        assert.equal(read(state(f, 'wechat')).paused, true);
+      },
+      { manualMode: true, previousCompletion: true },
+    ),
+);
+
+test(
+  'pending or unknown prior installation is rejected without changing tasks, data or controls',
+  { timeout: 240000 },
+  () =>
+    fixture(
+      async (f) => {
+        const before = fs.readFileSync(f.profile.journalFile);
+        await assert.rejects(
+          runFixedProfile(f.profilePin),
+          /FIXED_PREVIOUS_COMPLETION_UNPROVEN/,
+        );
+        assert.deepEqual(fs.readFileSync(f.profile.journalFile), before);
+        assert.equal(
+          fs.existsSync(f.profile.journalFile + '.startup-lock'),
+          false,
+        );
+        assert.deepEqual(fs.readFileSync(f.database), f.before);
+        assert.equal(read(f.modules.tasks.path + '.state').enabled, true);
+        assert.equal(
+          f.toolkit.processIdentity(
+            'OwnedSnapshot',
+            f.oldProcess.pid,
+            f.profile.port,
+            f.oldProcess,
+          ).pid,
+          f.oldProcess.pid,
+        );
+      },
+      {
+        manualMode: true,
+        previousCompletion: true,
+        previousCompletionStage: 'recovery-failed',
+      },
+    ),
+);
