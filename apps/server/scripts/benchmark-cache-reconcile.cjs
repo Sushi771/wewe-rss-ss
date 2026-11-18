@@ -46,7 +46,6 @@ function compile(source, dependency) {
   );
   return loaded.exports;
 }
-const state = compile(fs.readFileSync(stateFile, 'utf8'), require);
 const responseDiagnostics = compile(
   fs.readFileSync(
     path.join(
@@ -90,6 +89,7 @@ function loadTypeScriptModule(file) {
     else delete require.extensions['.ts'];
   }
 }
+const state = loadTypeScriptModule(stateFile);
 const wechat2rss = loadTypeScriptModule(
   path.join(repo, 'apps/server/src/collection/providers/wechat2rss.ts'),
 );
