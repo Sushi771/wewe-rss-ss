@@ -13,6 +13,9 @@ export type ChannelState = {
   archived: HistoryRef[];
   receipts: Array<{ digest: string; backupSha256: string; at: number }>;
 };
+export const managedWechatLocalCache = () =>
+  process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' &&
+  process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1';
 const scope = new AsyncLocalStorage<{
   channel: CollectionChannel;
   database: string;
@@ -165,8 +168,9 @@ export async function assertChannelRunnable(
   if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
     throw Error('CHANNEL_GLOBAL_RECOVERY_HELD');
   if (
-    process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' &&
-    channel === 'wechat'
+    channel === 'wechat' &&
+    (process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' ||
+      managedWechatLocalCache())
   )
     throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
   const state = await readChannelState(channel, database);
@@ -329,8 +333,9 @@ export async function withConfiguredChannelExecution<T>(
   if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
     throw Error('CHANNEL_GLOBAL_RECOVERY_HELD');
   if (
-    process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' &&
-    channel === 'wechat'
+    channel === 'wechat' &&
+    (process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' ||
+      managedWechatLocalCache())
   )
     throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
   if (!(process.env.DATABASE_URL || '').startsWith('file:')) return operation();

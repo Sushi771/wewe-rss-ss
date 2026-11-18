@@ -14,6 +14,7 @@ import {
   configuredTaskDatabase,
   historyDigest,
   HistoryRef,
+  managedWechatLocalCache,
   readChannelState,
   withChannelLease,
 } from './channel-task-control';
@@ -318,7 +319,8 @@ export class ChannelTaskHistory {
         if (
           input.action === 'resume' &&
           input.channel === 'wechat' &&
-          process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1'
+          (process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' ||
+            managedWechatLocalCache())
         )
           throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
         if (

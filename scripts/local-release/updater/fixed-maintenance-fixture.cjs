@@ -259,7 +259,7 @@ server.listen(port,'127.0.0.1');
     );
   }
   let retainedQueue;
-  if (options.coldStart) {
+  if (options.coldStart || options.wechatLocalCache) {
     db.prepare(
       'INSERT INTO refresh_submission_claims(id,mp_id,state,reserved_at,previous_at,updated_at_ms) VALUES(?,?,?,?,?,?)',
     ).run('d'.repeat(64), 'MP_WXS_1234567890', 'unknown', 1, 0, 1);
@@ -512,7 +512,18 @@ server.listen(port,'127.0.0.1');
     runtimeMode = {
       kind: options.scheduledDualMode ? 'scheduled-dual-v1' : 'manual-xhs-v1',
       channelArchives: archives,
+      ...(options.wechatLocalCache ? { wechatLocalCache: true } : {}),
     };
+    if (options.wechatLocalCache) {
+      const cache = path.join(projectRoot, '.wechat2rss-data', 'res.db');
+      fs.mkdirSync(path.dirname(cache), { recursive: true });
+      const providerCache = new DatabaseSync(cache);
+      try {
+        providerCache.exec('CREATE TABLE rsses (biz_id INTEGER, name TEXT)');
+      } finally {
+        providerCache.close();
+      }
+    }
   }
   let previousCompletion;
   if (options.previousCompletion) {

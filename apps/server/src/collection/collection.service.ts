@@ -1,4 +1,10 @@
-import { withChannelExecution, taskDatabaseFor } from './channel-task-control';
+import {
+  managedWechatLocalCache,
+  readChannelState,
+  taskDatabaseFor,
+  withChannelExecution,
+  withChannelLease,
+} from './channel-task-control';
 import { mediaTransaction } from './media-transaction';
 import { createHash } from 'node:crypto';
 import {
@@ -683,6 +689,32 @@ export class CollectionService {
   async collectWechat2RssRecent(
     ...input: Parameters<CollectionService['collectWechat2RssRecentOwned']>
   ) {
+    const [request] = input;
+    if (
+      managedWechatLocalCache() &&
+      request.cachedPage &&
+      request.fetchMedia === false &&
+      request.trigger === 'scheduled' &&
+      !request.acceptedFeedPath &&
+      !request.savedMedia &&
+      !request.nightMediaUntil &&
+      !request.failureAttempt
+    ) {
+      const database = await taskDatabaseFor(this.prisma);
+      return withChannelLease(
+        'wechat',
+        async () => {
+          if (
+            process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
+            process.env.WECHAT2RSS_LOCAL_CACHE_SYNC !== '1' ||
+            !(await readChannelState('wechat', database)).paused
+          )
+            throw Error('CACHE_SYNC_SOURCE_PAUSE_REQUIRED');
+          return this.collectWechat2RssRecentOwned(request);
+        },
+        database,
+      );
+    }
     return withChannelExecution(
       'wechat',
       () => this.collectWechat2RssRecentOwned(...input),

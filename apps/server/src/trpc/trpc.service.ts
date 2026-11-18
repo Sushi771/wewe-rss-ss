@@ -1,4 +1,5 @@
 import {
+  managedWechatLocalCache,
   withChannelExecution,
   taskDatabaseFor,
 } from '../collection/channel-task-control';
@@ -1178,6 +1179,36 @@ export class TrpcService {
   async refreshMpArticlesAndUpdateFeed(
     ...input: Parameters<TrpcService['refreshMpArticlesAndUpdateFeedOwned']>
   ) {
+    const [mpId, , trigger] = input;
+    if (trigger === 'local-manual' && managedWechatLocalCache()) {
+      if (
+        process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
+        process.env.WECHAT2RSS_LOCAL_CACHE_SYNC !== '1' ||
+        !databaseWritesAllowed()
+      )
+        throw Error('CACHE_SYNC_STARTUP_BLOCKED');
+      const feed = await this.prismaService.feed.findUniqueOrThrow({
+        where: { id: mpId },
+        select: { mpName: true, status: true, collectionChannel: true },
+      });
+      if (feed.status !== 1 || feed.collectionChannel !== 'wechat2rss')
+        throw Error('CACHE_SYNC_FEED_DISABLED');
+      const cached = await readLocalWechat2RssCache(mpId, feed.mpName);
+      const saved = await this.syncCachedWechat2RssPage(mpId, cached, false, {
+        fetchMedia: false,
+        expectedPublisher: feed.mpName,
+      });
+      return {
+        source: 'wechat2rss' as const,
+        status: 'partial' as const,
+        coverage: 'local-cache' as const,
+        complete: false as const,
+        articles: cached.articles.length,
+        created: saved.created ?? 0,
+        updated: saved.updated ?? 0,
+        message: `本地缓存已核对 ${cached.articles.length} 篇，新增 ${saved.created ?? 0} 篇。未提交来源更新。`,
+      };
+    }
     return withChannelExecution(
       'wechat',
       () => this.refreshMpArticlesAndUpdateFeedOwned(...input),
@@ -1290,6 +1321,7 @@ export class TrpcService {
     options: {
       fetchMedia?: boolean;
       inspectOnly?: boolean;
+      expectedPublisher?: string;
       nightMediaUntil?: number;
       failureAttempt?: {
         id: string;
@@ -1321,6 +1353,8 @@ export class TrpcService {
     });
     if (
       feed.status !== 1 ||
+      (options.expectedPublisher !== undefined &&
+        feed.mpName !== options.expectedPublisher) ||
       resolveCollectionRoute(feed).channel !== 'wechat2rss'
     )
       throw new Error('CACHE_SYNC_FEED_DISABLED');
@@ -1465,7 +1499,7 @@ export class TrpcService {
         const repaired = await this.incrementalCollection(mpId, (current) =>
           this.collectionService.collectWechat2RssRecent({
             mpId,
-            mpName: current.mpName,
+            mpName: options.expectedPublisher ?? current.mpName,
             trigger: 'scheduled',
             cachedPage: page,
             listOnly,
@@ -1547,6 +1581,8 @@ export class TrpcService {
     return this.incrementalCollection(mpId, (current) => {
       if (
         current.status !== 1 ||
+        (options.expectedPublisher !== undefined &&
+          current.mpName !== options.expectedPublisher) ||
         resolveCollectionRoute(current).channel !== 'wechat2rss'
       )
         throw new Error('CACHE_SYNC_FEED_DISABLED');
@@ -1878,7 +1914,11 @@ export class TrpcService {
     // Reserve before the first await: simultaneous legacy calls cannot overlap.
     this.isRefreshAllMpArticlesRunning = true;
     try {
+      const localOnly = trigger === 'local-manual' && managedWechatLocalCache();
       const mps = await this.prismaService.feed.findMany({
+        ...(localOnly
+          ? { where: { status: 1, collectionChannel: 'wechat2rss' } }
+          : {}),
         orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],
       });
       const results: {
@@ -1921,9 +1961,10 @@ export class TrpcService {
           );
         }
 
-        await new Promise((resolve) =>
-          setTimeout(resolve, this.updateDelayTime * 1e3),
-        );
+        if (!localOnly)
+          await new Promise((resolve) =>
+            setTimeout(resolve, this.updateDelayTime * 1e3),
+          );
       }
       return results;
     } finally {

@@ -187,6 +187,10 @@ const Feeds = () => {
     trpc.feed.refreshArticles.useMutation();
   const { mutateAsync: beginRefreshAll } =
     trpc.feed.beginRefreshAll.useMutation({ retry: false });
+  const { data: cacheStatus } = trpc.feed.cacheSyncStatus.useQuery(undefined, {
+    retry: false,
+  });
+  const managedLocalCache = cacheStatus?.managedLocalOnly === true;
   // History is a baseline, not a new update. Only a batch observed running on
   // this page may trigger its final cache reread, and claim that transition
   // before awaiting so concurrent query callbacks cannot repeat it.
@@ -1605,7 +1609,14 @@ const Feeds = () => {
                           const complete =
                             results.length > 0 &&
                             results.every((result) => result.complete);
-                          if (complete)
+                          if (
+                            results.length === 1 &&
+                            results[0].coverage === 'local-cache'
+                          )
+                            toast.success(results[0].message, {
+                              id: `refresh:${mpId}`,
+                            });
+                          else if (complete)
                             toast.success('本号更新完成', {
                               id: `refresh:${mpId}`,
                               duration: 3000,
@@ -1698,6 +1709,24 @@ const Feeds = () => {
                       const token = beginManualRefresh('');
                       if (!token) return;
                       try {
+                        if (managedLocalCache) {
+                          const results = await refreshMpArticles({});
+                          if (!isCurrentRefresh('', token)) return;
+                          const synced = results.filter(
+                            (result) => result.coverage === 'local-cache',
+                          );
+                          const failed = results.length - synced.length;
+                          const message = `已同步 ${synced.length} 个订阅的本地缓存${failed ? `，${failed} 个未完成` : ''}。`;
+                          if (failed || !synced.length) toast.warning(message);
+                          else toast.success(message);
+                          void queryUtils.feed.cacheSyncStatus.invalidate();
+                          await refreshFeedViews(
+                            refetchFeedList,
+                            () => queryUtils.article.list.invalidate(),
+                            () => queryUtils.article.summary.invalidate(),
+                          );
+                          return;
+                        }
                         const batch = await beginRefreshAll();
                         if (!isCurrentRefresh('', token)) return;
                         toast.info(
@@ -1748,7 +1777,9 @@ const Feeds = () => {
                             : '后台更新中'
                         : isRefreshedAll
                           ? '内容已同步'
-                          : '更新全部'}
+                          : managedLocalCache
+                            ? '同步全部缓存'
+                            : '更新全部'}
                     </span>
                   </Button>
                 </>

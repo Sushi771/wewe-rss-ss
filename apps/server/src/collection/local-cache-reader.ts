@@ -1,5 +1,6 @@
-import { statSync } from 'node:fs';
+import { lstatSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
+import { managedWechatLocalCache } from './channel-task-control';
 import type { Wechat2RssListedFeed } from './providers/wechat2rss';
 import { parseWechat2RssJsonFeed } from './provider-article';
 
@@ -53,7 +54,16 @@ function snapshot<T>(read: (database: Database) => T): T {
   const file = process.env.WECHAT2RSS_CACHE_DB?.trim();
   if (!file || !path.isAbsolute(file) || /[\0\r\n]/.test(file)) throw invalid();
   try {
-    if (!statSync(file).isFile()) throw invalid();
+    if (managedWechatLocalCache()) {
+      const info = lstatSync(file);
+      if (
+        !info.isFile() ||
+        info.isSymbolicLink() ||
+        info.nlink !== 1 ||
+        realpathSync.native(file) !== file
+      )
+        throw invalid();
+    } else if (!statSync(file).isFile()) throw invalid();
   } catch {
     throw invalid();
   }
@@ -192,6 +202,7 @@ function published(raw: unknown) {
 export async function listLocalWechat2RssCache(): Promise<
   Wechat2RssListedFeed[]
 > {
+  const isolateInvalidFeeds = managedWechatLocalCache();
   return snapshot((database) => {
     limit(
       database
@@ -201,28 +212,36 @@ export async function listLocalWechat2RssCache(): Promise<
         .get(),
     );
     const seen = new Set<string>();
+    const conflicts = new Set<string>();
     const result = database
       .prepare('SELECT biz_id,name FROM rsses LIMIT 1001')
       .all()
-      .map((row) => {
+      .flatMap((row) => {
         const biz = String(row.biz_id);
         if (
           !/^\d{5,15}$/.test(biz) ||
           typeof row.name !== 'string' ||
           !row.name.trim() ||
           seen.has(biz)
-        )
-          throw invalid('CACHE_LOCAL_IDENTITY_CONFLICT');
+        ) {
+          if (!isolateInvalidFeeds)
+            throw invalid('CACHE_LOCAL_IDENTITY_CONFLICT');
+          conflicts.add(biz);
+          return [];
+        }
         seen.add(biz);
-        return {
-          feedId: 'MP_WXS_' + biz,
-          name: row.name,
-          feedUrl: '/feed/' + biz + '.json',
-          checkTime: null,
-          nextUpdateTime: null,
-          paused: null,
-        };
-      });
+        return [
+          {
+            feedId: 'MP_WXS_' + biz,
+            name: row.name,
+            feedUrl: '/feed/' + biz + '.json',
+            checkTime: null,
+            nextUpdateTime: null,
+            paused: null,
+          },
+        ];
+      })
+      .filter((row) => !conflicts.has(row.feedId.slice(7)));
     bounded(result);
     return result;
   });

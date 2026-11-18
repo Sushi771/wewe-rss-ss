@@ -1,0 +1,72 @@
+{
+  "apps/server/src/trpc/trpc.service.ts": {
+    "beforeSha256": "73416bf28c2ea4956712207c9653db801e4621bbbc15f461524b37d247410a73",
+    "afterSha256": "9347fb4915b03899e5b35c933c03ee959458db72b587b60c47f0350fe959998c",
+    "hunks": [
+      {
+        "before": "import {\n  withChannelExecution,\n  taskDatabaseFor,\n} from '../collection/channel-task-control';\nimport { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\n",
+        "after": "import {\n  managedWechatLocalCache,\n  withChannelExecution,\n  taskDatabaseFor,\n} from '../collection/channel-task-control';\nimport { readCachedBodyMediaFlags } from '../feeds/cache-body-media-flags';\n"
+      },
+      {
+        "before": "\n  async refreshMpArticlesAndUpdateFeed(\n    ...input: Parameters<TrpcService['refreshMpArticlesAndUpdateFeedOwned']>\n  ) {\n    return withChannelExecution(\n      'wechat',\n      () => this.refreshMpArticlesAndUpdateFeedOwned(...input),\n      undefined,\n",
+        "after": "\n  async refreshMpArticlesAndUpdateFeed(\n    ...input: Parameters<TrpcService['refreshMpArticlesAndUpdateFeedOwned']>\n  ) {\n    const [mpId, , trigger] = input;\n    if (trigger === 'local-manual' && managedWechatLocalCache()) {\n      if (\n        process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||\n        process.env.WECHAT2RSS_LOCAL_CACHE_SYNC !== '1' ||\n        !databaseWritesAllowed()\n      )\n        throw Error('CACHE_SYNC_STARTUP_BLOCKED');\n      const feed = await this.prismaService.feed.findUniqueOrThrow({\n        where: { id: mpId },\n        select: { mpName: true, status: true, collectionChannel: true },\n      });\n      if (feed.status !== 1 || feed.collectionChannel !== 'wechat2rss')\n        throw Error('CACHE_SYNC_FEED_DISABLED');\n      const cached = await readLocalWechat2RssCache(mpId, feed.mpName);\n      const saved = await this.syncCachedWechat2RssPage(mpId, cached, false, {\n        fetchMedia: false,\n        expectedPublisher: feed.mpName,\n      });\n      return {\n        source: 'wechat2rss' as const,\n        status: 'partial' as const,\n        coverage: 'local-cache' as const,\n        complete: false as const,\n        articles: cached.articles.length,\n        created: saved.created ?? 0,\n        updated: saved.updated ?? 0,\n        message: `\u672c\u5730\u7f13\u5b58\u5df2\u6838\u5bf9 ${cached.articles.length} \u7bc7\uff0c\u65b0\u589e ${saved.created ?? 0} \u7bc7\u3002\u672a\u63d0\u4ea4\u6765\u6e90\u66f4\u65b0\u3002`,\n      };\n    }\n    return withChannelExecution(\n      'wechat',\n      () => this.refreshMpArticlesAndUpdateFeedOwned(...input),\n      undefined,\n"
+      },
+      {
+        "before": "    listOnly: boolean,\n    options: {\n      fetchMedia?: boolean;\n      inspectOnly?: boolean;\n      nightMediaUntil?: number;\n      failureAttempt?: {\n        id: string;\n        feedId: string;\n",
+        "after": "    listOnly: boolean,\n    options: {\n      fetchMedia?: boolean;\n      inspectOnly?: boolean;\n      expectedPublisher?: string;\n      nightMediaUntil?: number;\n      failureAttempt?: {\n        id: string;\n        feedId: string;\n"
+      },
+      {
+        "before": "      where: { id: mpId },\n    });\n    if (\n      feed.status !== 1 ||\n      resolveCollectionRoute(feed).channel !== 'wechat2rss'\n    )\n      throw new Error('CACHE_SYNC_FEED_DISABLED');\n    if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');\n",
+        "after": "      where: { id: mpId },\n    });\n    if (\n      feed.status !== 1 ||\n      (options.expectedPublisher !== undefined &&\n        feed.mpName !== options.expectedPublisher) ||\n      resolveCollectionRoute(feed).channel !== 'wechat2rss'\n    )\n      throw new Error('CACHE_SYNC_FEED_DISABLED');\n    if (this.activeCollections.has(mpId)) throw new Error('CACHE_SYNC_BUSY');\n"
+      },
+      {
+        "before": "      if (!options.inspectOnly && legacyRunning && !preflightSkipped.length) {\n        const repaired = await this.incrementalCollection(mpId, (current) =>\n          this.collectionService.collectWechat2RssRecent({\n            mpId,\n            mpName: current.mpName,\n            trigger: 'scheduled',\n            cachedPage: page,\n            listOnly,\n            fetchMedia: false,\n",
+        "after": "      if (!options.inspectOnly && legacyRunning && !preflightSkipped.length) {\n        const repaired = await this.incrementalCollection(mpId, (current) =>\n          this.collectionService.collectWechat2RssRecent({\n            mpId,\n            mpName: options.expectedPublisher ?? current.mpName,\n            trigger: 'scheduled',\n            cachedPage: page,\n            listOnly,\n            fetchMedia: false,\n"
+      },
+      {
+        "before": "    };\n    return this.incrementalCollection(mpId, (current) => {\n      if (\n        current.status !== 1 ||\n        resolveCollectionRoute(current).channel !== 'wechat2rss'\n      )\n        throw new Error('CACHE_SYNC_FEED_DISABLED');\n      return this.collectionService.collectWechat2RssRecent({\n",
+        "after": "    };\n    return this.incrementalCollection(mpId, (current) => {\n      if (\n        current.status !== 1 ||\n        (options.expectedPublisher !== undefined &&\n          current.mpName !== options.expectedPublisher) ||\n        resolveCollectionRoute(current).channel !== 'wechat2rss'\n      )\n        throw new Error('CACHE_SYNC_FEED_DISABLED');\n      return this.collectionService.collectWechat2RssRecent({\n"
+      },
+      {
+        "before": "    }\n    // Reserve before the first await: simultaneous legacy calls cannot overlap.\n    this.isRefreshAllMpArticlesRunning = true;\n    try {\n      const mps = await this.prismaService.feed.findMany({\n        orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],\n      });\n      const results: {\n        id: string;\n",
+        "after": "    }\n    // Reserve before the first await: simultaneous legacy calls cannot overlap.\n    this.isRefreshAllMpArticlesRunning = true;\n    try {\n      const localOnly = trigger === 'local-manual' && managedWechatLocalCache();\n      const mps = await this.prismaService.feed.findMany({\n        ...(localOnly\n          ? { where: { status: 1, collectionChannel: 'wechat2rss' } }\n          : {}),\n        orderBy: [{ order: 'asc' } as any, { createdAt: 'asc' }],\n      });\n      const results: {\n        id: string;\n"
+      },
+      {
+        "before": "            `[Batch Update] Failed to update ${mpName} (${id}): ${err.message}`,\n          );\n        }\n\n        await new Promise((resolve) =>\n          setTimeout(resolve, this.updateDelayTime * 1e3),\n        );\n      }\n      return results;\n    } finally {\n      this.isRefreshAllMpArticlesRunning = false;\n",
+        "after": "            `[Batch Update] Failed to update ${mpName} (${id}): ${err.message}`,\n          );\n        }\n\n        if (!localOnly)\n          await new Promise((resolve) =>\n            setTimeout(resolve, this.updateDelayTime * 1e3),\n          );\n      }\n      return results;\n    } finally {\n      this.isRefreshAllMpArticlesRunning = false;\n"
+      }
+    ]
+  },
+  "apps/web/src/pages/feeds/index.tsx": {
+    "beforeSha256": "2fdebebd65fb58261c11e4b5e0d8c3e0d8d8fc0a84fd8dcd9b0dab7d798df9b5",
+    "afterSha256": "e8c2153eb65de3729ce74622a95bc2295c8498af1f8fd8f8a4603255180057a2",
+    "hunks": [
+      {
+        "before": "  const { mutateAsync: refreshMpArticles } =\n    trpc.feed.refreshArticles.useMutation();\n  const { mutateAsync: beginRefreshAll } =\n    trpc.feed.beginRefreshAll.useMutation({ retry: false });\n  // History is a baseline, not a new update. Only a batch observed running on\n  // this page may trigger its final cache reread, and claim that transition\n  // before awaiting so concurrent query callbacks cannot repeat it.\n  const manualObservedStates = useRef(new Map<string, string>());\n",
+        "after": "  const { mutateAsync: refreshMpArticles } =\n    trpc.feed.refreshArticles.useMutation();\n  const { mutateAsync: beginRefreshAll } =\n    trpc.feed.beginRefreshAll.useMutation({ retry: false });\n  const { data: cacheStatus } = trpc.feed.cacheSyncStatus.useQuery(undefined, {\n    retry: false,\n  });\n  const managedLocalCache = cacheStatus?.managedLocalOnly === true;\n  // History is a baseline, not a new update. Only a batch observed running on\n  // this page may trigger its final cache reread, and claim that transition\n  // before awaiting so concurrent query callbacks cannot repeat it.\n  const manualObservedStates = useRef(new Map<string, string>());\n"
+      },
+      {
+        "before": "                          );\n                          const complete =\n                            results.length > 0 &&\n                            results.every((result) => result.complete);\n                          if (complete)\n                            toast.success('\u672c\u53f7\u66f4\u65b0\u5b8c\u6210', {\n                              id: `refresh:${mpId}`,\n                              duration: 3000,\n                            });\n",
+        "after": "                          );\n                          const complete =\n                            results.length > 0 &&\n                            results.every((result) => result.complete);\n                          if (\n                            results.length === 1 &&\n                            results[0].coverage === 'local-cache'\n                          )\n                            toast.success(results[0].message, {\n                              id: `refresh:${mpId}`,\n                            });\n                          else if (complete)\n                            toast.success('\u672c\u53f7\u66f4\u65b0\u5b8c\u6210', {\n                              id: `refresh:${mpId}`,\n                              duration: 3000,\n                            });\n"
+      },
+      {
+        "before": "                        return;\n                      const token = beginManualRefresh('');\n                      if (!token) return;\n                      try {\n                        const batch = await beginRefreshAll();\n                        if (!isCurrentRefresh('', token)) return;\n                        toast.info(\n                          `${batch.reused ? '\u7ee7\u7eed\u67e5\u770b\u539f\u6279\u6b21' : '\u66f4\u65b0\u8bf7\u6c42\u5df2\u6392\u961f'}\uff1a\u5171 ${batch.total} \u4e2a\uff0c\u5f85\u53d1\u9001 ${batch.queuedCount} \u4e2a`,\n",
+        "after": "                        return;\n                      const token = beginManualRefresh('');\n                      if (!token) return;\n                      try {\n                        if (managedLocalCache) {\n                          const results = await refreshMpArticles({});\n                          if (!isCurrentRefresh('', token)) return;\n                          const synced = results.filter(\n                            (result) => result.coverage === 'local-cache',\n                          );\n                          const failed = results.length - synced.length;\n                          const message = `\u5df2\u540c\u6b65 ${synced.length} \u4e2a\u8ba2\u9605\u7684\u672c\u5730\u7f13\u5b58${failed ? `\uff0c${failed} \u4e2a\u672a\u5b8c\u6210` : ''}\u3002`;\n                          if (failed || !synced.length) toast.warning(message);\n                          else toast.success(message);\n                          void queryUtils.feed.cacheSyncStatus.invalidate();\n                          await refreshFeedViews(\n                            refetchFeedList,\n                            () => queryUtils.article.list.invalidate(),\n                            () => queryUtils.article.summary.invalidate(),\n                          );\n                          return;\n                        }\n                        const batch = await beginRefreshAll();\n                        if (!isCurrentRefresh('', token)) return;\n                        toast.info(\n                          `${batch.reused ? '\u7ee7\u7eed\u67e5\u770b\u539f\u6279\u6b21' : '\u66f4\u65b0\u8bf7\u6c42\u5df2\u6392\u961f'}\uff1a\u5171 ${batch.total} \u4e2a\uff0c\u5f85\u53d1\u9001 ${batch.queuedCount} \u4e2a`,\n"
+      },
+      {
+        "before": "                            ? '\u66f4\u65b0\u5df2\u6682\u505c'\n                            : '\u540e\u53f0\u66f4\u65b0\u4e2d'\n                        : isRefreshedAll\n                          ? '\u5185\u5bb9\u5df2\u540c\u6b65'\n                          : '\u66f4\u65b0\u5168\u90e8'}\n                    </span>\n                  </Button>\n                </>\n              )}\n",
+        "after": "                            ? '\u66f4\u65b0\u5df2\u6682\u505c'\n                            : '\u540e\u53f0\u66f4\u65b0\u4e2d'\n                        : isRefreshedAll\n                          ? '\u5185\u5bb9\u5df2\u540c\u6b65'\n                          : managedLocalCache\n                            ? '\u540c\u6b65\u5168\u90e8\u7f13\u5b58'\n                            : '\u66f4\u65b0\u5168\u90e8'}\n                    </span>\n                  </Button>\n                </>\n              )}\n"
+      }
+    ]
+  },
+  "scripts/local-release/installed-startup-gate.cjs": {
+    "beforeSha256": "19e790ead2ecbf0fa587469cd114397c375d11039cbb712b10dc7dec853484c4",
+    "afterSha256": "37571e204dede85377dbe20c5b0f9f3b669c08dcd6f417b65bece0d9f271dd79",
+    "hunks": [
+      {
+        "before": "            otherAutomaticWorkDisabled,\n          wechatScheduleEnabled:\n            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&\n            process.env.WECHAT2RSS_ENABLED === '1',\n        },\n      };\n    },\n  };\n",
+        "after": "            otherAutomaticWorkDisabled,\n          wechatScheduleEnabled:\n            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&\n            process.env.WECHAT2RSS_ENABLED === '1',\n          ...(process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1'\n            ? {\n                wechatLocalCacheEnabled:\n                  process.env.WECHAT2RSS_CACHE_SYNC === '1' &&\n                  process.env.WECHAT2RSS_LOCAL_CACHE_SYNC === '1' &&\n                  process.env.WECHAT2RSS_CACHE_MEDIA === '0' &&\n                  process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '0',\n              }\n            : {}),\n        },\n      };\n    },\n  };\n"
+      }
+    ]
+  }
+}

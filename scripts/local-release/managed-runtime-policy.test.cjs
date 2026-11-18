@@ -4,14 +4,16 @@ const test = require('node:test'),
   os = require('node:os'),
   path = require('node:path');
 const policy = require('./managed-runtime-mode.cjs');
-function fixture(run) {
+function fixture(run, projectLayout = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manual-xhs-policy-'));
-  const database = path.join(root, 'db');
+  const data = projectLayout ? path.join(root, 'apps', 'server', 'data') : root;
+  fs.mkdirSync(data, { recursive: true });
+  const database = path.join(data, 'db');
   fs.writeFileSync(database, 'synthetic database identity only');
   const channelArchives = {};
   const files = {};
   for (const c of ['wechat', 'xiaohongshu']) {
-    const folder = path.join(root, '.collection-channel-control', c);
+    const folder = path.join(data, '.collection-channel-control', c);
     fs.mkdirSync(folder, { recursive: true });
     files[c] = path.join(folder, 'state.json');
     const archived = [
@@ -179,3 +181,35 @@ test('both schedules require previously archived, paused channels at install, th
       /MANAGED_CHANNEL_MUST_BE_PAUSED/,
     );
   }));
+
+test('reviewed local WeChat cache keeps active submissions off and preserves the XHS clock when the cache is absent', () =>
+  fixture((f) => {
+    f.mode.kind = 'scheduled-dual-v1';
+    f.mode.wechatLocalCache = true;
+    const cache = path.join(f.root, '.wechat2rss-data', 'res.db');
+    assert.throws(
+      () => policy.environment(f.mode, f.database, { initial: true }),
+      /ENOENT/,
+    );
+    fs.mkdirSync(path.dirname(cache));
+    fs.writeFileSync(cache, 'synthetic cache identity');
+    const env = policy.environment(f.mode, f.database, { initial: true });
+    assert.equal(env.WECHAT2RSS_CACHE_DB, fs.realpathSync.native(cache));
+    assert.equal(env.WECHAT2RSS_CACHE_SYNC, '1');
+    assert.equal(env.WECHAT2RSS_LOCAL_CACHE_SYNC, '1');
+    assert.equal(env.WECHAT2RSS_CACHE_MEDIA, '0');
+    assert.equal(env.WECHAT2RSS_ACTIVE_SCHEDULE, '0');
+    assert.equal(env.ENABLE_SCHEDULED_UPDATES, '1');
+    const xhs = JSON.parse(fs.readFileSync(f.files.xiaohongshu));
+    xhs.paused = false;
+    fs.writeFileSync(f.files.xiaohongshu, JSON.stringify(xhs));
+    fs.unlinkSync(cache);
+    assert.deepEqual(policy.environment(f.mode, f.database), env);
+    const wechat = JSON.parse(fs.readFileSync(f.files.wechat));
+    wechat.paused = false;
+    fs.writeFileSync(f.files.wechat, JSON.stringify(wechat));
+    assert.throws(
+      () => policy.environment(f.mode, f.database),
+      /MANAGED_CHANNEL_MUST_BE_PAUSED/,
+    );
+  }, true));

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Wechat2RssProvider } from './collection/providers/wechat2rss';
+import { managedWechatLocalCache } from './collection/channel-task-control';
 
 type Config = { enabled: boolean; baseUrl: string; token: string };
 type State =
@@ -61,6 +62,7 @@ export class Wechat2RssAccounts {
   ) {}
 
   private config(): Config {
+    if (managedWechatLocalCache()) throw new Error('UNAVAILABLE');
     const config = this.readConfig();
     if (!config.enabled) throw new Error('UNAVAILABLE');
     // Reuse the provider's existing private-host and credential validation.

@@ -322,3 +322,39 @@ test(
       },
     ),
 );
+
+test(
+  'managed local WeChat cache activates with its own health proof and leaves both historical queues untouched',
+  { timeout: 240000 },
+  () =>
+    fixture(
+      async (f) => {
+        const queue = fs.readFileSync(f.retainedQueue);
+        const result = await runFixedProfile(f.profilePin);
+        assert.equal(result.status, 'completed', result.error);
+        const committed = read(f.profile.journalFile);
+        assert.equal(committed.runtimeMode.wechatLocalCache, true);
+        const proof = await (
+          await fetch(
+            'http://127.0.0.1:' + f.profile.port + '/_local/update-health',
+          )
+        ).json();
+        assert.deepEqual(
+          [
+            proof.managedRuntime.wechatLocalCacheEnabled,
+            proof.managedRuntime.wechatScheduleEnabled,
+            proof.managedRuntime.scheduledUpdatesEnabled,
+          ],
+          [true, false, true],
+        );
+        assert.equal(read(state(f, 'wechat')).paused, true);
+        assert.deepEqual(fs.readFileSync(f.retainedQueue), queue);
+        assert.deepEqual(fs.readFileSync(f.database), f.before);
+      },
+      {
+        scheduledDualMode: true,
+        wechatLocalCache: true,
+        previousCompletion: true,
+      },
+    ),
+);

@@ -15,6 +15,7 @@ import { CacheSyncService } from './cache-sync.service';
 import { cacheRevision, cacheSyncState } from './cache-sync-state';
 import { ProviderPage } from '../collection/subscription-provider';
 import { canonicalArticleUrl } from '../collection/collection-format';
+import { assertChannelRunnable } from '../collection/channel-task-control';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest
     .fn()
@@ -41,6 +42,136 @@ describe('cache delta through original SQLite merge', () => {
     bodyMissing: body ? 0 : 1,
     imageBlocked: blocked,
     coverage: 'recent-window',
+  });
+  it('runs a managed cache-only manual refresh while preserving a shared pending request and isolating feed errors', async () => {
+    const second = 'MP_WXS_1234567895';
+    const state = path.join(
+      root,
+      '.collection-channel-control',
+      'wechat',
+      'state.json',
+    );
+    await fs.mkdir(path.dirname(state), { recursive: true });
+    await fs.writeFile(
+      state,
+      JSON.stringify({
+        version: 1,
+        revision: 1,
+        paused: true,
+        archived: [],
+        receipts: [],
+      }),
+      { flag: 'wx' },
+    );
+    const original = await prisma.article.findMany({
+      where: { mpId },
+      orderBy: { id: 'asc' },
+    });
+    await prisma.feed.create({
+      data: {
+        id: second,
+        mpName: 'second cache fixture',
+        mpIntro: '',
+        mpCover: '',
+        collectionChannel: 'wechat2rss',
+        status: 1,
+        updateTime: 0,
+      },
+    });
+    await prisma.$executeRawUnsafe(
+      "UPDATE Wechat2RssSourceGate SET state='pending', token='old-indeterminate-request', status=NULL WHERE id=1",
+    );
+    const gate = await prisma.$queryRawUnsafe(
+      'SELECT * FROM Wechat2RssSourceGate',
+    );
+    const claims = await prisma.$queryRawUnsafe(
+      'SELECT * FROM refresh_submission_claims',
+    );
+    const env = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+      WEWE_MANAGED_WECHAT_LOCAL_CACHE: '1',
+      WECHAT2RSS_LOCAL_CACHE_SYNC: '1',
+      WECHAT2RSS_RECOVERY_HOLD: '0',
+    });
+    const network = jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValue(Error('NETWORK_FORBIDDEN'));
+    const provider = jest
+      .spyOn(providerRegistry, 'wechat2RssProvider')
+      .mockImplementation(() => {
+        throw Error('PROVIDER_FORBIDDEN');
+      });
+    const cached = page('<div id="js_content"><p>local cached text</p></div>');
+    Object.assign(
+      cached.articles[0],
+      canonicalArticleUrl(
+        'https://mp.weixin.qq.com/s?__biz=MTIzNDU2Nzg5NQ==&mid=10&idx=1',
+      ),
+    );
+    const read = jest
+      .spyOn(localCache, 'readLocalWechat2RssCache')
+      .mockImplementation(async (id) => {
+        if (id !== second) throw Error('CACHE_LOCAL_READ_UNAVAILABLE');
+        return cached;
+      });
+    try {
+      await expect(assertChannelRunnable('wechat')).rejects.toThrow(
+        'CHANNEL_MANAGED_WECHAT_PAUSED',
+      );
+      await expect(assertChannelRunnable('xiaohongshu')).resolves.toMatchObject(
+        { paused: false },
+      );
+      const all = await trpc.refreshAllMpArticlesAndUpdateFeed('local-manual');
+      expect(all).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: mpId, status: 'failed' }),
+          expect.objectContaining({
+            id: second,
+            coverage: 'local-cache',
+            created: 1,
+          }),
+        ]),
+      );
+      await expect(
+        trpc.refreshMpArticlesAndUpdateFeed(second, 1, 'local-manual'),
+      ).resolves.toMatchObject({ coverage: 'local-cache', created: 0 });
+      await expect(
+        trpc.refreshMpArticlesAndUpdateFeed(second, 1, 'public'),
+      ).rejects.toThrow('CHANNEL_MANAGED_WECHAT_PAUSED');
+      expect(
+        await prisma.article.findMany({ where: { mpId: second } }),
+      ).toEqual([
+        expect.objectContaining({
+          id: cached.articles[0].id,
+          contentHtml: expect.stringContaining('local cached text'),
+        }),
+      ]);
+      expect(
+        await prisma.article.findMany({
+          where: { mpId },
+          orderBy: { id: 'asc' },
+        }),
+      ).toEqual(original);
+      expect(
+        await prisma.$queryRawUnsafe('SELECT * FROM Wechat2RssSourceGate'),
+      ).toEqual(gate);
+      expect(
+        await prisma.$queryRawUnsafe('SELECT * FROM refresh_submission_claims'),
+      ).toEqual(claims);
+      expect(provider).not.toHaveBeenCalled();
+      expect(network).not.toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+      provider.mockRestore();
+      network.mockRestore();
+      env.restore();
+      await fs.unlink(state);
+      await prisma.feed.delete({ where: { id: second } });
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='idle', token=NULL, status=NULL WHERE id=1",
+      );
+    }
   });
   const oldEnv = {
     enabled: process.env.WECHAT2RSS_ENABLED,

@@ -16,12 +16,37 @@ const { restoreXhsReaderRoute } = require('./xhs-reader-removal.cjs');
 const copyPins = require('./fixtures/product-copy-layout.json');
 const searchPins = require('./fixtures/deployed-body-search-scope.json');
 const restoreHeldChannel = require('./held-channel-deployment-seams.cjs');
-const read = (file) =>
-  restoreHeldChannel(
+const restoreManagedWechatLocalCache = require('./managed-wechat-local-cache-seams.cjs');
+const readSource = (file) =>
+  restoreManagedWechatLocalCache(
     file,
     fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
   );
+const read = (file) => restoreHeldChannel(file, readSource(file));
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
+
+test('managed local-cache inverse preserves the full prior startup and deployment sources', () => {
+  const entries = require('./fixtures/managed-wechat-local-cache-compat.json');
+  assert.deepEqual(Object.keys(entries).sort(), [
+    'apps/server/src/trpc/trpc.service.ts',
+    'apps/web/src/pages/feeds/index.tsx',
+    'scripts/local-release/installed-startup-gate.cjs',
+  ]);
+  for (const [file, entry] of Object.entries(entries)) {
+    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(hash(readSource(file)), entry.beforeSha256);
+    for (const changed of [
+      raw + '// unreviewed\n',
+      ...entry.hunks.map(({ before, after }) => raw.replace(after, before)),
+    ]) {
+      if (hash(changed) !== entry.beforeSha256)
+        assert.throws(
+          () => restoreManagedWechatLocalCache(file, changed),
+          /exact reviewed local-cache delta/,
+        );
+    }
+  }
+});
 
 test('reviewed held/channel deltas preserve original blobs and reject every unknown or partially reverted edit', () => {
   const entries = require('./fixtures/held-channel-deployment-compat.json');
@@ -34,7 +59,7 @@ test('reviewed held/channel deltas preserve original blobs and reject every unkn
     'scripts/local-release/restart.cjs',
   ]);
   for (const [file, entry] of Object.entries(entries)) {
-    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    const raw = readSource(file);
     assert.equal(hash(raw), entry.afterSha256);
     const historical = restoreHeldChannel(file, raw);
     assert.equal(hash(historical), entry.beforeSha256);
@@ -59,7 +84,7 @@ test('scheduled startup inverse rejects changes outside its exact reviewed delta
     'scripts/local-release/runtime.cjs',
   ]);
   for (const [file, fixture] of Object.entries(entries)) {
-    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    const raw = readSource(file);
     assert.equal(hash(raw), fixture.afterSha256);
     assert.equal(
       hash(restoreLegacyWriter.restoreScheduledRuntime(file, raw)),
@@ -88,7 +113,7 @@ test('manual runtime inverse pins complete sources and refuses unknown or partia
   for (const [file, entry] of Object.entries(entries)) {
     const raw = restoreLegacyWriter.restoreScheduledRuntime(
       file,
-      fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+      readSource(file),
     );
     assert.equal(hash(raw), entry.afterSha256);
     const original = restoreLegacyWriter.restoreManagedRuntime(file, raw);

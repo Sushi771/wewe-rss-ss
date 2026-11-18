@@ -147,6 +147,9 @@ async function runProfileInner(token, report) {
       modeEnvironment(p.runtimeMode, p.database, { initial: true });
       if (
         proof.managedRuntime?.mode !== p.runtimeMode.kind ||
+        (p.runtimeMode.wechatLocalCache &&
+          (proof.managedRuntime.wechatLocalCacheEnabled !== true ||
+            proof.managedRuntime.wechatScheduleEnabled !== false)) ||
         proof.managedRuntime.recoveryHeld !== false ||
         proof.managedRuntime.xhsLive !== true ||
         (p.runtimeMode.kind === 'scheduled-dual-v1'

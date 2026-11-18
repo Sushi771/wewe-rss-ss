@@ -187,6 +187,15 @@ function install({ release, manifest, database, environment = process.env }) {
           wechatScheduleEnabled:
             process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&
             process.env.WECHAT2RSS_ENABLED === '1',
+          ...(process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1'
+            ? {
+                wechatLocalCacheEnabled:
+                  process.env.WECHAT2RSS_CACHE_SYNC === '1' &&
+                  process.env.WECHAT2RSS_LOCAL_CACHE_SYNC === '1' &&
+                  process.env.WECHAT2RSS_CACHE_MEDIA === '0' &&
+                  process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '0',
+              }
+            : {}),
         },
       };
     },
