@@ -92,6 +92,7 @@ module.exports={...base,control(action){let s=JSON.parse(fs.readFileSync(file));
   const runtime = `const fs=require('node:fs'),path=require('node:path'),http=require('node:http');
 const at=n=>process.argv[process.argv.indexOf(n)+1], database=at('--database'),port=Number(at('--port'));
 const release=__dirname,manifest=JSON.parse(fs.readFileSync(path.join(release,'release.json'))),crypto=require('node:crypto');
+Object.assign(process.env,require('./managed-runtime-mode.cjs').committed({journalFile:path.join(path.dirname(database),'.wewe-update.json'),releaseId:manifest.id,manifestSha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(release,'release.json'))).digest('hex'),database}));
 const gate=require('./installed-startup-gate.cjs').install({release,manifest,database});
 const writer=gate.holdWriterGate(require('./project-writer-gate.cjs'));writer.acquireWriter(database);
 if(process.env.WEWE_UPDATE_TRANSACTION)gate.waitUntilPermitted().then(ok=>{if(ok)gate.markDatabaseWritable();});
@@ -130,6 +131,12 @@ server.listen(port,'127.0.0.1');
       'project-writer-gate.cjs',
       normalized(
         path.join(repository, 'scripts/local-release/project-writer-gate.cjs'),
+      ),
+    );
+    add(
+      'managed-runtime-mode.cjs',
+      normalized(
+        path.join(repository, 'scripts/local-release/managed-runtime-mode.cjs'),
       ),
     );
     add(
@@ -459,7 +466,46 @@ server.listen(port,'127.0.0.1');
       { encoding: 'utf8', windowsHide: true },
     ),
   );
+  let runtimeMode;
+  if (options.manualMode) {
+    const archives = {};
+    for (const channel of ['wechat', 'xiaohongshu']) {
+      const folder = path.join(
+        path.dirname(database),
+        '.collection-channel-control',
+        channel,
+      );
+      const archived = [
+        {
+          kind: channel === 'wechat' ? 'wechat-batch' : 'xhs-task',
+          id: 'retained',
+          digest: sha('synthetic retained evidence'),
+        },
+      ];
+      write(
+        path.join(folder, 'state.json'),
+        JSON.stringify({
+          version: 1,
+          revision: 1,
+          paused: true,
+          archived,
+          receipts: [
+            {
+              digest: sha('synthetic archive'),
+              backupSha256: report.sha256,
+              at: Date.now(),
+            },
+          ],
+        }),
+      );
+      archives[channel] = require('../managed-runtime-mode.cjs').digest(
+        archived,
+      );
+    }
+    runtimeMode = { kind: 'manual-xhs-v1', channelArchives: archives };
+  }
   const rawProfile = {
+    ...(runtimeMode ? { runtimeMode } : {}),
     kind: 'fixed-held-same-schema-maintenance-v1',
     executionMode: 'final-install',
     projectRoot,
@@ -503,7 +549,11 @@ server.listen(port,'127.0.0.1');
       commit: trustedControlSource.commit,
       files: controls,
     },
-    expected: { ...roles, controlCommit: trustedControlSource.commit },
+    expected: {
+      ...roles,
+      controlCommit: trustedControlSource.commit,
+      ...(runtimeMode ? { runtimeMode } : {}),
+    },
   });
   const profile = proposal.profile;
   const profilePin = write(

@@ -159,6 +159,27 @@ function install({ release, manifest, database, environment = process.env }) {
         readOnly: !writesAllowed(),
         databaseReadable: databaseReadable === true,
         httpReady: true,
+        managedRuntime: {
+          mode: process.env.WEWE_MANAGED_RUNTIME_MODE || 'held',
+          recoveryHeld: process.env.WECHAT2RSS_RECOVERY_HOLD === '1',
+          xhsLive: process.env.XHS_SUBSCRIPTION_LIVE_ENABLED === '1',
+          localMode:
+            process.env.PRIVATE_ONLINE_MODE !== '1' &&
+            process.env.WEWE_ACCEPTANCE_MODE !== '1',
+          automaticDisabled:
+            process.env.ENABLE_SCHEDULED_UPDATES === '0' &&
+            process.env.DISABLE_SCHEDULED_UPDATES === '1' &&
+            [
+              'WECHAT2RSS_ACTIVE_SCHEDULE',
+              'WECHAT2RSS_ACTIVE_SCHEDULE_ENABLED',
+              'WECHAT2RSS_CACHE_SYNC_ENABLED',
+              'WECHAT2RSS_CACHE_MEDIA_ENABLED',
+              'WECHAT_DESKTOP_ALLOW_SCHEDULED',
+              'XHS_COMMENT_COLLECTION_ENABLED',
+              'SQLITE_PERIODIC_LIFECYCLE_ENABLED',
+              'SQLITE_RETENTION_SCAN_ENABLED',
+            ].every((k) => process.env[k] === '0'),
+        },
       };
     },
   };

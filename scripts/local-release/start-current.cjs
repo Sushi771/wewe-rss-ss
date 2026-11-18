@@ -251,10 +251,17 @@ async function startCurrent({
         rehearsal.guardReport,
       );
     else args.push('--production');
+    const managedEnv = require('./managed-runtime-mode.cjs').committed({
+      journalFile: path.join(path.dirname(database), '.wewe-update.json'),
+      releaseId: manifest.id,
+      manifestSha256: hash(path.join(release, 'release.json')),
+      database,
+    });
     const env = lib.cleanEnvironment({
       NODE_ENV: 'production',
       XHS_SUBSCRIPTION_LIVE_ENABLED: rehearsal ? '0' : '1',
       XHS_COMMENT_COLLECTION_ENABLED: '0',
+      ...managedEnv,
       PYTHONDONTWRITEBYTECODE: '1',
       LOCAL_RELEASE_CONTROLLED_START: manifest.id,
       LOCAL_RELEASE_STARTUP_AUDIT_ROOT: '',

@@ -373,6 +373,60 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     await service.startBatchItem({ batchId, position: 0, creatorId: ids[0] });
     expect(api).toHaveBeenCalledTimes(6);
   });
+  it('one selected account is a paginated list task, not a single-page or detail/media collection', async () => {
+    await batch.stop(batchId);
+    batchId = randomUUID();
+    const creatorId = ids[2];
+    const baseApi = api.getMockImplementation()!;
+    let pages = 0;
+    api.mockImplementation(async (request: any) => {
+      const result = await baseApi(request);
+      if (new URL(request.url).pathname.endsWith('/user_posted')) {
+        pages++;
+        result.body.data.has_more = pages === 1;
+        result.body.data.cursor = pages === 1 ? 'synthetic-next-page' : '';
+        if (pages === 2)
+          result.body.data.notes.push({
+            ...result.body.data.notes[0],
+            note_id: 'second-' + authors[creatorId],
+          });
+      }
+      return result;
+    });
+    await batch.create(batchId, [creatorId]);
+    await batch.advance(batchId);
+    await waitForLane();
+    await batch.advance(batchId);
+    expect((await batch.status(batchId)).state).toBe('complete');
+    expect(pages).toBe(2);
+    expect(api).toHaveBeenCalledTimes(3); // one author context + two list pages
+    expect(
+      api.mock.calls.every(([r]) => {
+        const u = new URL(r.url);
+        return (
+          /\/(?:user_posted|user\/otherinfo)$/.test(u.pathname) &&
+          (u.searchParams.get('user_id') ??
+            u.searchParams.get('target_user_id')) === authors[creatorId]
+        );
+      }),
+    ).toBe(true);
+    expect(await db.xhsNote.count({ where: { creatorId } })).toBe(2); // duplicate on page two saved once
+    expect(
+      await db.xhsNote.count({ where: { creatorId: { not: creatorId } } }),
+    ).toBe(0);
+    const [saved] = await db.$queryRawUnsafe<any[]>(
+      'SELECT document FROM xhs_subscription_tasks WHERE id=?',
+      scheduledTaskId('batch/' + batchId, creatorId, 'basic'),
+    );
+    expect(JSON.parse(saved.document)).toMatchObject({
+      kind: 'list',
+      state: 'completed',
+    });
+    expect(JSON.parse(saved.document).collectDetails).not.toBe(true);
+    expect(await snapshot()).toEqual(historical);
+    await batch.advance(batchId);
+    expect(api).toHaveBeenCalledTimes(3);
+  });
   it('excludes an entire retained-unknown account from an exact two-member cold batch', async () => {
     await batch.stop(batchId);
     batchId = randomUUID();
@@ -892,7 +946,6 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
       creatorId: ids[0],
       kind: 'list',
       state: 'completed',
-      collectDetails: false,
       pageLimit: 1,
       noteIds: [],
       items: {},

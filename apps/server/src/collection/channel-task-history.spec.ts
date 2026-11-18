@@ -139,6 +139,67 @@ describe('channel task history on real isolated Prisma SQLite (no source request
       acknowledged: true,
     });
   };
+  it('manual XHS operating mode cannot resume or execute Wechat even if a pause file is absent', async () => {
+    const previous = process.env.WEWE_MANAGED_RUNTIME_MODE;
+    process.env.WEWE_MANAGED_RUNTIME_MODE = 'manual-xhs-v1';
+    try {
+      const folder = path.join(
+        path.dirname(database),
+        '.wechat2rss-subscription-batches',
+      );
+      await fs.mkdir(folder, { recursive: true });
+      await fs.writeFile(
+        path.join(folder, batchId + '.json'),
+        JSON.stringify({
+          id: batchId,
+          state: 'running',
+          items: Array.from({ length: 8 }, (_, i) => ({
+            id: 'old-' + i,
+            state: 'queued',
+          })),
+        }),
+      );
+      const before = await fs.readFile(
+        path.join(
+          path.dirname(database),
+          '.wechat2rss-subscription-batches',
+          batchId + '.json',
+        ),
+      );
+      const p = await manager.preview('wechat', 'resume');
+      await expect(
+        manager.confirm({
+          channel: 'wechat',
+          action: 'resume',
+          digest: p.digest,
+          acknowledged: true,
+        }),
+      ).rejects.toThrow('CHANNEL_MANAGED_WECHAT_PAUSED');
+      await expect(
+        withChannelExecution(
+          'wechat',
+          async () => {
+            throw Error('SOURCE_MUST_NOT_RUN');
+          },
+          undefined,
+          database,
+        ),
+      ).rejects.toThrow('CHANNEL_MANAGED_WECHAT_PAUSED');
+      expect(backup).not.toHaveBeenCalled();
+      expect(
+        await fs.readFile(
+          path.join(
+            path.dirname(database),
+            '.wechat2rss-subscription-batches',
+            batchId + '.json',
+          ),
+        ),
+      ).toEqual(before);
+    } finally {
+      if (previous === undefined) delete process.env.WEWE_MANAGED_RUNTIME_MODE;
+      else process.env.WEWE_MANAGED_RUNTIME_MODE = previous;
+    }
+  });
   it('archives the complete visible XHS inventory, retaining content, unknowns and original rows byte for byte', async () => {
     // Match the reported production cardinalities using wholly synthetic data.
     await db.$executeRawUnsafe(

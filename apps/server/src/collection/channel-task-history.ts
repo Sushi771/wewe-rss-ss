@@ -268,6 +268,12 @@ export class ChannelTaskHistory {
           throw Error('CHANNEL_PREVIEW_CHANGED');
         if (
           input.action === 'resume' &&
+          input.channel === 'wechat' &&
+          process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1'
+        )
+          throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
+        if (
+          input.action === 'resume' &&
           process.env.WECHAT2RSS_RECOVERY_HOLD === '1'
         )
           throw Error('CHANNEL_GLOBAL_RECOVERY_HELD');

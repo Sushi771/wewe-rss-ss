@@ -89,6 +89,7 @@ function freezeControlSources({ repository, commit, files }) {
 function verifyFixedProfile(profileFile, expectedSha256) {
   const fixed = pin({ path: profileFile, sha256: expectedSha256 });
   const profile = JSON.parse(fs.readFileSync(fixed.path, 'utf8'));
+  require('../managed-runtime-mode.cjs').definition(profile.runtimeMode);
   if (
     profile.kind !== 'fixed-held-same-schema-maintenance-v1' ||
     profile.executionMode !== 'final-install' ||
@@ -184,6 +185,10 @@ function verifyFixedProfile(profileFile, expectedSha256) {
     const absolute = path.join(__dirname, file);
     if (!closure.has(absolute)) fail('FIXED_PROFILE_LOCAL_CODE_NOT_PINNED');
   }
+  requirePin({
+    path: path.join(__dirname, '../managed-runtime-mode.cjs'),
+    sha256: closure.get(path.join(__dirname, '../managed-runtime-mode.cjs')),
+  });
   requirePin(profile.backup.helper);
   if (profile.startMode === 'cold-empty') {
     if (profile.oldProcess !== undefined) fail('COLD_HAS_NO_OLD_PROCESS');
@@ -308,6 +313,11 @@ function freezeFixedProfile({ profile, controlSource, expected }) {
   }
   if (!Array.isArray(profile.closure) || !profile.closure.length)
     fail('FIXED_PROFILE_CODE_CLOSURE_INCOMPLETE');
+  require('../managed-runtime-mode.cjs').definition(profile.runtimeMode);
+  if (
+    JSON.stringify(profile.runtimeMode) !== JSON.stringify(expected.runtimeMode)
+  )
+    fail('INDEPENDENT_RUNTIME_MODE_REQUIRED');
   const closure = profile.closure.map(pin);
   if (new Set(closure.map((item) => item.path)).size !== closure.length)
     fail('DUPLICATE_PROFILE_CODE_PIN');
@@ -354,6 +364,8 @@ function prepareFixedDispatch({ profile: profilePin, driver, expected }) {
       if (p[role][key] !== expected[role][key])
         fail('INDEPENDENT_FIXED_ROLE_CHANGED');
   }
+  if (JSON.stringify(p.runtimeMode) !== JSON.stringify(expected.runtimeMode))
+    fail('INDEPENDENT_RUNTIME_MODE_REQUIRED');
   const entry = pin(driver);
   if (
     entry.path !== path.join(__dirname, 'fixed-maintenance-driver.cjs') ||
@@ -372,6 +384,7 @@ function prepareFixedDispatch({ profile: profilePin, driver, expected }) {
     journalFile: p.journalFile,
     current: p.current,
     candidate: p.candidate,
+    ...(p.runtimeMode ? { runtimeMode: p.runtimeMode } : {}),
     profile: data.fixed,
     dependencyPins: p.closure,
   });

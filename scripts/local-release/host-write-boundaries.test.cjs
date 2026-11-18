@@ -64,6 +64,7 @@ const catalog = {
     'preserving-process-family',
     'private-artifact-proof',
     'updater/legacy-maintenance-adapter',
+    'managed-runtime-mode',
     'updater/install-binding/restore-identity-binding',
   ],
   // Identity-bound native writer leases, locks and durable recovery receipts.

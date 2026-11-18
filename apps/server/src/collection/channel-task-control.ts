@@ -164,6 +164,11 @@ export async function assertChannelRunnable(
 ) {
   if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
     throw Error('CHANNEL_GLOBAL_RECOVERY_HELD');
+  if (
+    process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' &&
+    channel === 'wechat'
+  )
+    throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
   const state = await readChannelState(channel, database);
   if (state.paused) throw Error('CHANNEL_PAUSED');
   if (ref && state.archived.some((r) => r.kind === ref.kind && r.id === ref.id))
@@ -301,6 +306,11 @@ export async function withConfiguredChannelExecution<T>(
 ) {
   if (process.env.WECHAT2RSS_RECOVERY_HOLD === '1')
     throw Error('CHANNEL_GLOBAL_RECOVERY_HELD');
+  if (
+    process.env.WEWE_MANAGED_RUNTIME_MODE === 'manual-xhs-v1' &&
+    channel === 'wechat'
+  )
+    throw Error('CHANNEL_MANAGED_WECHAT_PAUSED');
   if (!(process.env.DATABASE_URL || '').startsWith('file:')) return operation();
   return withChannelExecution(channel, operation, ref);
 }
@@ -319,6 +329,7 @@ export async function runChannelWorker(
       [
         'CHANNEL_BUSY',
         'CHANNEL_PAUSED',
+        'CHANNEL_MANAGED_WECHAT_PAUSED',
         'CHANNEL_GLOBAL_RECOVERY_HELD',
         'CHANNEL_TASK_ARCHIVED',
       ].includes(error.message)

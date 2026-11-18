@@ -32,19 +32,10 @@ function atomic(file, value) {
   }
   fs.renameSync(temporary, file);
 }
-const quiet = Object.freeze({
-  WECHAT2RSS_RECOVERY_HOLD: '1',
-  ENABLE_SCHEDULED_UPDATES: '0',
-  DISABLE_SCHEDULED_UPDATES: '1',
-  WECHAT2RSS_ACTIVE_SCHEDULE: '0',
-  WECHAT2RSS_ACTIVE_SCHEDULE_ENABLED: '0',
-  WECHAT2RSS_CACHE_SYNC_ENABLED: '0',
-  WECHAT2RSS_CACHE_MEDIA_ENABLED: '0',
-  WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
-  XHS_COMMENT_COLLECTION_ENABLED: '0',
-  SQLITE_PERIODIC_LIFECYCLE_ENABLED: '0',
-  SQLITE_RETENTION_SCAN_ENABLED: '0',
-});
+const {
+  quiet,
+  environment: modeEnvironment,
+} = require('../managed-runtime-mode.cjs');
 
 async function runFixedProfile(
   { path: profileFile, sha256 },
@@ -147,7 +138,18 @@ async function runProfileInner(token, report) {
       observed?.stopped
     )
       fail('FIXED_HEALTH_PROCESS_CHANGED');
-    await native.readUpdateHealth({ ...ctx, release });
+    const proof = await native.readUpdateHealth({ ...ctx, release });
+    if (p.runtimeMode && release.id === next.id) {
+      modeEnvironment(p.runtimeMode, p.database, { initial: true });
+      if (
+        proof.managedRuntime?.mode !== p.runtimeMode.kind ||
+        proof.managedRuntime.recoveryHeld !== false ||
+        proof.managedRuntime.xhsLive !== true ||
+        proof.managedRuntime.automaticDisabled !== true ||
+        proof.managedRuntime.localMode !== true
+      )
+        fail('FIXED_MANAGED_MODE_HEALTH_UNPROVEN');
+    }
     const after = await native.processIdentity(
       'OwnedSnapshot',
       entry.identity.pid,
@@ -260,7 +262,9 @@ async function runProfileInner(token, report) {
       transactionId: ctx.transactionId,
       releaseId: release.id,
       env: {
-        ...quiet,
+        ...(release.id === next.id
+          ? modeEnvironment(p.runtimeMode, p.database, { initial: true })
+          : quiet),
         LOCAL_RELEASE_CONTROLLED_START: release.id,
         WEWE_UPDATE_TRANSACTION: ctx.transactionId,
         WEWE_UPDATE_LEASE: startupToken,
@@ -327,6 +331,11 @@ async function runProfileInner(token, report) {
       const permit = fs.existsSync(permitFile) && read(permitFile);
       if (
         j.stage === 'completed' &&
+        JSON.stringify(j.runtimeMode) !== JSON.stringify(p.runtimeMode)
+      )
+        fail('FIXED_CURRENT_MODE_REQUIRES_REVIEW');
+      if (
+        j.stage === 'completed' &&
         j.package?.sha256 === next.sha256 &&
         j.old?.sha256 === current.sha256 &&
         j.backup?.path === p.backup.path &&
@@ -366,6 +375,7 @@ async function runProfileInner(token, report) {
       fail('FIXED_FRESH_OLD_IDENTITY_CHANGED');
     taskBefore = api.tasks.control('Snapshot');
     api.tasks.assertSnapshot(taskBefore, p.taskDefinitionSha256);
+    modeEnvironment(p.runtimeMode, p.database, { initial: true });
     const prepared = {
       api,
       old: data.current,
@@ -393,6 +403,11 @@ async function runProfileInner(token, report) {
     if (cold) {
       if (scopeLease.observeProjectWriters().active.length)
         fail('COLD_PROJECT_WRITERS_REMAIN');
+      // Quiescence cannot retire a prior writer lease. Reject it before making
+      // a startup barrier, pausing the task or creating an update transaction.
+      // acquireColdMaintenance repeats this check under its live cold proof.
+      if (fs.existsSync(api.writerGate.binding(p.database).file))
+        fail('COLD_PROJECT_WRITER_LEASE_REQUIRES_REVIEW');
     } else scopeLease.legacyMaintenanceRoots(oldProcess);
     native = createNativePrimitives({
       scopeLease,
@@ -537,7 +552,11 @@ async function runProfileInner(token, report) {
       startOld: (ctx) => start(ctx, current),
       oldHealth: (ctx) => health(ctx, current),
       async enableNew(ctx) {
-        journalStage(ctx, 'completed');
+        const completed = journalStage(ctx, 'completed');
+        if (p.runtimeMode) {
+          modeEnvironment(p.runtimeMode, p.database, { initial: true });
+          atomic(p.journalFile, { ...completed, runtimeMode: p.runtimeMode });
+        }
         atomic(permitFile, {
           format: 1,
           transactionId: ctx.transactionId,
@@ -586,6 +605,7 @@ async function run(plan, report = () => {}) {
     'journalFile',
     'current',
     'candidate',
+    'runtimeMode',
   ])
     if (JSON.stringify(plan[key]) !== JSON.stringify(p[key]))
       fail('FIXED_DISPATCH_PROFILE_CHANGED');

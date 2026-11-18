@@ -44,6 +44,7 @@ const RUNTIME_WRAPPERS = Object.freeze([
   'runtime.cjs',
   'engine-audit.cjs',
   'installed-startup-gate.cjs',
+  'managed-runtime-mode.cjs',
   'project-writer-gate.cjs',
   'legacy-maintenance-loader.cjs',
   'wechat-maintenance-loader.cjs',

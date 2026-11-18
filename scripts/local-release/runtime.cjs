@@ -168,6 +168,16 @@ async function runtime() {
   const database = fs.realpathSync(values.database);
   if (!fs.statSync(database).isFile()) throw new Error('数据库不是文件');
   if (command === 'start') {
+    // Enforce the committed mode even through an older stable logon launcher.
+    Object.assign(
+      process.env,
+      require('./managed-runtime-mode.cjs').committed({
+        journalFile: path.join(path.dirname(database), '.wewe-update.json'),
+        releaseId: manifest.id,
+        manifestSha256: fileHash(path.join(release, 'release.json')),
+        database,
+      }),
+    );
     const writer = require('./project-writer-gate.cjs');
     if (
       manifest.installedLifecycle?.protocol === 'wewe-installed-lifecycle-v1'
