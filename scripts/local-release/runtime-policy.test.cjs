@@ -1,6 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { scheduledUpdatesEnabled, guardModulePath } = require('./runtime.cjs');
+const {
+  scheduledUpdatesEnabled,
+  productionSchedulingOverrides,
+  guardModulePath,
+} = require('./runtime.cjs');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -194,6 +198,51 @@ test('Wechat2RSS scheduling requires explicit flags, private config and an enabl
       scheduledUpdatesEnabled({ ...manifest, ...change }, wechat2Rss),
       false,
     );
+});
+
+test('managed XHS scheduling stays enabled without a WeChat source configuration', () => {
+  const managed = {
+    managedMode: 'scheduled-dual-v1',
+    enabled: '1',
+    recoveryHeld: '0',
+    wechat2RssActive: '1',
+  };
+  const onlyXhs = {
+    DISABLE_SCHEDULED_UPDATES: '0',
+    WECHAT2RSS_ACTIVE_SCHEDULE: '0',
+  };
+  assert.deepEqual(productionSchedulingOverrides(manifest, managed), onlyXhs);
+  assert.deepEqual(
+    productionSchedulingOverrides(manifest, {
+      ...managed,
+      publicAlbumFeeds: [feed],
+    }),
+    onlyXhs,
+  );
+  assert.deepEqual(
+    productionSchedulingOverrides(manifest, {
+      ...managed,
+      ...wechat2Rss,
+      wechat2RssBaseUrl: 'https://public.example/',
+    }),
+    onlyXhs,
+  );
+  assert.deepEqual(
+    productionSchedulingOverrides(manifest, { ...managed, ...wechat2Rss }),
+    { DISABLE_SCHEDULED_UPDATES: '0', WECHAT2RSS_ACTIVE_SCHEDULE: '1' },
+  );
+  for (const state of [{ recoveryHeld: '1' }, { enabled: '0' }])
+    assert.deepEqual(
+      productionSchedulingOverrides(manifest, {
+        ...managed,
+        ...wechat2Rss,
+        ...state,
+      }),
+      { DISABLE_SCHEDULED_UPDATES: '1', WECHAT2RSS_ACTIVE_SCHEDULE: '0' },
+    );
+  assert.deepEqual(productionSchedulingOverrides(manifest, { ...enabled }), {
+    DISABLE_SCHEDULED_UPDATES: '0',
+  });
 });
 
 test('Wechat2RSS runtime config uses the existing private Provider URL contract', () => {

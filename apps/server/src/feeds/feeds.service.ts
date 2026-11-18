@@ -89,6 +89,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   async catchUpDailyWechat2Rss(now = Date.now()) {
     if (
       process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
+      process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' ||
       process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' ||
       !databaseWritesAllowed()
     )
@@ -211,6 +212,7 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   async handleUpdateFeedsCron() {
     if (
       process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
+      process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' ||
       process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' ||
       !databaseWritesAllowed()
     )

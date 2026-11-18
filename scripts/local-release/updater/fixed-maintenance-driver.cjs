@@ -9,7 +9,10 @@ const {
   fixedProfile,
 } = require('./fixed-driver-profile.cjs');
 const { verifyPinnedInput: pin } = require('./prepare-maintenance-binding.cjs');
-const { createUpdater } = require('./installer/update-engine.cjs');
+const {
+  createUpdater,
+  atomicRename,
+} = require('./installer/update-engine.cjs');
 const { createNativePrimitives } = require('./installed-native-primitives.cjs');
 const {
   createFixedReuseOwner,
@@ -30,7 +33,7 @@ function atomic(file, value) {
   } finally {
     fs.closeSync(fd);
   }
-  fs.renameSync(temporary, file);
+  atomicRename(temporary, file);
 }
 const {
   quiet,
@@ -338,10 +341,18 @@ async function runProfileInner(token, report) {
         pin(preserved);
         const saved = read(preserved.path);
         if (
-          saved.kind !== 'preserved-completed-fixed-install-v1' ||
+          ![
+            'preserved-completed-fixed-install-v1',
+            'preserved-recovered-fixed-install-v1',
+          ].includes(saved.kind) ||
           !/^[a-f0-9-]{36}$/.test(saved.transactionId) ||
           preserved.path !==
-            p.journalFile + '.completed-' + saved.transactionId + '.json'
+            p.journalFile +
+              (saved.kind === 'preserved-recovered-fixed-install-v1'
+                ? '.recovered-'
+                : '.completed-') +
+              saved.transactionId +
+              '.json'
         )
           fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
         for (const [key, input] of Object.entries(p.previousCompletion)) {
@@ -355,6 +366,18 @@ async function runProfileInner(token, report) {
           )
             fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
         }
+        const archivedJournal = JSON.parse(
+          Buffer.from(saved.records.journal.raw, 'base64').toString('utf8'),
+        );
+        const archivedStage =
+          saved.kind === 'preserved-recovered-fixed-install-v1'
+            ? 'recovered'
+            : 'completed';
+        if (
+          archivedJournal.stage !== archivedStage ||
+          archivedJournal.transactionId !== saved.transactionId
+        )
+          fail('FIXED_PREVIOUS_COMPLETION_ARCHIVE_CHANGED');
       }
       if (
         j.stage === 'completed' &&
@@ -420,17 +443,24 @@ async function runProfileInner(token, report) {
         permit = records.permit.value,
         r = records.registry.value,
         c = records.control.value;
+      const recovered =
+        j.stage === 'recovered' &&
+        j.recovered === true &&
+        j.databaseRestored === true &&
+        j.backup?.reused === true &&
+        /^[a-f0-9]{64}$/.test(j.backup.sha256 || '');
+      const selected = recovered ? j.old : j.package;
       if (
         j.format !== 1 ||
         !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(
           j.transactionId,
         ) ||
-        j.stage !== 'completed' ||
-        j.package?.id !== current.id ||
-        j.package?.sha256 !== current.sha256 ||
-        j.package?.path !== current.path ||
-        j.package?.database !== p.database ||
-        permit.stage !== 'completed' ||
+        (j.stage !== 'completed' && !recovered) ||
+        selected?.id !== current.id ||
+        selected?.sha256 !== current.sha256 ||
+        selected?.path !== current.path ||
+        selected?.database !== p.database ||
+        permit.stage !== j.stage ||
         permit.transactionId !== j.transactionId ||
         permit.id !== current.id ||
         permit.sha256 !== current.sha256 ||
@@ -444,7 +474,11 @@ async function runProfileInner(token, report) {
       )
         fail('FIXED_PREVIOUS_COMPLETION_UNPROVEN');
       api.toolkit.sameIdentity(fresh, r.processes[0].identity);
-      previousCompletion = { transactionId: j.transactionId, records };
+      previousCompletion = {
+        transactionId: j.transactionId,
+        stage: j.stage,
+        records,
+      };
     }
     taskBefore = api.tasks.control('Snapshot');
     api.tasks.assertSnapshot(taskBefore, p.taskDefinitionSha256);
@@ -501,12 +535,15 @@ async function runProfileInner(token, report) {
           for (const input of Object.values(p.previousCompletion)) pin(input);
           const file =
             p.journalFile +
-            '.completed-' +
+            '.' +
+            previousCompletion.stage +
+            '-' +
             previousCompletion.transactionId +
             '.json';
           const bytes =
             JSON.stringify({
-              kind: 'preserved-completed-fixed-install-v1',
+              kind:
+                'preserved-' + previousCompletion.stage + '-fixed-install-v1',
               transactionId: previousCompletion.transactionId,
               records: Object.fromEntries(
                 Object.entries(previousCompletion.records).map(

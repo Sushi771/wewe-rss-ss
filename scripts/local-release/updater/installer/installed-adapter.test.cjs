@@ -13,7 +13,7 @@ const { execFileSync } = require('node:child_process');
 const { createInstalledHost } = require('../installed-host.cjs');
 const { createController } = require('../installed-lifecycle.cjs');
 const { createSqliteHooks } = require('../sqlite-hooks.cjs');
-const { createUpdater } = require('./update-engine.cjs');
+const { createUpdater, atomicRename } = require('./update-engine.cjs');
 // Exercise the real absolute-executable admission on every test host. A PATH
 // command is only used to resolve the interpreter, never supplied as a binding.
 const python = execFileSync(
@@ -468,3 +468,53 @@ test('unknown native writer observation prevents backup and restoration', () =>
     assert.equal(f.calls.migrations, 0);
     assert(fs.existsSync(f.journalFile + '.startup-lock'));
   }));
+
+test(
+  'Windows journal replacement retries sharing denial only for unchanged input',
+  { skip: process.platform !== 'win32' },
+  (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-atomic-write-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const file = path.join(root, 'journal.json');
+    const temporary = path.join(root, 'next.tmp');
+    fs.writeFileSync(file, 'prior');
+    fs.writeFileSync(temporary, 'next');
+    const rename = fs.renameSync;
+    let attempts = 0;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      assert.equal(from, temporary);
+      assert.equal(to, file);
+      assert.equal(fs.readFileSync(file, 'utf8'), 'prior');
+      if (++attempts === 1)
+        throw Object.assign(Error('sharing denied'), { code: 'EPERM' });
+      return rename(from, to);
+    });
+    atomicRename(temporary, file);
+    assert.equal(attempts, 2);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'next');
+    assert.equal(fs.existsSync(temporary), false);
+  },
+);
+
+test(
+  'Windows journal replacement leaves both files if the previous destination changes',
+  { skip: process.platform !== 'win32' },
+  (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-atomic-write-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const file = path.join(root, 'journal.json');
+    const temporary = path.join(root, 'next.tmp');
+    fs.writeFileSync(file, 'prior');
+    fs.writeFileSync(temporary, 'next');
+    let attempts = 0;
+    t.mock.method(fs, 'renameSync', () => {
+      attempts++;
+      fs.writeFileSync(file, 'changed by another owner');
+      throw Object.assign(Error('sharing denied'), { code: 'EPERM' });
+    });
+    assert.throws(() => atomicRename(temporary, file), /INPUT_CHANGED/);
+    assert.equal(attempts, 1);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'changed by another owner');
+    assert.equal(fs.readFileSync(temporary, 'utf8'), 'next');
+  },
+);

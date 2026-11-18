@@ -47,6 +47,26 @@ function validWechat2RssConfig(settings) {
   }
 }
 
+function wechat2RssSchedulingAdmitted(settings) {
+  if (settings.wechat2RssEnabled !== '1' || !validWechat2RssConfig(settings))
+    return false;
+  const allowed = new Set(
+    (settings.wechat2RssFeedIds || '')
+      .split(',')
+      .map((id) => id.trim())
+      .filter((id) => /^MP_WXS_\d{5,15}$/.test(id)),
+  );
+  return (settings.wechat2RssFeeds || []).some(
+    (feed) =>
+      feed.status === 1 &&
+      /^MP_WXS_\d{5,15}$/.test(feed.id) &&
+      (feed.collectionChannel === 'wechat2rss' ||
+        (feed.collectionChannel == null &&
+          !feed.publicAlbumIds &&
+          allowed.has(feed.id))),
+  );
+}
+
 // Scheduling is an explicit opt-in. Each source uses its own configuration and
 // binding; no source requires a different provider's key.
 function scheduledUpdatesEnabled(manifest, settings) {
@@ -56,26 +76,7 @@ function scheduledUpdatesEnabled(manifest, settings) {
     settings.enabled !== '1'
   )
     return false;
-  if (settings.wechat2RssEnabled === '1' && validWechat2RssConfig(settings)) {
-    const allowed = new Set(
-      (settings.wechat2RssFeedIds || '')
-        .split(',')
-        .map((id) => id.trim())
-        .filter((id) => /^MP_WXS_\d{5,15}$/.test(id)),
-    );
-    if (
-      (settings.wechat2RssFeeds || []).some(
-        (feed) =>
-          feed.status === 1 &&
-          /^MP_WXS_\d{5,15}$/.test(feed.id) &&
-          (feed.collectionChannel === 'wechat2rss' ||
-            (feed.collectionChannel == null &&
-              !feed.publicAlbumIds &&
-              allowed.has(feed.id))),
-      )
-    )
-      return true;
-  }
+  if (wechat2RssSchedulingAdmitted(settings)) return true;
   if (
     settings.ownerSearchConfigFile &&
     (settings.ownerSearchFeeds || []).some(
@@ -105,6 +106,29 @@ function scheduledUpdatesEnabled(manifest, settings) {
       return false;
     }
   });
+}
+
+function productionSchedulingOverrides(manifest, settings) {
+  if (settings.managedMode !== 'scheduled-dual-v1')
+    return {
+      DISABLE_SCHEDULED_UPDATES: scheduledUpdatesEnabled(manifest, settings)
+        ? '0'
+        : '1',
+    };
+  const enabled =
+    manifest.schemaCompatibility === 'current' &&
+    manifest.desktopHelperIncluded === false &&
+    settings.enabled === '1' &&
+    settings.recoveryHeld === '0';
+  return {
+    DISABLE_SCHEDULED_UPDATES: enabled ? '0' : '1',
+    WECHAT2RSS_ACTIVE_SCHEDULE:
+      enabled &&
+      settings.wechat2RssActive === '1' &&
+      wechat2RssSchedulingAdmitted(settings)
+        ? '1'
+        : '0',
+  };
 }
 
 function guardModulePath(release, resolved) {
@@ -393,8 +417,11 @@ async function runtime() {
       throw new Error('生产模式固定 4000 端口，禁止演练参数');
     if (process.env.LOCAL_RELEASE_CONTROLLED_START !== manifest.id)
       throw new Error('生产模式必须由受控切换器启动');
-    const scheduled = scheduledUpdatesEnabled(manifest, {
+    const scheduling = productionSchedulingOverrides(manifest, {
       enabled: process.env.ENABLE_SCHEDULED_UPDATES,
+      managedMode: process.env.WEWE_MANAGED_RUNTIME_MODE,
+      recoveryHeld: process.env.WECHAT2RSS_RECOVERY_HOLD,
+      wechat2RssActive: process.env.WECHAT2RSS_ACTIVE_SCHEDULE,
       publicAlbumFeeds,
       ownerSearchFeeds,
       ownerSearchConfigFile: process.env.OWNER_SEARCH_CONFIG_FILE,
@@ -407,7 +434,7 @@ async function runtime() {
     Object.assign(process.env, {
       HOST: '127.0.0.1',
       PORT: '4000',
-      DISABLE_SCHEDULED_UPDATES: scheduled ? '0' : '1',
+      ...scheduling,
       WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
       WECHAT_DESKTOP_MP_IDS: '',
       ...(legacy ? { CRON_EXPRESSION: '0 0 1 1 *' } : {}),
@@ -460,6 +487,7 @@ if (require.main === module)
 module.exports = {
   runtime,
   scheduledUpdatesEnabled,
+  productionSchedulingOverrides,
   guardModulePath,
   guardNativePath,
 };

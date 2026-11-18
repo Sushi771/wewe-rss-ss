@@ -287,25 +287,38 @@ test(
 );
 
 test(
-  'scheduled dual mode hands off a completed live installation with both channels paused',
+  'scheduled dual mode hands off a recovered live role with XHS independent of provider configuration',
   { timeout: 240000 },
   () =>
     fixture(
       async (f) => {
-        assert.equal((await runFixedProfile(f.profilePin)).status, 'completed');
+        const result = await runFixedProfile(f.profilePin);
+        assert.equal(result.status, 'completed', result.error);
         const j = read(f.profile.journalFile);
         assert.equal(j.runtimeMode.kind, 'scheduled-dual-v1');
+        const control = read(f.profile.journalFile + '.control');
+        const preserved = read(control.previousCompletionArchive.path);
+        assert.equal(preserved.kind, 'preserved-recovered-fixed-install-v1');
+        assert.equal(
+          (await runFixedProfile(f.profilePin)).status,
+          'already-current',
+        );
         const proof = await (
           await fetch(
             'http://127.0.0.1:' + f.profile.port + '/_local/update-health',
           )
         ).json();
         assert.equal(proof.managedRuntime.scheduledUpdatesEnabled, true);
+        assert.equal(proof.managedRuntime.wechatScheduleEnabled, false);
         assert.equal(proof.managedRuntime.automaticDisabled, false);
         for (const channel of ['wechat', 'xiaohongshu'])
           assert(read(state(f, channel)).paused);
         assert.deepEqual(fs.readFileSync(f.database), f.before);
       },
-      { scheduledDualMode: true, previousCompletion: true },
+      {
+        scheduledDualMode: true,
+        previousCompletion: true,
+        previousCompletionStage: 'recovered',
+      },
     ),
 );

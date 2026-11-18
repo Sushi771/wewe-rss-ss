@@ -53,22 +53,29 @@ test('reviewed held/channel deltas preserve original blobs and reject every unkn
 });
 
 test('scheduled startup inverse rejects changes outside its exact reviewed delta', () => {
-  const file = 'scripts/local-release/installed-startup-gate.cjs';
-  const fixture = require('./fixtures/scheduled-runtime-compat.json')[file];
-  const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-  assert.equal(hash(raw), fixture.afterSha256);
-  assert.equal(
-    hash(restoreLegacyWriter.restoreScheduledRuntime(file, raw)),
-    fixture.beforeSha256,
-  );
-  assert.throws(
-    () =>
-      restoreLegacyWriter.restoreScheduledRuntime(
-        file,
-        raw + '// unreviewed\n',
-      ),
-    /exact reviewed scheduled startup/,
-  );
+  const entries = require('./fixtures/scheduled-runtime-compat.json');
+  assert.deepEqual(Object.keys(entries).sort(), [
+    'scripts/local-release/installed-startup-gate.cjs',
+    'scripts/local-release/runtime.cjs',
+  ]);
+  for (const [file, fixture] of Object.entries(entries)) {
+    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(hash(raw), fixture.afterSha256);
+    assert.equal(
+      hash(restoreLegacyWriter.restoreScheduledRuntime(file, raw)),
+      fixture.beforeSha256,
+    );
+    for (const changed of [
+      raw + '// unreviewed\n',
+      ...fixture.hunks.map((hunk) => raw.replace(hunk.after, hunk.before)),
+    ]) {
+      assert.notEqual(changed, raw);
+      assert.throws(
+        () => restoreLegacyWriter.restoreScheduledRuntime(file, changed),
+        /exact reviewed scheduled startup/,
+      );
+    }
+  }
 });
 
 test('manual runtime inverse pins complete sources and refuses unknown or partial startup changes', () => {
@@ -191,8 +198,8 @@ test('approved startup and retired Mp2RSS inverses reject unrelated writer chang
     ],
     [
       'scripts/local-release/runtime.cjs',
-      "settings.wechat2RssEnabled === '1'",
       "settings.wechat2RssEnabled !== '1'",
+      "settings.wechat2RssEnabled === '1'",
     ],
   ]) {
     const source = read(file);

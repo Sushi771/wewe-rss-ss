@@ -37,6 +37,35 @@ const STAGES = new Set([
   'recovery-failed',
 ]);
 
+function atomicRename(temporary, file) {
+  if (process.platform !== 'win32') return fs.renameSync(temporary, file);
+  const fingerprint = (name) => {
+    try {
+      const stat = fs.lstatSync(name, { bigint: true });
+      return [stat.dev, stat.ino, stat.size, stat.mtimeNs].join(':');
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+  };
+  const before = fingerprint(file);
+  const staged = fingerprint(temporary);
+  const wait = new Int32Array(new SharedArrayBuffer(4));
+  // Windows readers can briefly deny a same-directory replace. Retry only
+  // while the staged write and original destination are still identical.
+  for (const delay of [40, 100, 200, 400, 800, 0]) {
+    try {
+      return fs.renameSync(temporary, file);
+    } catch (error) {
+      if (!delay || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code))
+        throw error;
+      Atomics.wait(wait, 0, 0, delay);
+      if (fingerprint(file) !== before || fingerprint(temporary) !== staged)
+        throw Error('UPDATE_ATOMIC_REPLACE_INPUT_CHANGED', { cause: error });
+    }
+  }
+}
+
 function atomicWrite(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = file + '.' + crypto.randomUUID() + '.tmp';
@@ -48,7 +77,7 @@ function atomicWrite(file, value) {
     fs.closeSync(fd);
   }
   // Never delete the previous journal before replacement.
-  fs.renameSync(temp, file);
+  atomicRename(temp, file);
 }
 
 function readJournal(file) {
@@ -283,4 +312,4 @@ function createUpdater({ journalFile, adapter, onProgress = () => {} }) {
   };
 }
 
-module.exports = { createUpdater, readJournal, atomicWrite };
+module.exports = { createUpdater, readJournal, atomicWrite, atomicRename };

@@ -93,6 +93,13 @@ module.exports={...base,control(action){let s=JSON.parse(fs.readFileSync(file));
 const at=n=>process.argv[process.argv.indexOf(n)+1], database=at('--database'),port=Number(at('--port'));
 const release=__dirname,manifest=JSON.parse(fs.readFileSync(path.join(release,'release.json'))),crypto=require('node:crypto');
 Object.assign(process.env,require('./managed-runtime-mode.cjs').committed({journalFile:path.join(path.dirname(database),'.wewe-update.json'),releaseId:manifest.id,manifestSha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(release,'release.json'))).digest('hex'),database}));
+if(process.env.WEWE_MANAGED_RUNTIME_MODE==='scheduled-dual-v1')
+  Object.assign(process.env,require(${JSON.stringify(path.join(repository, 'scripts/local-release/runtime.cjs'))}).productionSchedulingOverrides(manifest,{
+    managedMode:process.env.WEWE_MANAGED_RUNTIME_MODE,
+    enabled:process.env.ENABLE_SCHEDULED_UPDATES,
+    recoveryHeld:process.env.WECHAT2RSS_RECOVERY_HOLD,
+    wechat2RssActive:process.env.WECHAT2RSS_ACTIVE_SCHEDULE,
+  }));
 const gate=require('./installed-startup-gate.cjs').install({release,manifest,database});
 const writer=gate.holdWriterGate(require('./project-writer-gate.cjs'));writer.acquireWriter(database);
 if(process.env.WEWE_UPDATE_TRANSACTION)gate.waitUntilPermitted().then(ok=>{if(ok)gate.markDatabaseWritable();});
@@ -512,18 +519,33 @@ server.listen(port,'127.0.0.1');
     if (!oldProcess) throw Error('FIXTURE_PREVIOUS_LIVE_PROCESS_REQUIRED');
     const transactionId = crypto.randomUUID(),
       journal = path.join(path.dirname(database), '.wewe-update.json');
+    const stage = options.previousCompletionStage || 'completed';
+    const recovered = stage === 'recovered';
     const values = {
       journal: {
         format: 1,
         transactionId,
-        stage: options.previousCompletionStage || 'completed',
-        package: { ...roles.current, database },
-        old: { id: 'synthetic-ancestor', sha256: 'f'.repeat(64) },
+        stage,
+        package: { ...roles[recovered ? 'candidate' : 'current'], database },
+        old: recovered
+          ? { ...roles.current, database }
+          : { id: 'synthetic-ancestor', sha256: 'f'.repeat(64) },
+        ...(recovered
+          ? {
+              recovered: true,
+              databaseRestored: true,
+              backup: {
+                path: report.backup,
+                sha256: report.sha256,
+                reused: true,
+              },
+            }
+          : {}),
       },
       permit: {
         format: 1,
         transactionId,
-        stage: 'completed',
+        stage: recovered ? 'recovered' : 'completed',
         id: roles.current.id,
         sha256: roles.current.sha256,
       },

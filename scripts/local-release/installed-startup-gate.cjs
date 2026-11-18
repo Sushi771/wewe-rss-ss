@@ -183,8 +183,10 @@ function install({ release, manifest, database, environment = process.env }) {
           scheduledUpdatesEnabled:
             process.env.ENABLE_SCHEDULED_UPDATES === '1' &&
             process.env.DISABLE_SCHEDULED_UPDATES === '0' &&
-            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&
             otherAutomaticWorkDisabled,
+          wechatScheduleEnabled:
+            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&
+            process.env.WECHAT2RSS_ENABLED === '1',
         },
       };
     },

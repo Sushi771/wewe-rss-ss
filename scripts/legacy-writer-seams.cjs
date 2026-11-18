@@ -41,14 +41,16 @@ function restoreScheduledRuntime(file, source) {
   assert.equal(
     sha(source),
     reviewed.afterSha256,
-    'exact reviewed scheduled startup source',
+    'exact candidate legacy writer seam: exact reviewed scheduled startup source',
   );
-  assert.equal(
-    source.split(reviewed.after).length,
-    2,
-    'exact reviewed scheduled startup hunk',
-  );
-  source = source.replace(reviewed.after, reviewed.before);
+  for (const hunk of reviewed.hunks) {
+    assert.equal(
+      source.split(hunk.after).length,
+      2,
+      'exact reviewed scheduled startup hunk',
+    );
+    source = source.replace(hunk.after, hunk.before);
+  }
   assert.equal(
     sha(source),
     reviewed.beforeSha256,

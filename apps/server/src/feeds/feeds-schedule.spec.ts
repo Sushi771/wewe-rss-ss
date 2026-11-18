@@ -1,6 +1,34 @@
 import { FeedsService } from './feeds.service';
 
 describe('隔离启动定时门', () => {
+  it('keeps the legacy WeChat cron and daily catch-up off when only the managed XHS clock is enabled', async () => {
+    const oldMode = process.env.WEWE_MANAGED_RUNTIME_MODE;
+    const oldSchedule = process.env.WECHAT2RSS_ACTIVE_SCHEDULE;
+    const oldDisabled = process.env.DISABLE_SCHEDULED_UPDATES;
+    process.env.WEWE_MANAGED_RUNTIME_MODE = 'scheduled-dual-v1';
+    process.env.WECHAT2RSS_ACTIVE_SCHEDULE = '0';
+    process.env.DISABLE_SCHEDULED_UPDATES = '0';
+    const prisma = { feed: { findMany: jest.fn(), findUnique: jest.fn() } };
+    const trpc = { refreshMpArticlesAndUpdateFeed: jest.fn() };
+    const service = new FeedsService(prisma as any, trpc as any, {} as any);
+    try {
+      await service.handleUpdateFeedsCron();
+      await service.catchUpDailyWechat2Rss();
+      expect(prisma.feed.findMany).not.toHaveBeenCalled();
+      expect(prisma.feed.findUnique).not.toHaveBeenCalled();
+      expect(trpc.refreshMpArticlesAndUpdateFeed).not.toHaveBeenCalled();
+    } finally {
+      for (const [key, value] of [
+        ['WEWE_MANAGED_RUNTIME_MODE', oldMode],
+        ['WECHAT2RSS_ACTIVE_SCHEDULE', oldSchedule],
+        ['DISABLE_SCHEDULED_UPDATES', oldDisabled],
+      ] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('已选单号调用真实定时入口而不改其他订阅', async () => {
     const previous = {
       disabled: process.env.DISABLE_SCHEDULED_UPDATES,
