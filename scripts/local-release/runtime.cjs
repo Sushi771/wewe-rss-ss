@@ -1,6 +1,6 @@
 const fs = require('./lib.cjs').hostEffects.fs;
 const path = require('node:path');
-const { parseArgs, parseEnv } = require('node:util');
+const { parseArgs } = require('node:util');
 const Module = require('node:module');
 const { isIP } = require('node:net');
 const { actualEngineCommit, sqliteRuntimeUrl } = require('./engine-audit.cjs');
@@ -44,72 +44,6 @@ function validWechat2RssConfig(settings) {
     );
   } catch {
     return false;
-  }
-}
-
-// The fixed updater launches the immutable package from its own directory.
-// Only the original private server configuration may supply this loopback pair.
-function managedWechatProviderEnvironment(database, env) {
-  if (
-    env.WEWE_MANAGED_RUNTIME_MODE !== 'scheduled-dual-v1' ||
-    env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH !== '1' ||
-    env.WECHAT2RSS_ENABLED !== '1' ||
-    env.WECHAT2RSS_RECOVERY_HOLD !== '0' ||
-    env.PRIVATE_ONLINE_MODE === '1' ||
-    env.WEWE_ACCEPTANCE_MODE === '1' ||
-    env.WECHAT2RSS_BASE_URL !== undefined ||
-    env.WECHAT2RSS_TOKEN !== undefined
-  )
-    return {};
-  const data = path.dirname(database);
-  const server = path.dirname(data);
-  if (
-    path.basename(data) !== 'data' ||
-    path.basename(server) !== 'server' ||
-    path.basename(path.dirname(server)) !== 'apps'
-  )
-    return {};
-  const config = path.join(server, '.env.local');
-  try {
-    const initial = fs.lstatSync(config, { bigint: true });
-    if (
-      !initial.isFile() ||
-      initial.nlink !== 1n ||
-      initial.size > 128n * 1024n ||
-      fs.realpathSync.native(config) !== config
-    )
-      return {};
-    const text = fs.readFileSync(config, 'utf8');
-    const current = fs.lstatSync(config, { bigint: true });
-    if (
-      initial.dev !== current.dev ||
-      initial.ino !== current.ino ||
-      initial.size !== current.size ||
-      initial.mtimeNs !== current.mtimeNs ||
-      Buffer.byteLength(text) > 128 * 1024
-    )
-      return {};
-    const { WECHAT2RSS_BASE_URL, WECHAT2RSS_TOKEN } = parseEnv(text);
-    if (
-      !validWechat2RssConfig({
-        wechat2RssBaseUrl: WECHAT2RSS_BASE_URL,
-        wechat2RssToken: WECHAT2RSS_TOKEN,
-      })
-    )
-      return {};
-    const endpoint = new URL(WECHAT2RSS_BASE_URL);
-    if (
-      endpoint.protocol !== 'http:' ||
-      !['127.0.0.1', 'localhost'].includes(endpoint.hostname) ||
-      !endpoint.port
-    )
-      return {};
-    return {
-      WECHAT2RSS_BASE_URL: endpoint.href,
-      WECHAT2RSS_TOKEN,
-    };
-  } catch {
-    return {};
   }
 }
 
@@ -268,11 +202,6 @@ async function runtime() {
         database,
       }),
     );
-    if (values.production)
-      Object.assign(
-        process.env,
-        managedWechatProviderEnvironment(database, process.env),
-      );
     const writer = require('./project-writer-gate.cjs');
     if (
       manifest.installedLifecycle?.protocol === 'wewe-installed-lifecycle-v1'
@@ -559,7 +488,6 @@ module.exports = {
   runtime,
   scheduledUpdatesEnabled,
   productionSchedulingOverrides,
-  managedWechatProviderEnvironment,
   guardModulePath,
   guardNativePath,
 };

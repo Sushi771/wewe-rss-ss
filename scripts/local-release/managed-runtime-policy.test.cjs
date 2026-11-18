@@ -222,3 +222,64 @@ test('reviewed local WeChat cache keeps active submissions off and preserves the
       policy.environment(f.mode, f.database, { initial: true }),
     );
   }, true));
+
+const {
+  managedWechatProviderEnvironment,
+} = require('./updater/installed-native-primitives.cjs');
+test('managed updater launch loads only the original loopback provider pair', () => {
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'wewe-provider-config-')),
+  );
+  try {
+    const server = path.join(root, 'apps', 'server');
+    const database = path.join(server, 'data', 'wewe-rss.db');
+    fs.mkdirSync(path.dirname(database), { recursive: true });
+    fs.writeFileSync(database, '');
+    const config = path.join(server, '.env.local');
+    const env = {
+      WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+      WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '1',
+      WECHAT2RSS_ENABLED: '1',
+      WECHAT2RSS_RECOVERY_HOLD: '0',
+    };
+    const local = 'http://127.0.0.1:18080/';
+    const valid =
+      'WECHAT2RSS_BASE_URL=' +
+      local +
+      '\nWECHAT2RSS_TOKEN=synthetic-pair\nNODE_OPTIONS=--require=no\nXHS_SUBSCRIPTION_LIVE_ENABLED=0\n';
+    assert.deepEqual(managedWechatProviderEnvironment(database, env), {});
+    fs.writeFileSync(config, valid);
+    assert.deepEqual(managedWechatProviderEnvironment(database, env), {
+      WECHAT2RSS_BASE_URL: local,
+      WECHAT2RSS_TOKEN: 'synthetic-pair',
+    });
+    for (const overridden of [
+      { WECHAT2RSS_TOKEN: 'already-present' },
+      { WECHAT2RSS_BASE_URL: local },
+      { WECHAT2RSS_RECOVERY_HOLD: '1' },
+      { WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '0' },
+      { PRIVATE_ONLINE_MODE: '1' },
+      { WEWE_ACCEPTANCE_MODE: '1' },
+    ])
+      assert.deepEqual(
+        managedWechatProviderEnvironment(database, { ...env, ...overridden }),
+        {},
+      );
+    for (const endpoint of [
+      'https://127.0.0.1:18080/',
+      'http://192.168.1.2:18080/',
+      'http://127.0.0.1:18080/wrong',
+      'http://127.0.0.1/',
+    ]) {
+      fs.writeFileSync(config, valid.replace(local, endpoint));
+      assert.deepEqual(managedWechatProviderEnvironment(database, env), {});
+    }
+    fs.unlinkSync(config);
+    const external = path.join(root, 'other.env');
+    fs.writeFileSync(external, valid);
+    fs.linkSync(external, config);
+    assert.deepEqual(managedWechatProviderEnvironment(database, env), {});
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
