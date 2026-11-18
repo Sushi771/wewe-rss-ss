@@ -55,7 +55,10 @@ export class ActiveRefreshScheduler {
   private accepting = new Set<string>();
   constructor(
     private readonly database: () => string,
-    private readonly enqueue: (intentKey: string) => Promise<unknown>,
+    private readonly enqueue: (
+      intentKey: string,
+      due: number,
+    ) => Promise<unknown>,
   ) {}
   private stateChange<T>(work: () => Promise<T>): Promise<T> {
     const result = this.stateWork.then(work);
@@ -146,7 +149,7 @@ export class ActiveRefreshScheduler {
     if (this.accepting.has(round.intentKey)) return;
     this.accepting.add(round.intentKey);
     try {
-      await this.enqueue(round.intentKey);
+      await this.enqueue(round.intentKey, round.due);
       await this.stateChange(async () => {
         const current = JSON.parse(await fs.readFile(file, 'utf8'));
         if (current.pending?.intentKey === round.intentKey)

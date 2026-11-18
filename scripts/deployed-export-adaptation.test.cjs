@@ -25,6 +25,20 @@ const readSource = (file) =>
 const read = (file) => restoreHeldChannel(file, readSource(file));
 const hash = (text) => crypto.createHash('sha256').update(text).digest('hex');
 
+test('the active-refresh delta preserves exact prior runtime and interface sources', () => {
+  const entries = require('./fixtures/managed-wechat-active-compat.json');
+  for (const [file, entry] of Object.entries(entries)) {
+    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    const restore = (source) =>
+      restoreManagedWechatLocalCache.restoreActive(file, source);
+    assert.equal(hash(restore(raw)), entry.beforeSha256);
+    assert.throws(
+      () => restore(raw + '\n// unreviewed'),
+      /exact reviewed active-refresh delta/,
+    );
+  }
+});
+
 test('managed local-cache inverse preserves the full prior startup and deployment sources', () => {
   const entries = require('./fixtures/managed-wechat-local-cache-compat.json');
   assert.deepEqual(Object.keys(entries).sort(), [
@@ -33,7 +47,10 @@ test('managed local-cache inverse preserves the full prior startup and deploymen
     'scripts/local-release/installed-startup-gate.cjs',
   ]);
   for (const [file, entry] of Object.entries(entries)) {
-    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    const raw = restoreManagedWechatLocalCache.restoreActive(
+      file,
+      fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+    );
     assert.equal(hash(readSource(file)), entry.beforeSha256);
     for (const changed of [
       raw + '// unreviewed\n',
@@ -41,7 +58,7 @@ test('managed local-cache inverse preserves the full prior startup and deploymen
     ]) {
       if (hash(changed) !== entry.beforeSha256)
         assert.throws(
-          () => restoreManagedWechatLocalCache(file, changed),
+          () => restoreManagedWechatLocalCache.restoreLocalCache(file, changed),
           /exact reviewed local-cache delta/,
         );
     }

@@ -16,6 +16,12 @@ export type ChannelState = {
 export const managedWechatLocalCache = () =>
   process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' &&
   process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1';
+export const managedWechatActiveRefresh = () =>
+  managedWechatLocalCache() &&
+  process.env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH === '1' &&
+  process.env.WECHAT2RSS_RECOVERY_HOLD !== '1' &&
+  process.env.PRIVATE_ONLINE_MODE !== '1' &&
+  process.env.WEWE_ACCEPTANCE_MODE !== '1';
 const scope = new AsyncLocalStorage<{
   channel: CollectionChannel;
   database: string;

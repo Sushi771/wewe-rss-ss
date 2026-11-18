@@ -1,6 +1,7 @@
 import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
+import { createServer } from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as sourceGateModule from '../collection/wechat2rss-source-gate';
@@ -16,6 +17,7 @@ import { cacheRevision, cacheSyncState } from './cache-sync-state';
 import { ProviderPage } from '../collection/subscription-provider';
 import { canonicalArticleUrl } from '../collection/collection-format';
 import { assertChannelRunnable } from '../collection/channel-task-control';
+import { managedWechatRefresh } from '../collection/managed-wechat-active';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest
     .fn()
@@ -42,6 +44,175 @@ describe('cache delta through original SQLite merge', () => {
     bodyMissing: body ? 0 : 1,
     imageBlocked: blocked,
     coverage: 'recent-window',
+  });
+  it('admits one source submission per slot, isolates uncertain targets and retains shared 429', async () => {
+    const ids = [
+      '1234567801',
+      '1234567802',
+      '1234567803',
+      '1234567804',
+      '1234567805',
+    ];
+    const feeds = ids.map((id) => 'MP_WXS_' + id);
+    const directory = path.join(root, '.collection-channel-control', 'wechat');
+    const control = path.join(directory, 'state.json');
+    const cachePath = path.join(root, 'active-vendor.db');
+    const requests: string[] = [];
+    const vendor = createServer((req, res) => {
+      const url = new URL(req.url!, 'http://127.0.0.1');
+      requests.push(url.pathname);
+      if (url.pathname === '/login/list') {
+        res.end(
+          JSON.stringify({
+            err: '',
+            data: [{ available: true, needCheck: false }],
+          }),
+        );
+      } else if (url.pathname === '/add/' + ids[2]) {
+        res.writeHead(503).end();
+      } else if (url.pathname === '/add/' + ids[3]) {
+        res.writeHead(429).end();
+      } else {
+        res.end(JSON.stringify({ err: '', data: '/feed/' + ids[1] + '.xml' }));
+      }
+    });
+    await new Promise<void>((resolve) =>
+      vendor.listen(0, '127.0.0.1', resolve),
+    );
+    const address = vendor.address() as { port: number };
+    const env = jest.replaceProperty(process, 'env', {
+      ...process.env,
+      WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+      WEWE_MANAGED_WECHAT_LOCAL_CACHE: '1',
+      WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '1',
+      WECHAT2RSS_RECOVERY_HOLD: '0',
+      WECHAT2RSS_BASE_URL: 'http://127.0.0.1:' + address.port,
+      WECHAT2RSS_CACHE_DB: cachePath,
+    });
+    let now = Date.now();
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const { DatabaseSync } = require('node:sqlite');
+      const cache = new DatabaseSync(cachePath);
+      try {
+        cache.exec(
+          'CREATE TABLE rsses(biz_id TEXT, name TEXT, feed_id TEXT, check_time TEXT, next_check_time TEXT, paused INTEGER); CREATE TABLE articles(biz_id TEXT,url TEXT,title TEXT,created TEXT,fulltext INTEGER,content TEXT,pic_url TEXT)',
+        );
+        const insert = cache.prepare(
+          'INSERT INTO rsses VALUES (?, ?, ?, ?, ?, 0)',
+        );
+        for (const id of ids)
+          insert.run(
+            id,
+            id,
+            id,
+            new Date(now - 7 * 3_600_000).toISOString(),
+            new Date(now + 2 * 3_600_000).toISOString(),
+          );
+      } finally {
+        cache.close();
+      }
+      await fs.mkdir(directory, { recursive: true });
+      const writeControl = (paused: boolean) =>
+        fs.writeFile(
+          control,
+          JSON.stringify({
+            version: 1,
+            revision: 1,
+            paused,
+            archived: [],
+            receipts: [],
+          }),
+        );
+      await writeControl(true);
+      for (const [index, id] of feeds.entries()) {
+        await prisma.feed.create({
+          data: {
+            id,
+            mpName: ids[index],
+            mpIntro: '',
+            mpCover: '',
+            collectionChannel: 'wechat2rss',
+            status: 1,
+            updateTime: 0,
+          },
+        });
+      }
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='pending', token='retained',status=NULL WHERE id=1",
+      );
+      await prisma.$executeRaw`INSERT INTO refresh_submission_claims VALUES ('fixture-old',${feeds[0]},'unknown',1,0,1000)`;
+      const gate = await prisma.$queryRawUnsafe(
+        'SELECT * FROM Wechat2RssSourceGate',
+      );
+      const old = await prisma.$queryRawUnsafe(
+        "SELECT * FROM refresh_submission_claims WHERE id='fixture-old'",
+      );
+      await expect(managedWechatRefresh(prisma, feeds[1])).resolves.toBe(
+        'paused',
+      );
+      expect(requests).toEqual([]);
+      await writeControl(false);
+      await expect(managedWechatRefresh(prisma, feeds[0])).resolves.toBe(
+        'retained-unknown',
+      );
+      const slot = { key: 'a'.repeat(64), due: now - 1000 };
+      await expect(managedWechatRefresh(prisma, feeds[1], slot)).resolves.toBe(
+        'accepted',
+      );
+      await expect(managedWechatRefresh(prisma, feeds[2], slot)).resolves.toBe(
+        'scheduled-closed',
+      );
+      await expect(managedWechatRefresh(prisma, feeds[2])).resolves.toBe(
+        'source-cooldown',
+      );
+      now += 31_000;
+      await expect(managedWechatRefresh(prisma, feeds[2])).resolves.toBe(
+        'unknown',
+      );
+      now += 31_000;
+      await expect(managedWechatRefresh(prisma, feeds[2])).resolves.toBe(
+        'retained-unknown',
+      );
+      await expect(managedWechatRefresh(prisma, feeds[3])).resolves.toBe(
+        'restricted',
+      );
+      await expect(managedWechatRefresh(prisma, feeds[4])).resolves.toBe(
+        'restricted',
+      );
+      expect(requests).toEqual([
+        '/login/list',
+        '/add/' + ids[1],
+        '/login/list',
+        '/add/' + ids[2],
+        '/login/list',
+        '/add/' + ids[3],
+      ]);
+      expect(
+        await prisma.$queryRawUnsafe('SELECT * FROM Wechat2RssSourceGate'),
+      ).toEqual(gate);
+      expect(
+        await prisma.$queryRawUnsafe(
+          "SELECT * FROM refresh_submission_claims WHERE id='fixture-old'",
+        ),
+      ).toEqual(old);
+      await expect(assertChannelRunnable('xiaohongshu')).resolves.toMatchObject(
+        { paused: false },
+      );
+    } finally {
+      clock.mockRestore();
+      env.restore();
+      await new Promise<void>((resolve) => vendor.close(() => resolve()));
+      await fs.unlink(control).catch(() => undefined);
+      await fs
+        .unlink(path.join(directory, 'active-refresh-v1.json'))
+        .catch(() => undefined);
+      await prisma.$executeRaw`DELETE FROM refresh_submission_claims WHERE mp_id IN (${feeds[0]},${feeds[1]},${feeds[2]},${feeds[3]},${feeds[4]})`;
+      await prisma.feed.deleteMany({ where: { id: { in: feeds } } });
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='idle', token=NULL,status=NULL WHERE id=1",
+      );
+    }
   });
   it('runs a managed cache-only manual refresh while preserving a shared pending request and isolating feed errors', async () => {
     const second = 'MP_WXS_1234567895';

@@ -21,6 +21,7 @@ import { protectedArticleDelete } from '../collection/protected-article-delete';
 import { editAccount } from '../collection/account-write';
 import { buildArticleMarkdown } from '../article-export';
 import { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';
+import { managedWechatRefresh } from '../collection/managed-wechat-active';
 import { prepareCachedArticleLocalExport } from '../cached-article-local-export';
 import { LocalArticleStore } from '../article-local-save';
 import {
@@ -951,6 +952,29 @@ export class TrpcRouter {
     cacheSyncStatus: this.trpcService.protectedProcedure.query(() =>
       cacheSyncStatus(),
     ),
+    managedWechatRefresh: this.trpcService.protectedProcedure
+      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\d{5,15}$/) }).strict())
+      .mutation(async ({ input, ctx }) => {
+        if (
+          !(ctx as { isLocalSave?: boolean }).isLocalSave ||
+          privateOnlineMode() ||
+          process.env.WEWE_ACCEPTANCE_MODE === '1'
+        )
+          throw new TRPCError({
+            code: 'FORBIDDEN',
+            message: '主动检查仅在本机同源页面开放。',
+          });
+        try {
+          return {
+            state: await managedWechatRefresh(this.prismaService, input.mpId),
+          };
+        } catch {
+          throw new TRPCError({
+            code: 'PRECONDITION_FAILED',
+            message: '主动检查暂不可用，请稍后查看状态。',
+          });
+        }
+      }),
     reorderGroups: this.trpcService.protectedProcedure
       .input(
         z

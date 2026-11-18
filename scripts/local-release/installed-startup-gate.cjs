@@ -187,6 +187,9 @@ function install({ release, manifest, database, environment = process.env }) {
           wechatScheduleEnabled:
             process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&
             process.env.WECHAT2RSS_ENABLED === '1',
+          ...(process.env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH === '1'
+            ? { wechatActiveRefreshEnabled: true }
+            : {}),
           ...(process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1'
             ? {
                 wechatLocalCacheEnabled:

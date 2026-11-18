@@ -18,6 +18,7 @@ const quiet = Object.freeze({
   WECHAT2RSS_LOCAL_CACHE_SYNC: '0',
   WECHAT2RSS_CACHE_MEDIA: '0',
   WEWE_MANAGED_WECHAT_LOCAL_CACHE: '0',
+  WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '0',
   WECHAT_DESKTOP_ALLOW_SCHEDULED: '0',
   XHS_COMMENT_COLLECTION_ENABLED: '0',
   SQLITE_PERIODIC_LIFECYCLE_ENABLED: '0',
@@ -35,7 +36,12 @@ function definition(mode) {
       (fields === 'channelArchives,kind' ||
         (fields === 'channelArchives,kind,wechatLocalCache' &&
           mode.kind === 'scheduled-dual-v1' &&
-          mode.wechatLocalCache === true)),
+          mode.wechatLocalCache === true) ||
+        (fields ===
+          'channelArchives,kind,wechatActiveRefresh,wechatLocalCache' &&
+          mode.kind === 'scheduled-dual-v1' &&
+          mode.wechatLocalCache === true &&
+          mode.wechatActiveRefresh === true)),
     'MANAGED_MODE_INVALID',
   );
   assert(
@@ -133,7 +139,8 @@ function environment(mode, database, { initial = false } = {}) {
     assert(
       (!initial &&
         (channel !== 'wechat' ||
-          (mode.kind === 'scheduled-dual-v1' && !mode.wechatLocalCache))) ||
+          (mode.kind === 'scheduled-dual-v1' &&
+            (!mode.wechatLocalCache || mode.wechatActiveRefresh)))) ||
         state.paused === true,
       'MANAGED_CHANNEL_MUST_BE_PAUSED',
     );
@@ -151,6 +158,9 @@ function environment(mode, database, { initial = false } = {}) {
         }
       : {}),
     ...(mode.wechatLocalCache ? localCacheEnvironment(database, initial) : {}),
+    ...(mode.wechatActiveRefresh
+      ? { WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '1' }
+      : {}),
   };
 }
 function readControl(file) {

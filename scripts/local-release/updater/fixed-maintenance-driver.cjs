@@ -150,6 +150,8 @@ async function runProfileInner(token, report) {
         (p.runtimeMode.wechatLocalCache &&
           (proof.managedRuntime.wechatLocalCacheEnabled !== true ||
             proof.managedRuntime.wechatScheduleEnabled !== false)) ||
+        (p.runtimeMode.wechatActiveRefresh &&
+          proof.managedRuntime.wechatActiveRefreshEnabled !== true) ||
         proof.managedRuntime.recoveryHeld !== false ||
         proof.managedRuntime.xhsLive !== true ||
         (p.runtimeMode.kind === 'scheduled-dual-v1'

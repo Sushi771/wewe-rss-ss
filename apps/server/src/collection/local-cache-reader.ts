@@ -199,6 +199,29 @@ function published(raw: unknown) {
   return new Date(time).toISOString();
 }
 
+/** Match the active request to the existing vendor subscription and its own clock. */
+export function readLocalWechat2RssSchedule(id: string, name: string) {
+  if (!/^MP_WXS_\d{5,15}$/.test(id)) throw invalid();
+  return snapshot((database) => {
+    const rows = database
+      .prepare(
+        'SELECT name, feed_id, check_time, next_check_time, paused FROM rsses WHERE biz_id = ? LIMIT 2',
+      )
+      .all(id.slice(7));
+    const row = rows[0];
+    if (rows.length !== 1 || row.name !== name || row.paused !== 0)
+      throw invalid('CACHE_LOCAL_IDENTITY_CONFLICT');
+    const feedId = row.feed_id || id.slice(7);
+    if (typeof feedId !== 'string' || !/^[A-Za-z0-9_-]{5,128}$/.test(feedId))
+      throw invalid('CACHE_LOCAL_IDENTITY_CONFLICT');
+    return {
+      feedPath: '/feed/' + feedId,
+      last: Date.parse(published(row.check_time)),
+      next: Date.parse(published(row.next_check_time)),
+    };
+  });
+}
+
 export async function listLocalWechat2RssCache(): Promise<
   Wechat2RssListedFeed[]
 > {

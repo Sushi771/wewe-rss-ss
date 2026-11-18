@@ -191,6 +191,9 @@ const Feeds = () => {
     retry: false,
   });
   const managedLocalCache = cacheStatus?.managedLocalOnly === true;
+  const activeWechatRefresh = trpc.feed.managedWechatRefresh.useMutation({
+    retry: false,
+  });
   // History is a baseline, not a new update. Only a batch observed running on
   // this page may trigger its final cache reread, and claim that transition
   // before awaiting so concurrent query callbacks cannot repeat it.
@@ -1554,6 +1557,46 @@ const Feeds = () => {
               )}
               {currentMpInfo ? (
                 <>
+                  {cacheStatus?.managedActiveRefresh &&
+                    currentMpInfo.collectionChannel === 'wechat2rss' && (
+                      <Button
+                        size="sm"
+                        className="mac-btn-outline"
+                        isLoading={activeWechatRefresh.isPending}
+                        onPress={async () => {
+                          try {
+                            const { state } =
+                              await activeWechatRefresh.mutateAsync({
+                                mpId: currentMpInfo.id,
+                              });
+                            if (state === 'accepted') {
+                              toast.success(
+                                '上游已受理，缓存就绪后会自动同步。',
+                              );
+                              return;
+                            }
+                            toast.warning(
+                              {
+                                unknown: '本次请求结果未知，已保留记录。',
+                                'retained-unknown':
+                                  '该订阅有未核实的历史请求，当前仅同步缓存。',
+                                unavailable: '该订阅暂不符合主动检查条件。',
+                                paused: '公众号主动检查已暂停。',
+                                restricted: '公众号来源受限，主动检查暂停。',
+                                'source-cooldown': '来源检查间隔未到。',
+                                'target-cooldown':
+                                  '该订阅近期已检查，或即将按计划检查。',
+                                'scheduled-closed': '本轮计划已结束。',
+                              }[state],
+                            );
+                          } catch {
+                            toast.error('主动检查暂不可用，请查看状态。');
+                          }
+                        }}
+                      >
+                        主动检查公众号
+                      </Button>
+                    )}
                   <Tooltip content={collectionDescription}>
                     <Button
                       size="sm"

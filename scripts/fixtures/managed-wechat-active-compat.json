@@ -1,0 +1,40 @@
+{
+  "apps/server/src/trpc/trpc.router.ts": {
+    "beforeSha256": "a22dd6a92a79db237072ca4e7d144244ff12c0212ed3476bdb41da4f63fe8a49",
+    "afterSha256": "60d295583053d748ab2778bfb3981a4dd1195ef0d86674accd6abc2614ee4d33",
+    "hunks": [
+      {
+        "before": "import { buildArticleMarkdown } from '../article-export';\nimport { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';\nimport { prepareCachedArticleLocalExport } from '../cached-article-local-export';\nimport { LocalArticleStore } from '../article-local-save';",
+        "after": "import { buildArticleMarkdown } from '../article-export';\nimport { cacheRevision, cacheSyncStatus } from '../feeds/cache-sync-state';\nimport { managedWechatRefresh } from '../collection/managed-wechat-active';\nimport { prepareCachedArticleLocalExport } from '../cached-article-local-export';\nimport { LocalArticleStore } from '../article-local-save';"
+      },
+      {
+        "before": "      cacheSyncStatus(),\n    ),\n    reorderGroups: this.trpcService.protectedProcedure\n      .input(",
+        "after": "      cacheSyncStatus(),\n    ),\n    managedWechatRefresh: this.trpcService.protectedProcedure\n      .input(z.object({ mpId: z.string().regex(/^MP_WXS_\\d{5,15}$/) }).strict())\n      .mutation(async ({ input, ctx }) => {\n        if (\n          !(ctx as { isLocalSave?: boolean }).isLocalSave ||\n          privateOnlineMode() ||\n          process.env.WEWE_ACCEPTANCE_MODE === '1'\n        )\n          throw new TRPCError({\n            code: 'FORBIDDEN',\n            message: '主动检查仅在本机同源页面开放。',\n          });\n        try {\n          return {\n            state: await managedWechatRefresh(this.prismaService, input.mpId),\n          };\n        } catch {\n          throw new TRPCError({\n            code: 'PRECONDITION_FAILED',\n            message: '主动检查暂不可用，请稍后查看状态。',\n          });\n        }\n      }),\n    reorderGroups: this.trpcService.protectedProcedure\n      .input("
+      }
+    ]
+  },
+  "apps/web/src/pages/feeds/index.tsx": {
+    "beforeSha256": "e8c2153eb65de3729ce74622a95bc2295c8498af1f8fd8f8a4603255180057a2",
+    "afterSha256": "dbd4e5ad7f3385483a348bfaeb5a57c5b736f4b1b5b57bdd65eb54129be258fd",
+    "hunks": [
+      {
+        "before": "  });\n  const managedLocalCache = cacheStatus?.managedLocalOnly === true;\n  // History is a baseline, not a new update. Only a batch observed running on\n  // this page may trigger its final cache reread, and claim that transition",
+        "after": "  });\n  const managedLocalCache = cacheStatus?.managedLocalOnly === true;\n  const activeWechatRefresh = trpc.feed.managedWechatRefresh.useMutation({\n    retry: false,\n  });\n  // History is a baseline, not a new update. Only a batch observed running on\n  // this page may trigger its final cache reread, and claim that transition"
+      },
+      {
+        "before": "              {currentMpInfo ? (\n                <>\n                  <Tooltip content={collectionDescription}>\n                    <Button",
+        "after": "              {currentMpInfo ? (\n                <>\n                  {cacheStatus?.managedActiveRefresh &&\n                    currentMpInfo.collectionChannel === 'wechat2rss' && (\n                      <Button\n                        size=\"sm\"\n                        className=\"mac-btn-outline\"\n                        isLoading={activeWechatRefresh.isPending}\n                        onPress={async () => {\n                          try {\n                            const { state } =\n                              await activeWechatRefresh.mutateAsync({\n                                mpId: currentMpInfo.id,\n                              });\n                            if (state === 'accepted') {\n                              toast.success(\n                                '上游已受理，缓存就绪后会自动同步。',\n                              );\n                              return;\n                            }\n                            toast.warning(\n                              {\n                                unknown: '本次请求结果未知，已保留记录。',\n                                'retained-unknown':\n                                  '该订阅有未核实的历史请求，当前仅同步缓存。',\n                                unavailable: '该订阅暂不符合主动检查条件。',\n                                paused: '公众号主动检查已暂停。',\n                                restricted: '公众号来源受限，主动检查暂停。',\n                                'source-cooldown': '来源检查间隔未到。',\n                                'target-cooldown':\n                                  '该订阅近期已检查，或即将按计划检查。',\n                                'scheduled-closed': '本轮计划已结束。',\n                              }[state],\n                            );\n                          } catch {\n                            toast.error('主动检查暂不可用，请查看状态。');\n                          }\n                        }}\n                      >\n                        主动检查公众号\n                      </Button>\n                    )}\n                  <Tooltip content={collectionDescription}>\n                    <Button"
+      }
+    ]
+  },
+  "scripts/local-release/installed-startup-gate.cjs": {
+    "beforeSha256": "37571e204dede85377dbe20c5b0f9f3b669c08dcd6f417b65bece0d9f271dd79",
+    "afterSha256": "f5bd9c7574f324206e870c27d62045f65d9362931daab2739283c99f6cb4c5f6",
+    "hunks": [
+      {
+        "before": "            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&\n            process.env.WECHAT2RSS_ENABLED === '1',\n          ...(process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1'\n            ? {",
+        "after": "            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&\n            process.env.WECHAT2RSS_ENABLED === '1',\n          ...(process.env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH === '1'\n            ? { wechatActiveRefreshEnabled: true }\n            : {}),\n          ...(process.env.WEWE_MANAGED_WECHAT_LOCAL_CACHE === '1'\n            ? {"
+      }
+    ]
+  }
+}

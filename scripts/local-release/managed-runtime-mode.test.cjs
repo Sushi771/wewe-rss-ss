@@ -334,6 +334,7 @@ test(
         assert.equal(result.status, 'completed', result.error);
         const committed = read(f.profile.journalFile);
         assert.equal(committed.runtimeMode.wechatLocalCache, true);
+        assert.equal(committed.runtimeMode.wechatActiveRefresh, true);
         const proof = await (
           await fetch(
             'http://127.0.0.1:' + f.profile.port + '/_local/update-health',
@@ -344,8 +345,9 @@ test(
             proof.managedRuntime.wechatLocalCacheEnabled,
             proof.managedRuntime.wechatScheduleEnabled,
             proof.managedRuntime.scheduledUpdatesEnabled,
+            proof.managedRuntime.wechatActiveRefreshEnabled,
           ],
-          [true, false, true],
+          [true, false, true, true],
         );
         assert.equal(read(state(f, 'wechat')).paused, true);
         assert.deepEqual(fs.readFileSync(f.retainedQueue), queue);
@@ -354,6 +356,7 @@ test(
       {
         scheduledDualMode: true,
         wechatLocalCache: true,
+        wechatActiveRefresh: true,
         previousCompletion: true,
       },
     ),

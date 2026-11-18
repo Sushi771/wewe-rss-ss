@@ -513,6 +513,7 @@ server.listen(port,'127.0.0.1');
       kind: options.scheduledDualMode ? 'scheduled-dual-v1' : 'manual-xhs-v1',
       channelArchives: archives,
       ...(options.wechatLocalCache ? { wechatLocalCache: true } : {}),
+      ...(options.wechatActiveRefresh ? { wechatActiveRefresh: true } : {}),
     };
     if (options.wechatLocalCache) {
       const cache = path.join(projectRoot, '.wechat2rss-data', 'res.db');

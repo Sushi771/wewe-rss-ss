@@ -146,6 +146,7 @@ describe('Shanghai active refresh schedule (offline)', () => {
         [
           latestActiveRefreshRound(Date.parse('2026-10-16T16:00:00+08:00'), 0)!
             .intentKey,
+          Date.parse('2026-10-16T14:00:00+08:00'),
         ],
       ]);
     } finally {
@@ -173,7 +174,10 @@ describe('Shanghai active refresh schedule (offline)', () => {
       ).toBe(intent);
       await make().tick(time('17:31:00'));
       await make().tick(time('17:32:00'));
-      expect(enqueue.mock.calls).toEqual([[intent], [intent]]);
+      expect(enqueue.mock.calls).toEqual([
+        [intent, time('17:30:00')],
+        [intent, time('17:30:00')],
+      ]);
       expect(
         JSON.parse(await fs.readFile(file, 'utf8')).pending,
       ).toBeUndefined();
@@ -204,6 +208,7 @@ describe('Shanghai active refresh schedule (offline)', () => {
         [
           latestActiveRefreshRound(Date.parse('2026-10-13T09:15:00+08:00'), 0)!
             .intentKey,
+          Date.parse('2026-10-13T09:15:00+08:00'),
         ],
       ]);
     } finally {

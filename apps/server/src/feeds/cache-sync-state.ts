@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { managedWechatLocalCache } from '../collection/channel-task-control';
+import {
+  managedWechatActiveRefresh,
+  managedWechatLocalCache,
+} from '../collection/channel-task-control';
 import type { CacheFailureDiagnostic } from '../collection/cache-failure';
 import type { AutomaticMediaSummary } from './automatic-media-queue';
 
@@ -62,6 +65,7 @@ export function cacheSyncStatus() {
   return {
     ...cacheSyncState,
     managedLocalOnly: managedWechatLocalCache(),
+    managedActiveRefresh: managedWechatActiveRefresh(),
     media: cacheSyncState.media.map((row) => ({ ...row })),
     ...cacheRevision(),
     lastChangedAt,

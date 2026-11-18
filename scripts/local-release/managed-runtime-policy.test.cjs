@@ -5,7 +5,9 @@ const test = require('node:test'),
   path = require('node:path');
 const policy = require('./managed-runtime-mode.cjs');
 function fixture(run, projectLayout = false) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manual-xhs-policy-'));
+  const root = fs.realpathSync.native(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'manual-xhs-policy-')),
+  );
   const data = projectLayout ? path.join(root, 'apps', 'server', 'data') : root;
   fs.mkdirSync(data, { recursive: true });
   const database = path.join(data, 'db');
@@ -211,5 +213,12 @@ test('reviewed local WeChat cache keeps active submissions off and preserves the
     assert.throws(
       () => policy.environment(f.mode, f.database),
       /MANAGED_CHANNEL_MUST_BE_PAUSED/,
+    );
+    f.mode.wechatActiveRefresh = true;
+    const admitted = policy.environment(f.mode, f.database);
+    assert.equal(admitted.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH, '1');
+    assert.equal(admitted.WECHAT2RSS_ACTIVE_SCHEDULE, '0');
+    assert.throws(() =>
+      policy.environment(f.mode, f.database, { initial: true }),
     );
   }, true));

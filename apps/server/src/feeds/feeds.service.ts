@@ -1,4 +1,10 @@
-import { runChannelSchedule } from '../collection/channel-task-control';
+import {
+  managedWechatActiveRefresh,
+  readChannelState,
+  runChannelSchedule,
+  taskDatabaseFor,
+} from '../collection/channel-task-control';
+import { managedWechatRefresh } from '../collection/managed-wechat-active';
 import {
   HttpException,
   HttpStatus,
@@ -66,7 +72,8 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
   onApplicationBootstrap() {
     if (
       process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
-      (!activeRefreshScheduleEnabled(process.env) &&
+      (!managedWechatActiveRefresh() &&
+        !activeRefreshScheduleEnabled(process.env) &&
         !dailyWechat2RssCatchup(process.env))
     )
       return;
@@ -75,7 +82,8 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       this.dailyCatchupJob = undefined;
       void waitForStartupAudit().then((ok) => {
         if (ok)
-          return activeRefreshScheduleEnabled(process.env)
+          return managedWechatActiveRefresh() ||
+            activeRefreshScheduleEnabled(process.env)
             ? this.handleActiveRefreshSchedule()
             : this.catchUpDailyWechat2Rss();
       });
@@ -137,7 +145,8 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
     if (
       process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
       !databaseWritesAllowed() ||
-      !activeRefreshScheduleEnabled(process.env)
+      (!managedWechatActiveRefresh() &&
+        !activeRefreshScheduleEnabled(process.env))
     )
       return;
     this.activeRefreshScheduler ??= new ActiveRefreshScheduler(
@@ -146,9 +155,22 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
         if (!raw.startsWith('file:')) throw new Error('SQLITE_REQUIRED');
         return decodeURIComponent(raw.slice(5).split('?')[0]);
       },
-      (key) => this.trpcService.beginScheduledRefreshAll(key),
+      (key, due) =>
+        managedWechatActiveRefresh()
+          ? this.runManagedWechatRound(key, due)
+          : this.trpcService.beginScheduledRefreshAll(key),
     );
     try {
+      if (managedWechatActiveRefresh()) {
+        const database = await taskDatabaseFor(this.prismaService);
+        const channel = await readChannelState('wechat', database);
+        if (!channel.paused && channel.receipts.length)
+          await this.activeRefreshScheduler.tick(
+            now,
+            Math.max(...channel.receipts.map((receipt) => receipt.at)) + 1,
+          );
+        return;
+      }
       await runChannelSchedule('wechat', (notBefore) =>
         this.activeRefreshScheduler!.tick(now, notBefore),
       );
@@ -158,6 +180,29 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       this.logger.warn(
         'Active refresh round deferred; durable queue and existing data retained.',
       );
+    }
+  }
+
+  private async runManagedWechatRound(key: string, due: number) {
+    if (Date.now() - due > 15 * 60_000) return;
+    const feeds = await this.prismaService.feed.findMany({
+      where: { status: 1, collectionChannel: 'wechat2rss' },
+      select: { id: true },
+      orderBy: [{ providerRefreshAttemptTime: 'asc' }, { id: 'asc' }],
+    });
+    for (const { id } of feeds) {
+      const outcome = await managedWechatRefresh(this.prismaService, id, {
+        key,
+        due,
+      });
+      // Start with at most one admitted provider operation per original slot.
+      // A stale, paused or historically uncertain feed can be skipped locally.
+      if (
+        !['retained-unknown', 'target-cooldown', 'unavailable'].includes(
+          outcome,
+        )
+      )
+        break;
     }
   }
 
