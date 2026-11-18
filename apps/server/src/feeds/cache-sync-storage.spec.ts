@@ -215,7 +215,7 @@ describe('cache delta through original SQLite merge', () => {
       );
     }
   });
-  it('runs a managed cache-only manual refresh while preserving a shared pending request and isolating feed errors', async () => {
+  it.each([true, false])('saves cache with pause=%s', async (paused) => {
     const second = 'MP_WXS_1234567895';
     const state = path.join(
       root,
@@ -229,7 +229,7 @@ describe('cache delta through original SQLite merge', () => {
       JSON.stringify({
         version: 1,
         revision: 1,
-        paused: true,
+        paused,
         archived: [],
         receipts: [],
       }),
@@ -263,6 +263,7 @@ describe('cache delta through original SQLite merge', () => {
       ...process.env,
       WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
       WEWE_MANAGED_WECHAT_LOCAL_CACHE: '1',
+      WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: paused ? '0' : '1',
       WECHAT2RSS_LOCAL_CACHE_SYNC: '1',
       WECHAT2RSS_RECOVERY_HOLD: '0',
     });
@@ -288,6 +289,13 @@ describe('cache delta through original SQLite merge', () => {
         return cached;
       });
     try {
+      if (!paused) {
+        process.env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH = '0';
+        await expect(
+          trpc.refreshMpArticlesAndUpdateFeed(second, 1, 'local-manual'),
+        ).rejects.toThrow('CACHE_SYNC_SOURCE_PAUSE_REQUIRED');
+        process.env.WEWE_MANAGED_WECHAT_ACTIVE_REFRESH = '1';
+      }
       await expect(assertChannelRunnable('wechat')).rejects.toThrow(
         'CHANNEL_MANAGED_WECHAT_PAUSED',
       );

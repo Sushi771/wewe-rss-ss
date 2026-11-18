@@ -1,4 +1,5 @@
 import {
+  managedWechatActiveRefresh,
   managedWechatLocalCache,
   readChannelState,
   taskDatabaseFor,
@@ -707,7 +708,8 @@ export class CollectionService {
           if (
             process.env.WECHAT2RSS_RECOVERY_HOLD === '1' ||
             process.env.WECHAT2RSS_LOCAL_CACHE_SYNC !== '1' ||
-            !(await readChannelState('wechat', database)).paused
+            (!(await readChannelState('wechat', database)).paused &&
+              !managedWechatActiveRefresh())
           )
             throw Error('CACHE_SYNC_SOURCE_PAUSE_REQUIRED');
           return this.collectWechat2RssRecentOwned(request);
