@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { assertDatabaseWritesAllowed } from '../startup-audit';
 import { createVerifiedSqliteBackup } from './sqlite-backup';
 import { sqliteWrites } from './sqlite-write-coordinator';
+import { readBatchHistoryReceipt } from './xhs-legacy-source-fence';
 import {
   assertChannel,
   ChannelState,
@@ -52,7 +53,7 @@ async function bounded(file: string) {
 /** Local inventory only. Original records and source fences are never edited. */
 export class ChannelTaskHistory {
   constructor(
-    private readonly db: Pick<PrismaClient, '$queryRawUnsafe'>,
+    private readonly db: Pick<PrismaClient, '$queryRaw' | '$queryRawUnsafe'>,
     private readonly database: () => string = configuredTaskDatabase,
     private readonly backup?: () => Promise<unknown>,
     private readonly writeAllowed: () => void = assertDatabaseWritesAllowed,
@@ -168,6 +169,35 @@ export class ChannelTaskHistory {
       (a, b) => a.kind.localeCompare(b.kind) || a.id.localeCompare(b.id),
     );
   }
+  private async observedSingleListBatch(id: string) {
+    try {
+      const items = await this.db.$queryRaw<
+        Array<{
+          creator_id: string;
+          operation_id: string | null;
+          state: string;
+          outcome: string | null;
+        }>
+      >`SELECT creator_id,operation_id,state,outcome FROM xhs_refresh_batch_items WHERE batch_id=${id} LIMIT 2`;
+      if (items.length !== 1) return;
+      const [item] = items;
+      if (
+        item.state !== 'reserved' ||
+        !item.operation_id ||
+        item.outcome !== null
+      )
+        return;
+      const receipt = await readBatchHistoryReceipt(
+        this.db,
+        id,
+        item.creator_id,
+        item.operation_id,
+      );
+      if (receipt) return { id, item, receipt };
+    } catch {
+      // Older schemas and malformed evidence keep the existing resume fence.
+    }
+  }
   private async plan(channel: CollectionChannel, action: Action) {
     const state = await readChannelState(channel, this.database());
     const records = await this.inventory(channel);
@@ -175,6 +205,18 @@ export class ChannelTaskHistory {
     const visible = refs.filter(
       (r) => !state.archived.some((a) => a.kind === r.kind && a.id === r.id),
     );
+    const observedBatchDigests: string[] = [];
+    if (channel === 'xiaohongshu' && action === 'resume') {
+      for (const record of records) {
+        if (record.kind !== 'xhs-batch' || !record.protection) continue;
+        const proof = await this.observedSingleListBatch(record.id);
+        if (!proof) continue;
+        // Allow the ordinary batch entry to mirror its terminal receipt after
+        // resume. The source fence still blocks until that mirror is committed.
+        record.protection = false;
+        observedBatchDigests.push(historyDigest(proof));
+      }
+    }
     const retainedEvidence: Array<{ table: string; rows: unknown[] }> = [];
     let retainedUnknownCount = 0;
     for (const table of channel === 'wechat'
@@ -205,7 +247,14 @@ export class ChannelTaskHistory {
       visible,
       retainedEvidence,
       retainedUnknownCount,
-      digest: historyDigest({ channel, action, state, refs, retainedEvidence }),
+      digest: historyDigest({
+        channel,
+        action,
+        state,
+        refs,
+        retainedEvidence,
+        ...(observedBatchDigests.length ? { observedBatchDigests } : {}),
+      }),
     };
   }
   async preview(channel: CollectionChannel, action: Action) {

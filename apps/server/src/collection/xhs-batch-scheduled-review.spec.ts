@@ -25,6 +25,7 @@ import { assertUnboundDispatch } from './xhs-unbound-round';
 import { parseXhsProfile } from './xhs-profile';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
 import { readLegacyXhsSourceFence } from './xhs-legacy-source-fence';
+import { ChannelTaskHistory } from './channel-task-history';
 import { parsePersistentCreatorBatch } from '../../../web/src/utils/xiaohongshu-refresh';
 import { TrpcService } from '../trpc/trpc.service';
 import { TrpcRouter } from '../trpc/trpc.router';
@@ -697,6 +698,25 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
   });
   it('settles a fully observed list with a retained history omission without sending it again', async () => {
     await batch.stop(batchId);
+    const { backup } = localSettler();
+    const history = new ChannelTaskHistory(
+      db,
+      () => path.join(dir, 'fixture.sqlite'),
+      backup,
+      () => {},
+    );
+    const preview = (action: 'archive' | 'pause' | 'resume') =>
+      history.preview('xiaohongshu', action);
+    const confirm = (p: Awaited<ReturnType<typeof preview>>) =>
+      history.confirm({
+        channel: 'xiaohongshu',
+        action: p.action,
+        digest: p.digest,
+        acknowledged: true,
+      });
+    await confirm(await preview('archive'));
+    await confirm(await preview('resume'));
+    backup.mockClear();
     await db.xhsNote.create({
       data: {
         id: JSON.stringify(['xiaohongshu', authors[ids[1]], 'old-note']),
@@ -720,6 +740,29 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     });
     const calls = api.mock.calls.length;
     expect(calls).toBe(2);
+    await expect(confirm(await preview('pause'))).resolves.toMatchObject({
+      paused: true,
+    });
+    await expect(batch.advance(id)).rejects.toThrow('CHANNEL_PAUSED');
+    const reviewed = await preview('resume');
+    await db.$executeRaw`INSERT INTO xhs_refresh_batch_items(batch_id,position,creator_id,state) VALUES(${id},1,${ids[2]},'queued')`;
+    await expect(confirm(await preview('resume'))).rejects.toThrow(
+      'CHANNEL_ACTIVE_HISTORY_REVIEW_REQUIRED',
+    );
+    await db.$executeRaw`DELETE FROM xhs_refresh_batch_items WHERE batch_id=${id} AND position=1`;
+    await db.$executeRaw`UPDATE xhs_unbound_owner_requests SET outcome='unknown' WHERE task_id=${reserved.operationId} AND phase='profile'`;
+    await expect(confirm(reviewed)).rejects.toThrow('CHANNEL_PREVIEW_CHANGED');
+    await expect(confirm(await preview('resume'))).rejects.toThrow(
+      'CHANNEL_ACTIVE_HISTORY_REVIEW_REQUIRED',
+    );
+    expect(backup).toHaveBeenCalledTimes(1);
+    await db.$executeRaw`UPDATE xhs_unbound_owner_requests SET outcome='response-received' WHERE task_id=${reserved.operationId} AND phase='profile'`;
+    await expect(confirm(await preview('resume'))).resolves.toMatchObject({
+      paused: false,
+    });
+    expect(backup).toHaveBeenCalledTimes(2);
+    expect((await readLegacyXhsSourceFence(db)).state).toBe('blocked');
+    expect(api).toHaveBeenCalledTimes(calls);
     const result = await batch.advance(id);
     expect(result.state).toBe('complete');
     expect(result.items[0]).toMatchObject({
