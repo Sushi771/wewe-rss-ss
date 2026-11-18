@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { verifyBatchLocalCancellation } from './xhs-batch-local-cancellation';
 import { TextDecoder } from 'node:util';
 import { XhsSubscriptionError } from './xhs-subscription-errors';
@@ -92,6 +93,7 @@ type Receipt = {
   message: string;
   failureScope?: 'article';
   failedCount?: number;
+  historyExcludedCount?: number;
 };
 function receipt(row: any): Receipt | undefined {
   // HEX is a stable TEXT projection even when the first SQLite result is NULL.
@@ -133,10 +135,23 @@ function receipt(row: any): Receipt | undefined {
   if (
     Object.keys(value).some(
       (k) =>
-        !['status', 'added', 'message', 'failureScope', 'failedCount'].includes(
-          k,
-        ),
+        ![
+          'status',
+          'added',
+          'message',
+          'failureScope',
+          'failedCount',
+          'historyExcludedCount',
+        ].includes(k),
     )
+  )
+    return;
+  if (
+    value.historyExcludedCount !== undefined &&
+    (value.status !== 'partial' ||
+      value.failureScope !== undefined ||
+      !Number.isSafeInteger(value.historyExcludedCount) ||
+      value.historyExcludedCount < 1)
   )
     return;
   if ((value.failureScope === undefined) !== (value.failedCount === undefined))
@@ -154,8 +169,110 @@ function receipt(row: any): Receipt | undefined {
 const acceptedItem = (value: Receipt) =>
   value.status === 'complete' ||
   (value.status === 'partial' &&
-    value.failureScope === 'article' &&
-    integer(value.failedCount, 1));
+    ((value.failureScope === 'article' && integer(value.failedCount, 1)) ||
+      integer(value.historyExcludedCount, 1)));
+
+/** A proved terminal list can be settled locally while keeping its historical omissions. */
+export async function readBatchHistoryReceipt(
+  db: LegacyXhsQuery,
+  batchId: string,
+  creatorId: string,
+  taskId: string,
+): Promise<Receipt | undefined> {
+  if (!operation(batchId) || !operation(taskId)) return;
+  const round = `batch/${batchId}`;
+  const rows = await db.$queryRaw<
+    Array<{ creator_id: string; state: string; document: string }>
+  >`
+    SELECT creator_id,state,document FROM xhs_subscription_tasks WHERE id=${taskId}`;
+  if (
+    rows.length !== 1 ||
+    rows[0].creator_id !== creatorId ||
+    rows[0].state !== 'partial'
+  )
+    return;
+  const d = JSON.parse(rows[0].document);
+  if (
+    d?.taskId !== taskId ||
+    d.creatorId !== creatorId ||
+    d.state !== 'partial' ||
+    d.code !== 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' ||
+    d.kind !== 'list' ||
+    (d.collectDetails !== undefined && d.collectDetails !== false) ||
+    d.schedule?.round !== round ||
+    d.schedule?.phase !== 'basic' ||
+    Object.keys(d.schedule).length !== 2 ||
+    d.listFinished !== true ||
+    d.failed !== 0 ||
+    d.remaining !== 0 ||
+    d.taskFailure ||
+    d.sourceActive ||
+    d.sourcePreflight ||
+    (d.sourceUnknowns !== undefined &&
+      (!Array.isArray(d.sourceUnknowns) || d.sourceUnknowns.length)) ||
+    !Number.isSafeInteger(d.completed) ||
+    d.completed < 0 ||
+    !identity(d.message) ||
+    !Array.isArray(d.historyExcludedIds) ||
+    !d.historyExcludedIds.length ||
+    d.historyExcludedIds.length > 10000 ||
+    !d.historyExcludedIds.every(identity) ||
+    new Set(d.historyExcludedIds).size !== d.historyExcludedIds.length
+  )
+    return;
+  const approved = await db.$queryRaw<
+    Array<{ id: string; scope_json: string; plan_digest: string }>
+  >`
+    SELECT id,scope_json,plan_digest FROM xhs_unbound_owner_reviews
+    WHERE json_extract(scope_json,'$.taskBinding.taskId')=${taskId} LIMIT 2`;
+  if (approved.length !== 1) return;
+  const review = approved[0],
+    scope = JSON.parse(review.scope_json);
+  const hash = (value: unknown) =>
+    createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  if (
+    scope.reviewKind !== 'scheduled-round-review-v1' ||
+    scope.round !== round ||
+    scope.taskBinding.creatorId !== creatorId ||
+    scope.taskBinding.phase !== 'basic' ||
+    scope.taskBinding.batch !== 0 ||
+    review.plan_digest !== hash(scope) ||
+    review.id !== 'scheduled-task-' + hash([scope.policyId, round, taskId])
+  )
+    return;
+  const requests = await db.$queryRaw<
+    Array<{
+      review_id: string;
+      creator_id: string;
+      phase: string;
+      outcome: string;
+      listed_note_ids_json: string | null;
+    }>
+  >`
+    SELECT review_id,creator_id,phase,outcome,listed_note_ids_json
+    FROM xhs_unbound_owner_requests WHERE task_id=${taskId} LIMIT 101`;
+  if (
+    requests.length > 100 ||
+    !requests.some((r) => r.phase === 'list') ||
+    requests.some(
+      (r) =>
+        r.review_id !== review.id ||
+        r.creator_id !== creatorId ||
+        r.outcome !== 'response-received' ||
+        (r.phase !== 'profile' &&
+          (r.phase !== 'list' ||
+            !r.listed_note_ids_json ||
+            !Array.isArray(JSON.parse(r.listed_note_ids_json)))),
+    )
+  )
+    return;
+  return {
+    status: 'partial',
+    added: d.completed,
+    message: d.message,
+    historyExcludedCount: d.historyExcludedIds.length,
+  };
+}
 
 /** Observes legacy receipts only. Never repairs, replays, clears or transfers ownership.
  * Call again inside candidate admission/dispatch transactions. This does not make
@@ -349,7 +466,20 @@ export async function readLegacyXhsSourceFence(
       if (job.state !== 'complete') {
         unresolved = true;
         if (job.outcome !== null && !receipt(job)) return blocked('receipt');
-      } else if (!receipt(job)) return blocked('receipt');
+      } else {
+        const value = receipt(job);
+        if (
+          !value ||
+          (value.historyExcludedCount !== undefined &&
+            items.filter(
+              (item) =>
+                item.operation_id === job.owner &&
+                item.creator_id === job.creator_id &&
+                item.state === 'partial',
+            ).length !== 1)
+        )
+          return blocked('receipt');
+      }
     }
     for (const failure of failures) {
       if (
@@ -443,7 +573,16 @@ export async function readLegacyXhsSourceFence(
           !acceptedItem(value) ||
           value.status !== item.state ||
           !jobReceipt ||
-          item.outcome !== job.outcome
+          item.outcome !== job.outcome ||
+          (value.historyExcludedCount !== undefined &&
+            JSON.stringify(
+              await readBatchHistoryReceipt(
+                db,
+                item.batch_id,
+                item.creator_id,
+                item.operation_id,
+              ),
+            ) !== item.outcome)
         )
           return blocked('receipt');
       }

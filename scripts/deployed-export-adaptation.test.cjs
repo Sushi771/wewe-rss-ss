@@ -52,6 +52,25 @@ test('reviewed held/channel deltas preserve original blobs and reject every unkn
   }
 });
 
+test('scheduled startup inverse rejects changes outside its exact reviewed delta', () => {
+  const file = 'scripts/local-release/installed-startup-gate.cjs';
+  const fixture = require('./fixtures/scheduled-runtime-compat.json')[file];
+  const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+  assert.equal(hash(raw), fixture.afterSha256);
+  assert.equal(
+    hash(restoreLegacyWriter.restoreScheduledRuntime(file, raw)),
+    fixture.beforeSha256,
+  );
+  assert.throws(
+    () =>
+      restoreLegacyWriter.restoreScheduledRuntime(
+        file,
+        raw + '// unreviewed\n',
+      ),
+    /exact reviewed scheduled startup/,
+  );
+});
+
 test('manual runtime inverse pins complete sources and refuses unknown or partial startup changes', () => {
   const entries = require('./fixtures/managed-runtime-compat.json');
   assert.deepEqual(Object.keys(entries).sort(), [
@@ -60,7 +79,10 @@ test('manual runtime inverse pins complete sources and refuses unknown or partia
     'scripts/local-release/start-current.cjs',
   ]);
   for (const [file, entry] of Object.entries(entries)) {
-    const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    const raw = restoreLegacyWriter.restoreScheduledRuntime(
+      file,
+      fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+    );
     assert.equal(hash(raw), entry.afterSha256);
     const original = restoreLegacyWriter.restoreManagedRuntime(file, raw);
     assert.equal(hash(original), entry.beforeSha256);

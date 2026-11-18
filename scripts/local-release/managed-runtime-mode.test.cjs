@@ -285,3 +285,27 @@ test(
       },
     ),
 );
+
+test(
+  'scheduled dual mode hands off a completed live installation with both channels paused',
+  { timeout: 240000 },
+  () =>
+    fixture(
+      async (f) => {
+        assert.equal((await runFixedProfile(f.profilePin)).status, 'completed');
+        const j = read(f.profile.journalFile);
+        assert.equal(j.runtimeMode.kind, 'scheduled-dual-v1');
+        const proof = await (
+          await fetch(
+            'http://127.0.0.1:' + f.profile.port + '/_local/update-health',
+          )
+        ).json();
+        assert.equal(proof.managedRuntime.scheduledUpdatesEnabled, true);
+        assert.equal(proof.managedRuntime.automaticDisabled, false);
+        for (const channel of ['wechat', 'xiaohongshu'])
+          assert(read(state(f, channel)).paused);
+        assert.deepEqual(fs.readFileSync(f.database), f.before);
+      },
+      { scheduledDualMode: true, previousCompletion: true },
+    ),
+);

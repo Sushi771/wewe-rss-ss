@@ -1,4 +1,4 @@
-import { assertChannelRunnable } from './channel-task-control';
+import { runChannelSchedule } from './channel-task-control';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
@@ -27,11 +27,6 @@ export class XhsScheduledService {
       !databaseWritesAllowed()
     )
       return;
-    try {
-      await assertChannelRunnable('xiaohongshu');
-    } catch {
-      return;
-    }
     this.clock ??= new XhsScheduledClock(
       () => {
         const raw = process.env.DATABASE_URL || '';
@@ -43,12 +38,32 @@ export class XhsScheduledService {
           this.db,
           this.subscriptions,
           this.engagement,
+          process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1'
+            ? async () => {
+                // A historical unknown author-context or list request closes
+                // that author for this mode. Per-note fences still govern all others.
+                const rows = await this.db.$queryRaw<
+                  Array<{ creator_id: string }>
+                >`
+                  SELECT DISTINCT creator_id FROM xhs_unbound_owner_requests
+                  WHERE outcome='unknown' AND phase IN ('profile','list')`;
+                return new Set(rows.map((row) => row.creator_id));
+              }
+            : undefined,
         ).run(round),
     );
     try {
-      await this.clock.tick(now);
+      await runChannelSchedule('xiaohongshu', (notBefore) =>
+        this.clock!.tick(now, notBefore),
+      );
     } catch (e) {
-      if (!(e instanceof Error && e.message === 'XHS_SCHEDULE_TASK_PENDING'))
+      if (
+        !(
+          e instanceof Error &&
+          (e.message === 'XHS_SCHEDULE_TASK_PENDING' ||
+            e.message.startsWith('CHANNEL_'))
+        )
+      )
         this.logger.warn(
           'XHS scheduled round deferred; persisted task state retained.',
         );

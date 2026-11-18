@@ -150,3 +150,32 @@ test('unknown mode fields and private/acceptance environments cannot grant manua
       else process.env.PRIVATE_ONLINE_MODE = old;
     }
   }));
+
+test('both schedules require previously archived, paused channels at install, then permit independent resumes', () =>
+  fixture((f) => {
+    f.mode.kind = 'scheduled-dual-v1';
+    const environment = policy.environment(f.mode, f.database, {
+      initial: true,
+    });
+    assert.equal(environment.ENABLE_SCHEDULED_UPDATES, '1');
+    assert.equal(environment.DISABLE_SCHEDULED_UPDATES, '0');
+    assert.equal(environment.WECHAT2RSS_ACTIVE_SCHEDULE, '1');
+    assert.equal(environment.WECHAT2RSS_CACHE_MEDIA_ENABLED, '0');
+    assert.equal(environment.XHS_COMMENT_COLLECTION_ENABLED, '0');
+    const w = JSON.parse(fs.readFileSync(f.files.wechat));
+    w.paused = false;
+    fs.writeFileSync(f.files.wechat, JSON.stringify(w));
+    assert.throws(
+      () => policy.environment(f.mode, f.database, { initial: true }),
+      /MANAGED_CHANNEL_MUST_BE_PAUSED/,
+    );
+    assert.equal(
+      policy.environment(f.mode, f.database).WEWE_MANAGED_RUNTIME_MODE,
+      'scheduled-dual-v1',
+    );
+    assert.throws(
+      () =>
+        policy.environment({ ...f.mode, kind: 'manual-xhs-v1' }, f.database),
+      /MANAGED_CHANNEL_MUST_BE_PAUSED/,
+    );
+  }));

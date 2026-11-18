@@ -26,8 +26,8 @@ export class XhsScheduledClock {
     );
     return result;
   }
-  async tick(now = Date.now()) {
-    if (!Number.isSafeInteger(now)) return;
+  async tick(now = Date.now(), notBefore = 0) {
+    if (!Number.isSafeInteger(now) || !Number.isSafeInteger(notBefore)) return;
     const ready = await this.stateChange(async () => {
       const database = await fs.realpath(this.database());
       const file = path.join(
@@ -57,7 +57,10 @@ export class XhsScheduledClock {
       const state = JSON.parse(await fs.readFile(file, 'utf8'));
       if (state.version !== 1 || !Number.isSafeInteger(state.notBefore))
         throw new Error('SCHEDULE_STATE_INVALID');
-      const observed = latestActiveRefreshRound(now, state.notBefore);
+      const observed = latestActiveRefreshRound(
+        now,
+        Math.max(state.notBefore, notBefore),
+      );
       const pending = state.pending;
       if (pending !== undefined) {
         const expected = latestActiveRefreshRound(pending.due, state.notBefore);
@@ -73,6 +76,7 @@ export class XhsScheduledClock {
       // evening deployment still cannot invent an unobserved catch-up round.
       const round =
         pending &&
+        pending.due >= notBefore &&
         local(pending.due).date === local(now).date &&
         (!observed || pending.due >= observed.due)
           ? pending

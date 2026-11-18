@@ -1,3 +1,4 @@
+import { readBatchHistoryReceipt } from './xhs-legacy-source-fence';
 import {
   assertChannelRunnable,
   historyArchived,
@@ -389,6 +390,7 @@ export class XiaohongshuBatches {
       message: string;
       failureScope?: 'article';
       failedCount?: number;
+      historyExcludedCount?: number;
     } | null = null;
     let legacyReceipt: string | undefined;
     const storedTask = await this.db.$queryRaw<
@@ -410,6 +412,17 @@ export class XiaohongshuBatches {
             added: task.completed,
             message: task.message,
           };
+        else if (
+          task.state === 'partial' &&
+          task.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED'
+        )
+          receipt =
+            (await readBatchHistoryReceipt(
+              this.db,
+              id,
+              item.creator_id,
+              item.operation_id,
+            )) ?? null;
       } catch {
         return this.status(id);
       }
@@ -465,7 +478,17 @@ export class XiaohongshuBatches {
           outcome.failureScope === 'article' &&
           Number.isSafeInteger(outcome.failedCount) &&
           outcome.failedCount! > 0);
-      if (!accepted) {
+      const historyReceipt =
+        outcome.historyExcludedCount !== undefined &&
+        JSON.stringify(
+          await readBatchHistoryReceipt(
+            tx,
+            id,
+            item.creator_id,
+            item.operation_id!,
+          ),
+        ) === JSON.stringify(outcome);
+      if (!accepted && !historyReceipt) {
         await tx.$executeRaw`UPDATE xhs_refresh_batches SET state='paused' WHERE id=${id} AND state IN ('running','paused')`;
         return;
       }

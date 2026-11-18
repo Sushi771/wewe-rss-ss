@@ -24,7 +24,7 @@ const digest = (v) =>
 function definition(mode) {
   if (mode === undefined) return;
   assert(
-    mode?.kind === 'manual-xhs-v1' &&
+    ['manual-xhs-v1', 'scheduled-dual-v1'].includes(mode?.kind) &&
       Object.keys(mode).sort().join(',') === 'channelArchives,kind',
     'MANAGED_MODE_INVALID',
   );
@@ -87,7 +87,9 @@ function environment(mode, database, { initial = false } = {}) {
       'MANAGED_ARCHIVE_CHANGED',
     );
     assert(
-      (channel !== 'wechat' && !initial) || state.paused === true,
+      (!initial &&
+        (channel !== 'wechat' || mode.kind === 'scheduled-dual-v1')) ||
+        state.paused === true,
       'MANAGED_CHANNEL_MUST_BE_PAUSED',
     );
   }
@@ -95,7 +97,14 @@ function environment(mode, database, { initial = false } = {}) {
     ...quiet,
     WECHAT2RSS_RECOVERY_HOLD: '0',
     XHS_SUBSCRIPTION_LIVE_ENABLED: '1',
-    WEWE_MANAGED_RUNTIME_MODE: 'manual-xhs-v1',
+    WEWE_MANAGED_RUNTIME_MODE: mode.kind,
+    ...(mode.kind === 'scheduled-dual-v1'
+      ? {
+          ENABLE_SCHEDULED_UPDATES: '1',
+          DISABLE_SCHEDULED_UPDATES: '0',
+          WECHAT2RSS_ACTIVE_SCHEDULE: '1',
+        }
+      : {}),
   };
 }
 function readControl(file) {

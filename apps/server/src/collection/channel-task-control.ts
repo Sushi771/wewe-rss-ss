@@ -173,7 +173,29 @@ export async function assertChannelRunnable(
   if (state.paused) throw Error('CHANNEL_PAUSED');
   if (ref && state.archived.some((r) => r.kind === ref.kind && r.id === ref.id))
     throw Error('CHANNEL_TASK_ARCHIVED');
+  return state;
 }
+
+/** Keep channel administration outside a clock tick that can admit source work. */
+export async function runChannelSchedule(
+  channel: CollectionChannel,
+  tick: (notBefore: number) => Promise<void>,
+) {
+  if (process.env.WEWE_MANAGED_RUNTIME_MODE !== 'scheduled-dual-v1') {
+    await assertChannelRunnable(channel);
+    return tick(0);
+  }
+  return withChannelExecution(channel, async () => {
+    const state = await assertChannelRunnable(channel);
+    if (!state.archived.length || !state.receipts.length)
+      throw Error('CHANNEL_STATE_INVALID');
+    const notBefore =
+      Math.max(...state.receipts.map((receipt) => receipt.at)) + 1;
+    if (!Number.isSafeInteger(notBefore)) throw Error('CHANNEL_STATE_INVALID');
+    await tick(notBefore);
+  });
+}
+
 async function activeExecutions(folder: string) {
   const names = (await fs.readdir(folder)).filter((n) =>
     /^execution-[a-f0-9-]{36}\.json$/.test(n),

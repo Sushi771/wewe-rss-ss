@@ -695,6 +695,44 @@ describe('manual batch recurring list review (isolated Prisma)', () => {
     expect(api).toHaveBeenCalledTimes(4);
     expect(await snapshot()).toEqual(historical);
   });
+  it('settles a fully observed list with a retained history omission without sending it again', async () => {
+    await batch.stop(batchId);
+    await db.xhsNote.create({
+      data: {
+        id: JSON.stringify(['xiaohongshu', authors[ids[1]], 'old-note']),
+        creatorId: ids[1],
+        title: 'Retained old note',
+        publishTime: 1,
+        status: 'listed',
+      },
+    });
+    const id = randomUUID();
+    await batch.create(id, [ids[1]]);
+    await batch.advance(id);
+    await waitForLane();
+    const reserved = (await batch.status(id)).items[0];
+    const terminal = await service.task({ taskId: reserved.operationId! });
+    expect(terminal).toMatchObject({
+      state: 'partial',
+      code: 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED',
+      failed: 0,
+      remaining: 0,
+    });
+    const calls = api.mock.calls.length;
+    expect(calls).toBe(2);
+    const result = await batch.advance(id);
+    expect(result.state).toBe('complete');
+    expect(result.items[0]).toMatchObject({
+      state: 'partial',
+      outcome: { status: 'partial', historyExcludedCount: 1 },
+    });
+    expect(await batch.advance(id)).toEqual(result);
+    expect(api).toHaveBeenCalledTimes(calls);
+    expect(await snapshot()).toEqual(historical);
+    expect(await readLegacyXhsSourceFence(db)).toEqual({ state: 'clear' });
+    await db.$executeRaw`UPDATE xhs_unbound_owner_requests SET outcome='unknown' WHERE task_id=${reserved.operationId} AND phase='profile'`;
+    expect((await readLegacyXhsSourceFence(db)).state).toBe('blocked');
+  });
   it('serializes repeated confirmations of a stopped scheduled item without a second backup or source call', async () => {
     const old = await stoppedUnsentTask();
     const { settle, backup } = localSettler();

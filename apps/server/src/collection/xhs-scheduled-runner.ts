@@ -35,6 +35,7 @@ export class XhsScheduledRunner {
         skipped?: 'not-authorized';
       }>;
     },
+    private readonly excludedCreators?: () => Promise<ReadonlySet<string>>,
   ) {}
   async run(round: string) {
     const authors = await this.db.xhsCreator.findMany({
@@ -46,8 +47,14 @@ export class XhsScheduledRunner {
       incomplete = false,
       blocked = false,
       visited = 0,
-      commentOmissions = 0;
+      commentOmissions = 0,
+      historyOmissions = 0;
+    const excluded = await this.excludedCreators?.();
     for (const author of authors) {
+      if (excluded?.has(author.id)) {
+        historyOmissions++;
+        continue;
+      }
       try {
         const basic = await this.service.scheduleCreatorPhase({
           round,
@@ -164,9 +171,10 @@ export class XhsScheduledRunner {
     if (blocked) throw Error('XHS_SCHEDULE_SOURCE_BLOCKED');
     if (pending) throw Error('XHS_SCHEDULE_TASK_PENDING');
     if (incomplete) {
-      if (commentOmissions > 0 && visited === authors.length)
+      if (commentOmissions > 0 && visited + historyOmissions === authors.length)
         return { outcome: 'settled-incomplete' as const };
       throw Error('XHS_SCHEDULE_ROUND_INCOMPLETE');
     }
+    if (historyOmissions > 0) return { outcome: 'settled-incomplete' as const };
   }
 }

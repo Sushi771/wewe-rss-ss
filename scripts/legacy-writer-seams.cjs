@@ -35,6 +35,27 @@ function restoreLifecycleErrors(file, source) {
 }
 // Test-only exact inverse of the reviewed manual-mode startup additions.
 // Complete before/after pins preserve every historical admission check.
+function restoreScheduledRuntime(file, source) {
+  const reviewed = require('./fixtures/scheduled-runtime-compat.json')[file];
+  if (!reviewed || sha(source) === reviewed.beforeSha256) return source;
+  assert.equal(
+    sha(source),
+    reviewed.afterSha256,
+    'exact reviewed scheduled startup source',
+  );
+  assert.equal(
+    source.split(reviewed.after).length,
+    2,
+    'exact reviewed scheduled startup hunk',
+  );
+  source = source.replace(reviewed.after, reviewed.before);
+  assert.equal(
+    sha(source),
+    reviewed.beforeSha256,
+    'unchanged manual startup source',
+  );
+  return source;
+}
 function restoreManagedRuntime(file, source) {
   const reviewed = require('./fixtures/managed-runtime-compat.json')[file];
   if (!reviewed || sha(source) === reviewed.beforeSha256) return source;
@@ -60,7 +81,7 @@ function restoreManagedRuntime(file, source) {
   return source;
 }
 function restoreCompatible(file, source) {
-  source = restoreManagedRuntime(file, source);
+  source = restoreManagedRuntime(file, restoreScheduledRuntime(file, source));
   const reviewed = installed[file];
   if (!reviewed) return source;
   if (sha(source) === reviewed.beforeSha256) return source;
@@ -305,3 +326,5 @@ module.exports.restoreLocalCacheOnly = restoreLocalCacheOnly;
 module.exports.restoreLifecycleErrors = restoreLifecycleErrors;
 
 module.exports.restoreManagedRuntime = restoreManagedRuntime;
+
+module.exports.restoreScheduledRuntime = restoreScheduledRuntime;

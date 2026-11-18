@@ -151,6 +151,15 @@ function install({ release, manifest, database, environment = process.env }) {
       databaseReady = true;
     },
     health(databaseReadable) {
+      const otherAutomaticWorkDisabled = [
+        'WECHAT2RSS_ACTIVE_SCHEDULE_ENABLED',
+        'WECHAT2RSS_CACHE_SYNC_ENABLED',
+        'WECHAT2RSS_CACHE_MEDIA_ENABLED',
+        'WECHAT_DESKTOP_ALLOW_SCHEDULED',
+        'XHS_COMMENT_COLLECTION_ENABLED',
+        'SQLITE_PERIODIC_LIFECYCLE_ENABLED',
+        'SQLITE_RETENTION_SCAN_ENABLED',
+      ].every((key) => process.env[key] === '0');
       return {
         transactionId,
         id: manifest.id,
@@ -169,16 +178,13 @@ function install({ release, manifest, database, environment = process.env }) {
           automaticDisabled:
             process.env.ENABLE_SCHEDULED_UPDATES === '0' &&
             process.env.DISABLE_SCHEDULED_UPDATES === '1' &&
-            [
-              'WECHAT2RSS_ACTIVE_SCHEDULE',
-              'WECHAT2RSS_ACTIVE_SCHEDULE_ENABLED',
-              'WECHAT2RSS_CACHE_SYNC_ENABLED',
-              'WECHAT2RSS_CACHE_MEDIA_ENABLED',
-              'WECHAT_DESKTOP_ALLOW_SCHEDULED',
-              'XHS_COMMENT_COLLECTION_ENABLED',
-              'SQLITE_PERIODIC_LIFECYCLE_ENABLED',
-              'SQLITE_RETENTION_SCAN_ENABLED',
-            ].every((k) => process.env[k] === '0'),
+            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '0' &&
+            otherAutomaticWorkDisabled,
+          scheduledUpdatesEnabled:
+            process.env.ENABLE_SCHEDULED_UPDATES === '1' &&
+            process.env.DISABLE_SCHEDULED_UPDATES === '0' &&
+            process.env.WECHAT2RSS_ACTIVE_SCHEDULE === '1' &&
+            otherAutomaticWorkDisabled,
         },
       };
     },

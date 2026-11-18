@@ -3,9 +3,73 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { XhsScheduledClock } from './xhs-scheduled-clock';
 import { XhsScheduledRunner } from './xhs-scheduled-runner';
-import { latestActiveRefreshRound } from '../feeds/active-refresh-schedule';
+import {
+  ActiveRefreshScheduler,
+  latestActiveRefreshRound,
+} from '../feeds/active-refresh-schedule';
 
 describe('scheduled creator clock and runner', () => {
+  it.each(['wechat', 'xiaohongshu'])(
+    'skips a retained pre-resume pending slot for %s',
+    async (channel) => {
+      const dir = await mkdtemp(path.join(tmpdir(), 'schedule-floor-test-'));
+      const db = path.join(dir, 'fixture.sqlite');
+      await writeFile(db, '');
+      const file = path.join(
+        dir,
+        channel === 'wechat'
+          ? '.wechat2rss-active-schedule.json'
+          : '.xiaohongshu-active-schedule.json',
+      );
+      const earlier = Date.parse('2026-10-31T01:15:00Z'),
+        cutoff = Date.parse('2026-10-31T02:00:00Z');
+      const old = JSON.stringify({
+        version: 1,
+        notBefore: 0,
+        pending: latestActiveRefreshRound(earlier, 0),
+      });
+      await writeFile(file, old);
+      const enqueue = jest.fn(async () => undefined);
+      const make = () =>
+        channel === 'wechat'
+          ? new ActiveRefreshScheduler(() => db, enqueue)
+          : new XhsScheduledClock(() => db, enqueue);
+      await make().tick(cutoff, cutoff);
+      expect(enqueue).not.toHaveBeenCalled();
+      const next = Date.parse('2026-10-31T06:00:00Z');
+      await make().tick(next, cutoff);
+      await make().tick(next + 1, cutoff);
+      expect(enqueue).toHaveBeenCalledTimes(1);
+    },
+  );
+  it('settles the slot with an explicit omission for a creator with unknown list history', async () => {
+    const service = {
+      scheduleCreatorPhase: jest.fn(
+        async (input: { creatorId: string; phase: 'basic' | 'media' }) =>
+          input.phase === 'basic'
+            ? { taskId: input.creatorId }
+            : { state: 'nothing-to-archive' },
+      ),
+      task: jest.fn(async () => ({ state: 'completed' })),
+    };
+    const db = {
+      xhsCreator: {
+        findMany: async () => [{ id: 'unknown' }, { id: 'eligible' }],
+      },
+    };
+    const runner = new XhsScheduledRunner(
+      db,
+      service,
+      undefined,
+      async () => new Set(['unknown']),
+    );
+    await expect(runner.run('2026-10-31/09:15')).resolves.toEqual({
+      outcome: 'settled-incomplete',
+    });
+    expect(
+      service.scheduleCreatorPhase.mock.calls.map(([input]) => input.creatorId),
+    ).toEqual(['eligible', 'eligible']);
+  });
   it('uses the existing Shanghai slots and observes a committed round once after restart', async () => {
     for (const [at, label] of [
       ['2026-10-31T01:15:00Z', '2026-10-31/09:15'],

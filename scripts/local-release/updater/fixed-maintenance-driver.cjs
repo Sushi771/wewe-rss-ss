@@ -146,7 +146,9 @@ async function runProfileInner(token, report) {
         proof.managedRuntime?.mode !== p.runtimeMode.kind ||
         proof.managedRuntime.recoveryHeld !== false ||
         proof.managedRuntime.xhsLive !== true ||
-        proof.managedRuntime.automaticDisabled !== true ||
+        (p.runtimeMode.kind === 'scheduled-dual-v1'
+          ? proof.managedRuntime.scheduledUpdatesEnabled !== true
+          : proof.managedRuntime.automaticDisabled !== true) ||
         proof.managedRuntime.localMode !== true
       )
         fail('FIXED_MANAGED_MODE_HEALTH_UNPROVEN');

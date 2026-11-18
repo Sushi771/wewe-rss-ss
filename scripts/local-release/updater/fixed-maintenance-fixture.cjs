@@ -467,7 +467,7 @@ server.listen(port,'127.0.0.1');
     ),
   );
   let runtimeMode;
-  if (options.manualMode) {
+  if (options.manualMode || options.scheduledDualMode) {
     const archives = {};
     for (const channel of ['wechat', 'xiaohongshu']) {
       const folder = path.join(
@@ -502,7 +502,10 @@ server.listen(port,'127.0.0.1');
         archived,
       );
     }
-    runtimeMode = { kind: 'manual-xhs-v1', channelArchives: archives };
+    runtimeMode = {
+      kind: options.scheduledDualMode ? 'scheduled-dual-v1' : 'manual-xhs-v1',
+      channelArchives: archives,
+    };
   }
   let previousCompletion;
   if (options.previousCompletion) {

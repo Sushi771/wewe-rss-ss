@@ -1,4 +1,4 @@
-import { assertChannelRunnable } from '../collection/channel-task-control';
+import { runChannelSchedule } from '../collection/channel-task-control';
 import {
   HttpException,
   HttpStatus,
@@ -139,11 +139,6 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       !activeRefreshScheduleEnabled(process.env)
     )
       return;
-    try {
-      await assertChannelRunnable('wechat');
-    } catch {
-      return;
-    }
     this.activeRefreshScheduler ??= new ActiveRefreshScheduler(
       () => {
         const raw = process.env.DATABASE_URL || '';
@@ -153,8 +148,12 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       (key) => this.trpcService.beginScheduledRefreshAll(key),
     );
     try {
-      await this.activeRefreshScheduler.tick(now);
-    } catch {
+      await runChannelSchedule('wechat', (notBefore) =>
+        this.activeRefreshScheduler!.tick(now, notBefore),
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('CHANNEL_'))
+        return;
       this.logger.warn(
         'Active refresh round deferred; durable queue and existing data retained.',
       );
