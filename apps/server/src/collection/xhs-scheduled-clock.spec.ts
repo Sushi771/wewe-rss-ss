@@ -180,7 +180,13 @@ describe('scheduled creator clock and runner', () => {
           scheduleCreatorPhase,
           task: async ({ taskId }) =>
             taskId === 'a'
-              ? { state: 'partial', failed: 0, remaining: 0, code }
+              ? {
+                  state: 'partial',
+                  failed: 0,
+                  remaining: 0,
+                  code,
+                  settling: code === 'XHS_DETAIL_OUTCOME_UNKNOWN',
+                }
               : { state: 'completed', failed: 0, remaining: 0 },
           archiveScheduled,
         },

@@ -172,3 +172,72 @@ it.each([
     }
   },
 );
+
+it('a stuck creator-local task cannot delay another managed subscription or bypass a shared owner', async () => {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'redbook-creator-lane-'));
+  const url = 'file:' + path.join(root, 'fixture.sqlite').replace(/\\/g, '/');
+  const db = new PrismaClient({ datasources: { db: { url } } });
+  const env = jest.replaceProperty(process, 'env', {
+    ...process.env,
+    WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+    WECHAT2RSS_RECOVERY_HOLD: '0',
+  });
+  try {
+    await applyFixtureMigrations(url);
+    await db.$executeRawUnsafe(
+      "INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id,enabled) VALUES('a','https://example.invalid/a','a','author-a',1),('b','https://example.invalid/b','b','author-b',1)",
+    );
+    const service: any = new XhsSubscriptionService(db as any, {} as any);
+    service.write = (_bytes: number, fn: any) => db.$transaction(fn);
+    // The manual lane never resolves. Its local archive has no source owner.
+    service.lane = new Promise<void>(() => {});
+    service.pending.set('archive-a', {
+      creatorId: 'a',
+      taskId: 'archive-a',
+      state: 'partial',
+    });
+    let complete: () => void;
+    const settled = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const run = jest
+      .spyOn(service, 'run')
+      .mockImplementation(async (task: any) => {
+        await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='completed',document=${JSON.stringify({ ...task, state: 'completed' })} WHERE id=${task.taskId}`;
+        service.pending.delete(task.taskId);
+        complete();
+      });
+    const runner = new XhsScheduledRunner(
+      { xhsCreator: { findMany: async () => [{ id: 'a' }, { id: 'b' }] } },
+      service,
+      undefined,
+      undefined,
+      true,
+    );
+    const round = '2026-10-31/09:15';
+    await expect(runner.run(round)).rejects.toThrow(
+      'XHS_SCHEDULE_TASK_PENDING',
+    );
+    await settled;
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0][0]).toMatchObject({ creatorId: 'b' });
+    await expect(runner.run(round)).rejects.toThrow(
+      'XHS_SCHEDULE_TASK_PENDING',
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+
+    await db.$executeRawUnsafe(
+      "UPDATE xhs_source_risk SET state='pending',owner='fixture-live-owner' WHERE id='source'",
+    );
+    await expect(runner.run('2026-10-31/14:00')).rejects.toThrow(
+      'XHS_SCHEDULE_TASK_PENDING',
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(
+      await db.$queryRawUnsafe('SELECT state,owner FROM xhs_source_risk'),
+    ).toEqual([{ state: 'pending', owner: 'fixture-live-owner' }]);
+  } finally {
+    env.restore();
+    await db.$disconnect();
+  }
+});

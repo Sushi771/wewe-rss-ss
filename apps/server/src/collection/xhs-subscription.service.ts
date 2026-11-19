@@ -433,6 +433,7 @@ export class XhsSubscriptionService implements OnModuleInit {
   >();
   private pending = new Map<string, Task>();
   private lane = Promise.resolve();
+  private readonly creatorRuns = new Map<string, Promise<void>>();
   private controllers = new Map<string, AbortController>();
   private uncertain = new Map<string, Task>();
   private reconciling = new Map<string, Promise<void>>();
@@ -1523,8 +1524,14 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if (checkpoint?.knownResponseAuthReviews)
       return reject('XHS_TASK_NOT_RESUMABLE');
-    if ([...this.uncertain.values()].some((t) => t.creatorId === creatorId))
-      return reject('XHS_TASK_RECEIPT_UNCERTAIN');
+    const managedClock =
+      process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' &&
+      scheduled?.phase === 'basic' &&
+      !scheduled.round.startsWith('batch/');
+    const uncertain = [...this.uncertain.values()].some(
+      (t) => t.creatorId === creatorId,
+    );
+    if (uncertain && !managedClock) return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     if (
       !scheduled &&
       [...this.pending.values()].some((t) => t.creatorId === creatorId)
@@ -1606,6 +1613,19 @@ export class XhsSubscriptionService implements OnModuleInit {
         collectDetails)
     )
       return reject('XHS_TASK_STATE_CHANGED');
+    if (
+      managedClock &&
+      (uncertain ||
+        [...this.pending.values()].some(
+          (other) => other.creatorId === creatorId && other.taskId !== t.taskId,
+        ))
+    )
+      return {
+        taskId: t.taskId,
+        creatorId,
+        state: 'deferred' as const,
+        code: 'XHS_SCHEDULE_TASK_ACTIVE',
+      };
     if (scheduled) {
       const admitted = await this.write(
         Buffer.byteLength(JSON.stringify(t)) + 4096,
@@ -1646,7 +1666,12 @@ export class XhsSubscriptionService implements OnModuleInit {
         },
       );
       if (admitted.kind === 'deferred')
-        return { taskId: t.taskId, creatorId, state: 'deferred' as const };
+        return {
+          taskId: t.taskId,
+          creatorId,
+          state: 'deferred' as const,
+          code: admitted.reason,
+        };
       if (admitted.kind === 'blocked')
         return {
           taskId: t.taskId,
@@ -1667,7 +1692,9 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.pending.delete(t.taskId);
       throw e;
     }
-    this.lane = this.lane
+    // Do not wait for a different creator's interactive archive or batch
+    // barrier. Shared source ownership and dispatch budgets still gate every call.
+    const work = (managedClock ? Promise.resolve() : this.lane)
       .then(async () => {
         if (startAfter && !(await startAfter)) {
           t.state = 'cancelled';
@@ -1679,11 +1706,26 @@ export class XhsSubscriptionService implements OnModuleInit {
           }
           return;
         }
-        return this.run(t, directory);
+        if (process.env.WEWE_MANAGED_RUNTIME_MODE !== 'scheduled-dual-v1')
+          return this.run(t, directory);
+        const previous = this.creatorRuns.get(creatorId) ?? Promise.resolve();
+        const run = previous.then(() => this.run(t, directory));
+        const tail = run.then(
+          () => undefined,
+          () => undefined,
+        );
+        this.creatorRuns.set(creatorId, tail);
+        try {
+          return await run;
+        } finally {
+          if (this.creatorRuns.get(creatorId) === tail)
+            this.creatorRuns.delete(creatorId);
+        }
       })
       .catch(() => {
         /* persisted checkpoint remains recoverable; do not replay */
       });
+    if (!managedClock) this.lane = work;
     return { taskId: t.taskId, creatorId };
   }
   private async loadTask(taskId: string): Promise<Task> {

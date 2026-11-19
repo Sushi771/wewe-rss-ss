@@ -46,19 +46,24 @@ describe('cache delta through original SQLite merge', () => {
     imageBlocked: blocked,
     coverage: 'recent-window',
   });
-  it('admits one source submission per slot, isolates uncertain targets and retains shared 429', async () => {
+  it('ends a hung source response, rotates the next slot and retains shared 429', async () => {
     const ids = [
       '1234567801',
       '1234567802',
       '1234567803',
       '1234567804',
       '1234567805',
+      '1234567806',
     ];
     const feeds = ids.map((id) => 'MP_WXS_' + id);
     const directory = path.join(root, '.collection-channel-control', 'wechat');
     const control = path.join(directory, 'state.json');
     const cachePath = path.join(root, 'active-vendor.db');
     const requests: string[] = [];
+    let notifyHang!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      notifyHang = resolve;
+    });
     const vendor = createServer((req, res) => {
       const url = new URL(req.url!, 'http://127.0.0.1');
       requests.push(url.pathname);
@@ -70,11 +75,19 @@ describe('cache delta through original SQLite merge', () => {
           }),
         );
       } else if (url.pathname === '/add/' + ids[2]) {
-        res.writeHead(503).end();
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write('{"err":');
+        notifyHang();
+        // Leave the response open until the actual client aborts it.
       } else if (url.pathname === '/add/' + ids[3]) {
         res.writeHead(429).end();
       } else {
-        res.end(JSON.stringify({ err: '', data: '/feed/' + ids[1] + '.xml' }));
+        res.end(
+          JSON.stringify({
+            err: '',
+            data: '/feed/' + url.pathname.slice(5) + '.xml',
+          }),
+        );
       }
     });
     await new Promise<void>((resolve) =>
@@ -92,6 +105,10 @@ describe('cache delta through original SQLite merge', () => {
     });
     let now = Date.now();
     const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const cutoff = jest
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation((ms) => realTimeout(ms === 10000 ? 1200 : ms));
     try {
       const { DatabaseSync } = createRequire(__filename)('node:sqlite');
       const cache = new DatabaseSync(cachePath);
@@ -168,17 +185,34 @@ describe('cache delta through original SQLite merge', () => {
         'source-cooldown',
       );
       now += 31_000;
-      await expect(managedWechatRefresh(prisma, feeds[2])).resolves.toBe(
-        'unknown',
+      const hangingSlot = { key: 'b'.repeat(64), due: now - 1000 };
+      const hanging = managedWechatRefresh(prisma, feeds[2], hangingSlot);
+      await Promise.race([
+        hung,
+        hanging.then((result) => {
+          throw Error('Expected the partial response; got ' + result);
+        }),
+      ]);
+      await expect(assertChannelRunnable('xiaohongshu')).resolves.toMatchObject(
+        { paused: false },
       );
+      await expect(hanging).resolves.toBe('unknown');
+      await expect(
+        managedWechatRefresh(prisma, feeds[4], hangingSlot),
+      ).resolves.toBe('scheduled-closed');
       now += 31_000;
-      await expect(managedWechatRefresh(prisma, feeds[2])).resolves.toBe(
-        'retained-unknown',
-      );
+      const nextSlot = { key: 'c'.repeat(64), due: now - 1000 };
+      await expect(
+        managedWechatRefresh(prisma, feeds[2], nextSlot),
+      ).resolves.toBe('retained-unknown');
+      await expect(
+        managedWechatRefresh(prisma, feeds[4], nextSlot),
+      ).resolves.toBe('accepted');
+      now += 31_000;
       await expect(managedWechatRefresh(prisma, feeds[3])).resolves.toBe(
         'restricted',
       );
-      await expect(managedWechatRefresh(prisma, feeds[4])).resolves.toBe(
+      await expect(managedWechatRefresh(prisma, feeds[5])).resolves.toBe(
         'restricted',
       );
       expect(requests).toEqual([
@@ -186,6 +220,8 @@ describe('cache delta through original SQLite merge', () => {
         '/add/' + ids[1],
         '/login/list',
         '/add/' + ids[2],
+        '/login/list',
+        '/add/' + ids[4],
         '/login/list',
         '/add/' + ids[3],
       ]);
@@ -201,14 +237,16 @@ describe('cache delta through original SQLite merge', () => {
         { paused: false },
       );
     } finally {
+      cutoff.mockRestore();
       clock.mockRestore();
       env.restore();
+      vendor.closeAllConnections();
       await new Promise<void>((resolve) => vendor.close(() => resolve()));
       await fs.unlink(control).catch(() => undefined);
       await fs
         .unlink(path.join(directory, 'active-refresh-v1.json'))
         .catch(() => undefined);
-      await prisma.$executeRaw`DELETE FROM refresh_submission_claims WHERE mp_id IN (${feeds[0]},${feeds[1]},${feeds[2]},${feeds[3]},${feeds[4]})`;
+      await prisma.$executeRaw`DELETE FROM refresh_submission_claims WHERE mp_id IN (${feeds[0]},${feeds[1]},${feeds[2]},${feeds[3]},${feeds[4]},${feeds[5]})`;
       await prisma.feed.deleteMany({ where: { id: { in: feeds } } });
       await prisma.$executeRawUnsafe(
         "UPDATE Wechat2RssSourceGate SET state='idle', token=NULL,status=NULL WHERE id=1",

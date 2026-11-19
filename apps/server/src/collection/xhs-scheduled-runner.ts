@@ -4,6 +4,7 @@ type State = {
   failed?: number;
   remaining?: number;
   code?: string;
+  settling?: boolean;
 };
 type Service = {
   scheduleCreatorPhase(input: {
@@ -11,7 +12,12 @@ type Service = {
     creatorId: string;
     phase: 'basic' | 'media';
     batch?: number;
-  }): Promise<{ taskId?: string; state?: string; scheduledState?: string }>;
+  }): Promise<{
+    taskId?: string;
+    state?: string;
+    scheduledState?: string;
+    code?: string;
+  }>;
   task(input: { taskId: string }): Promise<State>;
   archiveScheduled?(
     round: string,
@@ -64,18 +70,27 @@ export class XhsScheduledRunner {
         });
         if (basic.state === 'deferred') {
           pending = true;
+          if (this.metadataOnly && basic.code === 'XHS_SCHEDULE_TASK_ACTIVE')
+            continue;
           break;
         }
         if (basic.state === 'blocked') {
+          if (
+            this.metadataOnly &&
+            [
+              'XHS_SCHEDULE_CREATOR_DISABLED',
+              'XHS_SCHEDULE_HISTORY_PROFILE_REVIEW_REQUIRED',
+            ].includes(basic.code ?? '')
+          ) {
+            incomplete = true;
+            visited++;
+            continue;
+          }
           blocked = true;
           break;
         }
         if (!basic.taskId) throw Error('XHS_SCHEDULE_ADMISSION_UNKNOWN');
         const b = await this.service.task({ taskId: basic.taskId });
-        if (['queued', 'running'].includes(b.state)) {
-          pending = true;
-          break;
-        }
         const historyPartial =
           b.state === 'partial' &&
           b.code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED' &&
@@ -87,11 +102,20 @@ export class XhsScheduledRunner {
           ) &&
           !!b.failed &&
           b.remaining === 0;
+        const locallyFinished =
+          b.state === 'completed' || historyPartial || itemPartial;
+        if (b.state === 'queued' || b.state === 'running') {
+          pending = true;
+          break;
+        }
+        if (this.metadataOnly && b.settling && locallyFinished) {
+          // The durable terminal result is safe; its local cleanup can finish
+          // while the next creator goes through normal source admission.
+          pending = true;
+          continue;
+        }
         if (historyPartial || itemPartial) incomplete = true;
-        if (
-          (b.state !== 'completed' && !historyPartial && !itemPartial) ||
-          (b.failed && !itemPartial)
-        ) {
+        if (!locallyFinished || (b.failed && !itemPartial)) {
           incomplete = true;
           break;
         }
