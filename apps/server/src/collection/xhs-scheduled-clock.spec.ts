@@ -149,6 +149,67 @@ describe('scheduled creator clock and runner', () => {
       );
     },
   );
+  it.each([
+    'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED',
+    'XHS_DETAIL_OUTCOME_UNKNOWN',
+  ])(
+    'managed metadata refresh isolates safe local omissions and still stops unknown: %s',
+    async (code) => {
+      const round = '2026-10-31/09:15';
+      const scheduleCreatorPhase = jest.fn(
+        async (input: { creatorId: string; phase: string }) => ({
+          taskId: input.creatorId,
+        }),
+      );
+      const archiveScheduled = jest.fn(async () => ({ incomplete: true }));
+      const collectScheduled = jest.fn(async () => ({
+        pending: false,
+        incomplete: true,
+      }));
+      const runner = new XhsScheduledRunner(
+        {
+          xhsCreator: {
+            findMany: async () => [
+              { id: 'archived' },
+              { id: 'a' },
+              { id: 'b' },
+            ],
+          },
+        },
+        {
+          scheduleCreatorPhase,
+          task: async ({ taskId }) =>
+            taskId === 'a'
+              ? { state: 'partial', failed: 0, remaining: 0, code }
+              : { state: 'completed', failed: 0, remaining: 0 },
+          archiveScheduled,
+        },
+        { collectScheduled },
+        async () => new Set(['archived']),
+        true,
+      );
+      if (code === 'XHS_SCHEDULE_HISTORY_REVIEW_REQUIRED') {
+        await expect(runner.run(round)).resolves.toEqual({
+          outcome: 'settled-incomplete',
+        });
+        expect(
+          scheduleCreatorPhase.mock.calls.map(([x]) => x.creatorId),
+        ).toEqual(['a', 'b']);
+      } else {
+        await expect(runner.run(round)).rejects.toThrow(
+          'XHS_SCHEDULE_ROUND_INCOMPLETE',
+        );
+        expect(
+          scheduleCreatorPhase.mock.calls.map(([x]) => x.creatorId),
+        ).toEqual(['a']);
+      }
+      expect(
+        scheduleCreatorPhase.mock.calls.every(([x]) => x.phase === 'basic'),
+      ).toBe(true);
+      expect(archiveScheduled).not.toHaveBeenCalled();
+      expect(collectScheduled).not.toHaveBeenCalled();
+    },
+  );
   it('stops on an unclassified account admission failure', async () => {
     const service = {
       scheduleCreatorPhase: jest.fn(

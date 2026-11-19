@@ -36,6 +36,7 @@ export class XhsScheduledRunner {
       }>;
     },
     private readonly excludedCreators?: () => Promise<ReadonlySet<string>>,
+    private readonly metadataOnly = false,
   ) {}
   async run(round: string) {
     const authors = await this.db.xhsCreator.findMany({
@@ -93,6 +94,12 @@ export class XhsScheduledRunner {
         ) {
           incomplete = true;
           break;
+        }
+        // Managed subscription refresh ends after the verified basic phase.
+        // Export and other optional work cannot gate the next subscription.
+        if (this.metadataOnly) {
+          visited++;
+          continue;
         }
         let mediaPending = false,
           mediaBlocked = false;
@@ -171,7 +178,10 @@ export class XhsScheduledRunner {
     if (blocked) throw Error('XHS_SCHEDULE_SOURCE_BLOCKED');
     if (pending) throw Error('XHS_SCHEDULE_TASK_PENDING');
     if (incomplete) {
-      if (commentOmissions > 0 && visited + historyOmissions === authors.length)
+      if (
+        (this.metadataOnly || commentOmissions > 0) &&
+        visited + historyOmissions === authors.length
+      )
         return { outcome: 'settled-incomplete' as const };
       throw Error('XHS_SCHEDULE_ROUND_INCOMPLETE');
     }

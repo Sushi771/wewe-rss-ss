@@ -33,12 +33,14 @@ export class XhsScheduledService {
         if (!raw.startsWith('file:')) throw Error('SQLITE_REQUIRED');
         return decodeURIComponent(raw.slice(5).split('?')[0]);
       },
-      (round) =>
-        new XhsScheduledRunner(
+      (round) => {
+        const managed =
+          process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1';
+        return new XhsScheduledRunner(
           this.db,
           this.subscriptions,
           this.engagement,
-          process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1'
+          managed
             ? async () => {
                 // A historical unknown author-context or list request closes
                 // that author for this mode. Per-note fences still govern all others.
@@ -50,7 +52,9 @@ export class XhsScheduledService {
                 return new Set(rows.map((row) => row.creator_id));
               }
             : undefined,
-        ).run(round),
+          managed,
+        ).run(round);
+      },
     );
     try {
       await runChannelSchedule('xiaohongshu', (notBefore) =>
