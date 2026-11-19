@@ -5,6 +5,7 @@ import {
   restrictionEvidence,
 } from './xhs-history-handoff';
 import { scheduledReviewedEvidence } from './xhs-scheduled-review-scope';
+import { XHS_SCHEDULE_UNSENT } from './xhs-scheduled-runner';
 
 type Phase = 'basic' | 'media';
 type Task = {
@@ -68,6 +69,90 @@ export function scheduledTaskId(
   const id = hex.join('');
   return `${id.slice(0, 8)}-${id.slice(8, 12)}-${id.slice(12, 16)}-${id.slice(16, 20)}-${id.slice(20)}`;
 }
+export function managedBasicRound(
+  schedule: { round: string; phase: Phase } | undefined,
+) {
+  return (
+    process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' &&
+    schedule?.phase === 'basic' &&
+    /^\d{4}-\d{2}-\d{2}\/(09:15|14:00|17:30)$/.test(schedule.round)
+  );
+}
+
+const initialBasicFields = new Set([
+  'taskId',
+  'creatorId',
+  'kind',
+  'state',
+  'schedule',
+  'collectDetails',
+  'basicOnly',
+  'collectionStage',
+  'collectionScope',
+  'reuseCompleteCache',
+  'noteIds',
+  'items',
+  'total',
+  'completed',
+  'skipped',
+  'failed',
+  'remaining',
+  'message',
+  'historyExcludedIds',
+  'code',
+]);
+
+/** An initial basic checkpoint has no context-attempt or source receipt. */
+export function initialManagedBasic(
+  task: Task & {
+    schedule?: { round: string; phase: Phase };
+    basicOnly?: boolean;
+    collectionStage?: string;
+    collectionScope?: string;
+    reuseCompleteCache?: boolean;
+    items?: Record<string, unknown>;
+    total?: number;
+    completed?: number;
+    failed?: number;
+    skipped?: number;
+    remaining?: number;
+    code?: string;
+  },
+): boolean {
+  return (
+    managedBasicRound(task.schedule) &&
+    typeof task.creatorId === 'string' &&
+    task.creatorId.length > 0 &&
+    task.creatorId.length <= 300 &&
+    task.taskId ===
+      scheduledTaskId(task.schedule!.round, task.creatorId, 'basic') &&
+    Object.keys(task.schedule!).length === 2 &&
+    task.kind === 'list' &&
+    task.collectDetails === true &&
+    task.basicOnly === true &&
+    task.collectionStage === 'listing' &&
+    task.collectionScope === 'all' &&
+    task.reuseCompleteCache === false &&
+    Array.isArray(task.noteIds) &&
+    task.noteIds.length === 0 &&
+    !!task.items &&
+    !Array.isArray(task.items) &&
+    typeof task.items === 'object' &&
+    Object.keys(task.items).length === 0 &&
+    [
+      task.total,
+      task.completed,
+      task.skipped,
+      task.failed,
+      task.remaining,
+    ].every((count) => count === 0) &&
+    (task.code === undefined || task.code === XHS_SCHEDULE_UNSENT) &&
+    Object.entries(task).every(
+      ([key, value]) => value === undefined || initialBasicFields.has(key),
+    )
+  );
+}
+
 /** Caller MUST run this inside the existing serialized incremental write transaction. */
 export async function admitScheduledXhs(
   tx: Tx,
@@ -79,6 +164,7 @@ export async function admitScheduledXhs(
     now: number;
     batch?: number;
     batchCandidate?: true;
+    settleUnownedQueue?: boolean;
     preBlocked?:
       | 'XHS_SCHEDULE_SELECTION_LIMIT'
       | 'XHS_SCHEDULE_MEDIA_BINDING_REQUIRED';
@@ -127,6 +213,25 @@ export async function admitScheduledXhs(
         JSON.stringify(old.noteIds) !== JSON.stringify(task.noteIds))
     )
       throw Error('XHS_SCHEDULE_BINDING_MISMATCH');
+    // The in-process schedule owner serializes admission for this exact id.
+    // Only the unchanged initial row can be settled when that owner is absent.
+    if (
+      input.settleUnownedQueue &&
+      existing[0].state === 'queued' &&
+      initialManagedBasic(old)
+    ) {
+      const stopped = {
+        ...old,
+        state: 'cancelled',
+        code: XHS_SCHEDULE_UNSENT,
+        message: '本轮未发送来源请求，任务已结束。',
+      };
+      if (
+        (await tx.$executeRaw`UPDATE xhs_subscription_tasks SET state='cancelled',document=${JSON.stringify(stopped)},updated_at=${BigInt(now)} WHERE id=${taskId} AND creator_id=${creatorId} AND state='queued' AND document=${existing[0].document}`) !==
+        1
+      )
+        throw Error('XHS_SCHEDULE_CONCURRENT_ADMISSION');
+    }
     return { kind: 'existing', taskId };
   }
   // The reserved item is already bound in this same transaction. Admission

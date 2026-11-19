@@ -3,7 +3,10 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
-import { XhsScheduledRunner } from './xhs-scheduled-runner';
+import {
+  XhsScheduledRunner,
+  XHS_SCHEDULE_UNSENT,
+} from './xhs-scheduled-runner';
 import { XhsSubscriptionService } from './xhs-subscription.service';
 import { applyFixtureMigrations } from '../../test/redbook-isolated/fixture-migrations';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
@@ -241,3 +244,253 @@ it('a stuck creator-local task cannot delay another managed subscription or bypa
     await db.$disconnect();
   }
 });
+
+function latch() {
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { ready, release };
+}
+
+async function isolatedManagedCreators(
+  work: (
+    db: PrismaClient,
+    service: XhsSubscriptionService,
+    runner: XhsScheduledRunner,
+  ) => Promise<void>,
+) {
+  const root = await fs.mkdtemp(path.join(tmpdir(), 'redbook-managed-local-'));
+  const url = 'file:' + path.join(root, 'fixture.sqlite').replace(/\\/g, '/');
+  const db = new PrismaClient({ datasources: { db: { url } } });
+  const env = jest.replaceProperty(process, 'env', {
+    ...process.env,
+    WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+    WECHAT2RSS_RECOVERY_HOLD: '0',
+  });
+  try {
+    await applyFixtureMigrations(url);
+    await db.$executeRawUnsafe(
+      "INSERT INTO xhs_creators(id,profile_url,display_name,external_author_id,enabled) VALUES('a','https://example.invalid/a','a','author-a',1),('b','https://example.invalid/b','b','author-b',1)",
+    );
+    const service = new XhsSubscriptionService(db as any, {} as any);
+    (service as any).write = (_bytes: number, fn: any) => db.$transaction(fn);
+    const runner = new XhsScheduledRunner(
+      { xhsCreator: { findMany: async () => [{ id: 'a' }, { id: 'b' }] } },
+      service,
+      undefined,
+      undefined,
+      true,
+    );
+    await work(db, service, runner);
+  } finally {
+    env.restore();
+    await db.$disconnect();
+  }
+}
+
+const basicRound = '2026-10-31/09:15';
+const scheduleA = {
+  round: basicRound,
+  creatorId: 'a',
+  phase: 'basic' as const,
+};
+const basicA = scheduledTaskId(basicRound, 'a', 'basic');
+const basicB = scheduledTaskId(basicRound, 'b', 'basic');
+
+it.each(['existing', 'restart'] as const)(
+  'keeps a live queue serialized and settles only an initial unowned queue (%s)',
+  async (mode) =>
+    isolatedManagedCreators(async (db, service, runner) => {
+      const local = service as any;
+      const stop = latch(),
+        stopped = latch(),
+        next = latch(),
+        inserted = latch(),
+        registered = latch();
+      const write = local.write.bind(local);
+      local.write = async (bytes: number, work: any) => {
+        const result = await write(bytes, work);
+        if (result?.kind === 'created' && result.taskId === basicA) {
+          inserted.release();
+          await registered.ready;
+        }
+        return result;
+      };
+      const run = jest
+        .spyOn(local, 'run')
+        .mockImplementation(async (t: any) => {
+          if (t.creatorId === 'a') {
+            await stop.ready;
+            // Synthetic worker loses local ownership before entering runTask.
+            local.pending.delete(t.taskId);
+            stopped.release();
+            return;
+          }
+          await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='completed',document=${JSON.stringify({ ...t, state: 'completed' })} WHERE id=${t.taskId}`;
+          local.pending.delete(t.taskId);
+          next.release();
+        });
+
+      try {
+        const first = service.scheduleCreatorPhase(scheduleA);
+        await inserted.ready;
+        // The durable initial row exists before pending.set. It still has an
+        // admission owner and cannot be cancelled by a concurrent observation.
+        await expect(runner.run(basicRound)).rejects.toThrow(
+          'XHS_SCHEDULE_TASK_PENDING',
+        );
+        expect(run).not.toHaveBeenCalled();
+        registered.release();
+        await first;
+        await expect(runner.run(basicRound)).rejects.toThrow(
+          'XHS_SCHEDULE_TASK_PENDING',
+        );
+        await expect(service.task({ taskId: basicA })).resolves.toMatchObject({
+          state: 'queued',
+          settling: true,
+        });
+        await expect(service.task({ taskId: basicB })).rejects.toThrow(
+          'XHS_TASK_NOT_FOUND',
+        );
+
+        stop.release();
+        await stopped.ready;
+        if (mode === 'restart') await service.onModuleInit();
+        else {
+          const [record] = await db.$queryRaw<
+            Array<{ document: string }>
+          >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicA}`;
+          const withAttempt = JSON.stringify({
+            ...JSON.parse(record.document),
+            scheduledContext: {
+              authorId: 'author-a',
+              state: 'started',
+              used: 1,
+            },
+          });
+          await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${withAttempt} WHERE id=${basicA}`;
+          await expect(runner.run(basicRound)).rejects.toThrow(
+            'XHS_SCHEDULE_TASK_PENDING',
+          );
+          expect(run).toHaveBeenCalledTimes(1);
+          const [unchanged] = await db.$queryRaw<
+            Array<{ document: string }>
+          >`SELECT document FROM xhs_subscription_tasks WHERE id=${basicA}`;
+          expect(unchanged.document).toBe(withAttempt);
+          await db.$executeRaw`UPDATE xhs_subscription_tasks SET document=${record.document} WHERE id=${basicA}`;
+        }
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_source_risk SET state='pending',owner='shared-fixture' WHERE id='source'",
+        );
+        await expect(runner.run(basicRound)).rejects.toThrow(
+          'XHS_SCHEDULE_TASK_PENDING',
+        );
+        await expect(service.task({ taskId: basicA })).resolves.toMatchObject({
+          state: 'cancelled',
+          code: XHS_SCHEDULE_UNSENT,
+          settling: false,
+          resumable: false,
+        });
+        await expect(service.resumeTask({ taskId: basicA })).rejects.toThrow(
+          'XHS_TASK_NOT_RESUMABLE',
+        );
+        expect(run).toHaveBeenCalledTimes(1);
+        expect(
+          await db.$queryRawUnsafe('SELECT state,owner FROM xhs_source_risk'),
+        ).toEqual([{ state: 'pending', owner: 'shared-fixture' }]);
+
+        await db.$executeRawUnsafe(
+          "UPDATE xhs_source_risk SET state='clear',owner=NULL WHERE id='source'",
+        );
+        await runner.run(basicRound).catch((error) => {
+          expect(error.message).toBe('XHS_SCHEDULE_TASK_PENDING');
+        });
+        await next.ready;
+        await expect(runner.run(basicRound)).resolves.toEqual({
+          outcome: 'settled-incomplete',
+        });
+        expect(run.mock.calls.map(([task]) => (task as any).creatorId)).toEqual(
+          ['a', 'b'],
+        );
+      } finally {
+        registered.release();
+        stop.release();
+      }
+    }),
+);
+
+it('lets the next creator proceed only after a cancelled local worker actually exits', async () =>
+  isolatedManagedCreators(async (db, service, runner) => {
+    const local = service as any;
+    const savedRunning = latch(),
+      releaseLocal = latch(),
+      stopped = latch(),
+      next = latch();
+    const persist = local.persist.bind(local);
+    jest.spyOn(local, 'persist').mockImplementation(async (task: any) => {
+      const hold = task.taskId === basicA && task.state === 'running';
+      await persist(task);
+      if (hold) {
+        savedRunning.release();
+        await releaseLocal.ready;
+      }
+    });
+    const runTask = local.runTask.bind(local);
+    const sourceBoundary = jest.spyOn(local, 'prepareScheduledContext');
+    const run = jest
+      .spyOn(local, 'runTask')
+      .mockImplementation(async (t: any) => {
+        if (t.creatorId === 'a') {
+          try {
+            await runTask(t);
+          } finally {
+            stopped.release();
+          }
+          return;
+        }
+        await db.$executeRaw`UPDATE xhs_subscription_tasks SET state='completed',document=${JSON.stringify({ ...t, state: 'completed' })} WHERE id=${t.taskId}`;
+        local.pending.delete(t.taskId);
+        next.release();
+      });
+
+    try {
+      await service.scheduleCreatorPhase(scheduleA);
+      await savedRunning.ready;
+      await expect(runner.run(basicRound)).rejects.toThrow(
+        'XHS_SCHEDULE_TASK_PENDING',
+      );
+      await expect(
+        service.cancelTask({ taskId: basicA }),
+      ).resolves.toMatchObject({
+        state: 'cancelled',
+        settling: true,
+      });
+      await expect(runner.run(basicRound)).rejects.toThrow(
+        'XHS_SCHEDULE_TASK_PENDING',
+      );
+      expect(run).toHaveBeenCalledTimes(1);
+      releaseLocal.release();
+      await stopped.ready;
+      await expect(service.task({ taskId: basicA })).resolves.toMatchObject({
+        state: 'cancelled',
+        code: XHS_SCHEDULE_UNSENT,
+        settling: false,
+      });
+      expect(sourceBoundary).not.toHaveBeenCalled();
+
+      await runner.run(basicRound).catch((error) => {
+        expect(error.message).toBe('XHS_SCHEDULE_TASK_PENDING');
+      });
+      await next.ready;
+      await expect(runner.run(basicRound)).resolves.toEqual({
+        outcome: 'settled-incomplete',
+      });
+      expect(run.mock.calls.map(([task]) => (task as any).creatorId)).toEqual([
+        'a',
+        'b',
+      ]);
+    } finally {
+      releaseLocal.release();
+    }
+  }));

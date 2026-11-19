@@ -32,7 +32,13 @@ import {
   terminalStartedDetail,
 } from './xhs-task-source-fence';
 import { xhsMediaTaskStore } from './xhs-media-task-store';
-import { admitScheduledXhs, scheduledTaskId } from './xhs-scheduled-admission';
+import {
+  admitScheduledXhs,
+  scheduledTaskId,
+  initialManagedBasic,
+  managedBasicRound,
+} from './xhs-scheduled-admission';
+import { XHS_SCHEDULE_UNSENT } from './xhs-scheduled-runner';
 import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
 import { TRPCError } from '@trpc/server';
 import { createHash, randomUUID } from 'node:crypto';
@@ -432,6 +438,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     }
   >();
   private pending = new Map<string, Task>();
+  private readonly managedBasicAdmissions = new Set<string>();
   private lane = Promise.resolve();
   private readonly creatorRuns = new Map<string, Promise<void>>();
   private controllers = new Map<string, AbortController>();
@@ -550,8 +557,8 @@ export class XhsSubscriptionService implements OnModuleInit {
   private async recoverInterrupted() {
     // A single local backend owns execution. Restart never silently replays network work.
     const rows = await this.db.$queryRaw<
-      Array<{ document: string }>
-    >`SELECT document FROM xhs_subscription_tasks WHERE state IN ('queued', 'running')`;
+      Array<{ state: string; document: string }>
+    >`SELECT state,document FROM xhs_subscription_tasks WHERE state IN ('queued', 'running')`;
     let recoveryFailed = false;
     for (const row of rows) {
       const task = JSON.parse(row.document) as Task;
@@ -564,9 +571,19 @@ export class XhsSubscriptionService implements OnModuleInit {
         )
       )
         continue;
-      task.state = 'blocked';
-      task.code = 'XHS_TASK_INTERRUPTED';
-      task.message = '任务被中断，请重新选择剩余项目。';
+      if (
+        row.state === 'queued' &&
+        task.state === 'queued' &&
+        initialManagedBasic(task)
+      ) {
+        task.state = 'cancelled';
+        task.code = XHS_SCHEDULE_UNSENT;
+        task.message = '本轮未发送来源请求，任务已结束。';
+      } else {
+        task.state = 'blocked';
+        task.code = 'XHS_TASK_INTERRUPTED';
+        task.message = '任务被中断，请重新选择剩余项目。';
+      }
       try {
         await this.persist(task);
       } catch {
@@ -1097,13 +1114,30 @@ export class XhsSubscriptionService implements OnModuleInit {
     phase: 'basic' | 'media';
     batch?: number;
   }) {
-    const creator = await this.creator(input.creatorId);
-    if (this.source?.withScheduledReview)
-      return this.source.withScheduledReview(
-        { ...input, authorId: creator.externalAuthorId! },
-        () => this.scheduleCreatorPhaseAdmitted(input),
-      );
-    return this.scheduleCreatorPhaseAdmitted(input);
+    const admit = async () => {
+      const creator = await this.creator(input.creatorId);
+      if (this.source?.withScheduledReview)
+        return this.source.withScheduledReview(
+          { ...input, authorId: creator.externalAuthorId! },
+          () => this.scheduleCreatorPhaseAdmitted(input),
+        );
+      return this.scheduleCreatorPhaseAdmitted(input);
+    };
+    if (!managedBasicRound(input)) return admit();
+    const id = scheduledTaskId(input.round, input.creatorId, 'basic');
+    if (this.managedBasicAdmissions.has(id))
+      return {
+        taskId: id,
+        creatorId: input.creatorId,
+        state: 'deferred' as const,
+      };
+    // This covers the gap between the committed initial row and pending.set.
+    this.managedBasicAdmissions.add(id);
+    try {
+      return await admit();
+    } finally {
+      this.managedBasicAdmissions.delete(id);
+    }
   }
   private async scheduleCreatorPhaseAdmitted(input: {
     round: string;
@@ -1524,10 +1558,7 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (!this.source) return reject('XHS_SOURCE_UNCONFIGURED');
     if (checkpoint?.knownResponseAuthReviews)
       return reject('XHS_TASK_NOT_RESUMABLE');
-    const managedClock =
-      process.env.WEWE_MANAGED_RUNTIME_MODE === 'scheduled-dual-v1' &&
-      scheduled?.phase === 'basic' &&
-      !scheduled.round.startsWith('batch/');
+    const managedClock = managedBasicRound(scheduled);
     const uncertain = [...this.uncertain.values()].some(
       (t) => t.creatorId === creatorId,
     );
@@ -1657,6 +1688,11 @@ export class XhsSubscriptionService implements OnModuleInit {
             task: t,
             now: Date.now(),
             ...(batchItem ? { batchCandidate: true as const } : {}),
+            settleUnownedQueue:
+              managedClock &&
+              this.managedBasicAdmissions.has(t.taskId) &&
+              !this.pending.has(t.taskId) &&
+              !this.uncertain.has(t.taskId),
           });
           if (batchItem && result.kind === 'deferred')
             await tx.$executeRaw`UPDATE xhs_refresh_batch_items SET state='queued',operation_id=NULL WHERE batch_id=${batchItem.batchId} AND position=${batchItem.position} AND state='reserved' AND operation_id=${t.taskId}`;
@@ -2017,7 +2053,9 @@ export class XhsSubscriptionService implements OnModuleInit {
           ? undefined
           : t.code === 'XHS_TASK_RECEIPT_UNCERTAIN'
             ? 'XHS_TASK_CHECKPOINT_RECONCILED'
-            : t.code,
+            : t.code === XHS_SCHEDULE_UNSENT && !initialManagedBasic(t)
+              ? 'XHS_TASK_RECEIPT_UNCERTAIN'
+              : t.code,
       message: uncertain
         ? '任务回执尚未核实；未重放任何动作，请重新读取状态。'
         : reconciledComplete
@@ -2032,6 +2070,7 @@ export class XhsSubscriptionService implements OnModuleInit {
         !t.sourceActive &&
         !t.sourceUnknowns?.length &&
         t.code !== 'XHS_DETAIL_OUTCOME_UNKNOWN' &&
+        t.code !== XHS_SCHEDULE_UNSENT &&
         !t.supersededByTaskId &&
         !this.pending.has(t.taskId) &&
         (t.kind === 'list' || t.total > t.completed + t.skipped) &&
@@ -2127,7 +2166,10 @@ export class XhsSubscriptionService implements OnModuleInit {
     if (this.uncertain.has(input.taskId))
       return reject('XHS_TASK_RECEIPT_UNCERTAIN');
     const previous = await this.loadTask(input.taskId);
-    if (previous.knownResponseAuthReviews)
+    if (
+      previous.knownResponseAuthReviews ||
+      previous.code === XHS_SCHEDULE_UNSENT
+    )
       return reject('XHS_TASK_NOT_RESUMABLE');
     if (previous.supersededByTaskId) return reject('XHS_TASK_SUPERSEDED');
     if (
@@ -2192,6 +2234,8 @@ export class XhsSubscriptionService implements OnModuleInit {
     await this.readyForMutation();
     const t = this.pending.get(input.taskId);
     if (t && active(t)) {
+      if (t.state === 'queued' && initialManagedBasic(t))
+        t.code = XHS_SCHEDULE_UNSENT;
       t.state = 'cancelled';
       this.controllers.get(t.taskId)?.abort();
       t.message = '已取消；当前原子保存结束后停止。';
@@ -2319,6 +2363,7 @@ export class XhsSubscriptionService implements OnModuleInit {
       this.pending.delete(t.taskId);
       return;
     }
+    let enteredScheduledContext = false;
     try {
       this.controllers.set(t.taskId, new AbortController());
       const creator = await this.creator(t.creatorId);
@@ -2354,12 +2399,17 @@ export class XhsSubscriptionService implements OnModuleInit {
         fullHistoryContext.getStore() &&
         t.collectDetails &&
         !t.reuseCompleteCache
-      )
+      ) {
+        enteredScheduledContext = true;
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
+      }
       // List-only batches need the same once-per-round, durable profile reparse
       // after restart/expiry. It remains inside the admitted task/source scope.
-      if (t.schedule?.phase === 'basic')
+      if (t.schedule?.phase === 'basic') {
+        if (!active(t)) return;
+        enteredScheduledContext = true;
         await this.prepareScheduledContext(t, creator.externalAuthorId!);
+      }
       if (t.kind === 'list' && t.collectionStage !== 'details') {
         await this.updateList(t, creator);
         if (
@@ -3324,6 +3374,12 @@ export class XhsSubscriptionService implements OnModuleInit {
       }
     } finally {
       try {
+        if (
+          !enteredScheduledContext &&
+          t.state === 'cancelled' &&
+          initialManagedBasic(t)
+        )
+          t.code = XHS_SCHEDULE_UNSENT;
         await this.persist(t);
       } finally {
         this.pending.delete(t.taskId);

@@ -1,3 +1,5 @@
+export const XHS_SCHEDULE_UNSENT = 'XHS_SCHEDULE_CANCELLED_BEFORE_DISPATCH';
+
 /** The clock callback retries observation, never a source request: admission is keyed by round/creator/phase. */
 type State = {
   state: string;
@@ -104,7 +106,24 @@ export class XhsScheduledRunner {
           b.remaining === 0;
         const locallyFinished =
           b.state === 'completed' || historyPartial || itemPartial;
-        if (b.state === 'queued' || b.state === 'running') {
+        if (
+          this.metadataOnly &&
+          b.state === 'cancelled' &&
+          b.code === XHS_SCHEDULE_UNSENT
+        ) {
+          if (b.settling !== false) {
+            pending = true;
+            break;
+          }
+          incomplete = true;
+          visited++;
+          continue;
+        }
+        if (
+          b.state === 'queued' ||
+          b.state === 'running' ||
+          (this.metadataOnly && b.state === 'cancelled' && b.settling)
+        ) {
           pending = true;
           break;
         }
