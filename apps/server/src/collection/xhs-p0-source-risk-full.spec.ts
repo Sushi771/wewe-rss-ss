@@ -87,6 +87,32 @@ describe('durable synthetic source risk fence', () => {
     ).rejects.toMatchObject({ reason: 'transport' });
     expect(transport).toHaveBeenCalledTimes(1);
   });
+  it.each([
+    [403, { code: -100 }, 'permission'],
+    [461, { code: -101 }, 'unknown_rejection'],
+    [200, { code: -100, msg: 'captcha required' }, 'verification'],
+    [200, { code: -100 }, 'authentication'],
+    [401, {}, 'authentication'],
+  ])(
+    'preserves the detail stop for HTTP %i with body %j',
+    async (status, body, reason) => {
+      const transport = jest.fn(async (request) => ({
+        status,
+        url: request.url,
+        body,
+      }));
+      const cookies = jest.fn(() => ({
+        a1: 'synthetic-a1',
+        web_session: 'synthetic-session',
+      }));
+      const client = new RedbookClient({ transport, cookies });
+      await expect(
+        client.getNoteById('synthetic-note', 'synthetic-token'),
+      ).rejects.toMatchObject({ reason, endpoint: 'detail' });
+      expect(transport).toHaveBeenCalledTimes(1);
+      expect(cookies).toHaveBeenCalledTimes(1);
+    },
+  );
   type OwnedFixture = {
     db?: PrismaClient;
     folder?: string;
@@ -474,7 +500,7 @@ describe('durable synthetic source risk fence', () => {
     expect(JSON.stringify(rows)).not.toContain('verification');
     runtime.onModuleDestroy();
   }, 20000);
-  it.each(['parse', 'unknown', 'unknown-full'] as const)(
+  it.each(['parse', 'unknown', 'unknown-full', 'authentication'] as const)(
     'handles %s detail under the source outcome contract',
     async (mode) => {
       const creatorId = 'parse-creator',
@@ -524,6 +550,12 @@ describe('durable synthetic source risk fence', () => {
         const note = JSON.parse(request.body).source_note_id;
         if (note === 'parse-a' && mode.startsWith('unknown'))
           throw Error('synthetic detail connection lost');
+        if (note === 'parse-a' && mode === 'authentication')
+          return {
+            status: 200,
+            url: request.url,
+            body: { success: false, code: -100 },
+          };
         return {
           status: 200,
           url: request.url,
@@ -574,6 +606,22 @@ describe('durable synthetic source risk fence', () => {
       const service: any = new XhsSubscriptionService(db as any, runtime);
       service.write = async (_bytes: number, fn: any) => db.$transaction(fn);
       await service.run(task);
+      if (mode === 'authentication') {
+        const code = 'XHS_SOURCE_AUTHENTICATION_BLOCKED';
+        expect(task).toMatchObject({ state: 'blocked', completed: 0, code });
+        expect(await runtime.connectionStatus()).toMatchObject({
+          riskCode: code,
+        });
+        expect(
+          await db.$queryRaw`SELECT state,code FROM xhs_source_risk WHERE id='source'`,
+        ).toEqual([{ state: 'blocked', code }]);
+        await expect(runtime.list('synthetic-other', null)).rejects.toThrow(
+          code,
+        );
+        expect(api).toHaveBeenCalledTimes(1);
+        runtime.onModuleDestroy();
+        return;
+      }
       const parsed = mode === 'parse';
       expect(api).toHaveBeenCalledTimes(parsed ? 2 : 1);
       expect(task).toMatchObject({

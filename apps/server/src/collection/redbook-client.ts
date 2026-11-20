@@ -158,10 +158,12 @@ export function redbookResponseReason(
   const { code, msg } = redbookErrorSummary(body);
   if (status === 406 || code === 300015) return 'signature';
   if (status === 429 || code === 300012) return 'rate_limit';
-  if (status === 401 || code === -100 || code === -101) return 'authentication';
+  if (status === 401) return 'authentication';
   if (status === 403 || code === -104) return 'permission';
   if (msg === 'captcha required') return 'verification';
   if (status === 461 || status === 471) return 'unknown_rejection';
+  // A body authentication code must not relabel a specific denial or challenge.
+  if (code === -100 || code === -101) return 'authentication';
   return undefined;
 }
 
