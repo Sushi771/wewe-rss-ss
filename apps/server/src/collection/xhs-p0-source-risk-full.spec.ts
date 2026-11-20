@@ -89,7 +89,8 @@ describe('durable synthetic source risk fence', () => {
   });
   it.each([
     [403, { code: -100 }, 'permission'],
-    [461, { code: -101 }, 'unknown_rejection'],
+    [461, {}, 'unknown_rejection'],
+    [461, { code: -101 }, 'authentication'],
     [200, { code: -100, msg: 'captcha required' }, 'verification'],
     [200, { code: -100 }, 'authentication'],
     [401, {}, 'authentication'],

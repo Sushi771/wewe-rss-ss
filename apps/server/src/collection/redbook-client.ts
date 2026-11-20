@@ -161,9 +161,9 @@ export function redbookResponseReason(
   if (status === 401) return 'authentication';
   if (status === 403 || code === -104) return 'permission';
   if (msg === 'captcha required') return 'verification';
-  if (status === 461 || status === 471) return 'unknown_rejection';
-  // A body authentication code must not relabel a specific denial or challenge.
+  // Known body codes still identify the cause behind a generic rejection.
   if (code === -100 || code === -101) return 'authentication';
+  if (status === 461 || status === 471) return 'unknown_rejection';
   return undefined;
 }
 
