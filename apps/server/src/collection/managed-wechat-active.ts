@@ -14,6 +14,7 @@ import {
   beginRefreshSubmission,
   finishRefreshSubmission,
   readRefreshSubmission,
+  refreshSubmissionProofById,
   reserveRefreshSubmission,
 } from './refresh-submission-claim';
 import { saveRefreshResponseReceipt } from './refresh-response-receipt';
@@ -209,11 +210,21 @@ export async function managedWechatRefresh(
       const feed = await db.feed.findUnique({ where: { id } });
       if (!feed || feed.status !== 1 || feed.collectionChannel !== 'wechat2rss')
         return 'unavailable';
-      const unknown = await db.$queryRaw<unknown[]>`
-      SELECT 1 FROM refresh_submission_claims
-      WHERE mp_id=${id} AND state IN ('attempted','unknown') LIMIT 1
+      const unknown = await db.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM refresh_submission_claims
+      WHERE mp_id=${id} AND state IN ('attempted','unknown') LIMIT 2
     `;
-      if (unknown.length) return 'retained-unknown';
+      if (unknown.length > 1) return 'retained-unknown';
+      if (unknown.length === 1) {
+        // Only the immutable response for this exact claim can confirm that
+        // submission. Missing or invalid proof stays local to this feed.
+        const proof = await refreshSubmissionProofById(
+          db,
+          unknown[0].id,
+          id,
+        ).catch(() => undefined);
+        if (proof !== 'accepted') return 'retained-unknown';
+      }
       const round = scheduled?.key ?? randomUUID();
       if (await readRefreshSubmission(db, round, id)) return 'target-cooldown';
       if (now - history.lastAt < spacing) return 'source-cooldown';

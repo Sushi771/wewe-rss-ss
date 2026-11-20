@@ -19,6 +19,13 @@ import { ProviderPage } from '../collection/subscription-provider';
 import { canonicalArticleUrl } from '../collection/collection-format';
 import { assertChannelRunnable } from '../collection/channel-task-control';
 import { managedWechatRefresh } from '../collection/managed-wechat-active';
+import {
+  beginRefreshSubmission,
+  finishRefreshSubmission,
+  reserveRefreshSubmission,
+} from '../collection/refresh-submission-claim';
+import { saveRefreshResponseReceipt } from '../collection/refresh-response-receipt';
+import { FeedsService } from './feeds.service';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest
     .fn()
@@ -175,9 +182,34 @@ describe('cache delta through original SQLite merge', () => {
         'retained-unknown',
       );
       const slot = { key: 'a'.repeat(64), due: now - 1000 };
-      await expect(managedWechatRefresh(prisma, feeds[1], slot)).resolves.toBe(
-        'accepted',
+      const original = await prisma.feed.findUniqueOrThrow({
+        where: { id: feeds[1] },
+      });
+      const prior = await reserveRefreshSubmission(
+        prisma,
+        original,
+        slot.key,
+        Math.floor((now - 7 * 3_600_000) / 1000),
       );
+      await beginRefreshSubmission(prisma, prior.ticket!);
+      await saveRefreshResponseReceipt(prior.ticket!, {
+        version: 1,
+        httpStatus: 200,
+        receivedAt: now - 7 * 3_600_000 + 1000,
+        responseDigest: 'd'.repeat(64),
+      });
+      await finishRefreshSubmission(prisma, prior.ticket!, 'unknown');
+      await expect(managedWechatRefresh(prisma, feeds[1], slot)).resolves.toBe(
+        'target-cooldown',
+      );
+      expect(requests).toEqual([]);
+      expect(
+        await prisma.$queryRaw`SELECT state FROM refresh_submission_claims WHERE id=${prior.ticket!.id}`,
+      ).toEqual([{ state: 'accepted' }]);
+      const newSlot = { key: 'e'.repeat(64), due: slot.due };
+      await expect(
+        managedWechatRefresh(prisma, feeds[1], newSlot),
+      ).resolves.toBe('accepted');
       await expect(managedWechatRefresh(prisma, feeds[2], slot)).resolves.toBe(
         'scheduled-closed',
       );
@@ -205,10 +237,30 @@ describe('cache delta through original SQLite merge', () => {
       await expect(
         managedWechatRefresh(prisma, feeds[2], nextSlot),
       ).resolves.toBe('retained-unknown');
-      await expect(
-        managedWechatRefresh(prisma, feeds[4], nextSlot),
-      ).resolves.toBe('accepted');
+      const setNativeNext = (delay: number) => {
+        const db = new DatabaseSync(cachePath);
+        try {
+          db.prepare('UPDATE rsses SET next_check_time=? WHERE biz_id=?').run(
+            new Date(now + delay).toISOString(),
+            ids[3],
+          );
+        } finally {
+          db.close();
+        }
+      };
+      const scheduled = new FeedsService(prisma as any, trpc, {} as any);
+      setNativeNext(20 * 60_000);
+      await (scheduled as any).runManagedWechatRound(
+        nextSlot.key,
+        nextSlot.due,
+      );
       now += 31_000;
+      await (scheduled as any).runManagedWechatRound(
+        'f'.repeat(64),
+        now - 1000,
+      );
+      now += 31_000;
+      setNativeNext(2 * 3_600_000);
       await expect(managedWechatRefresh(prisma, feeds[3])).resolves.toBe(
         'restricted',
       );
@@ -222,6 +274,8 @@ describe('cache delta through original SQLite merge', () => {
         '/add/' + ids[2],
         '/login/list',
         '/add/' + ids[4],
+        '/login/list',
+        '/add/' + ids[5],
         '/login/list',
         '/add/' + ids[3],
       ]);

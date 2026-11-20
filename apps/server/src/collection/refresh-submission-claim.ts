@@ -94,18 +94,26 @@ export async function unknownRefreshSource(
     throw Error('UNKNOWN_RELEASE_SOURCE_UNPROVED');
   return refreshFeedSourceDigest(current);
 }
-export async function refreshSubmissionProof(
+export function refreshSubmissionProof(
   prisma: PrismaClient,
   batch: string,
   feed: string,
 ) {
+  return refreshSubmissionProofById(prisma, claimId(batch, feed), feed);
+}
+
+export async function refreshSubmissionProofById(
+  prisma: PrismaClient,
+  id: string,
+  feed: string,
+) {
   const rows = await prisma.$queryRawUnsafe<Claim[]>(
     'SELECT state,mp_id,reserved_at,previous_at FROM refresh_submission_claims WHERE id=?',
-    claimId(batch, feed),
+    id,
   );
   const state = rows[0]?.state;
-  if (!state) return;
-  if (['attempted', 'unknown'].includes(state) && rows[0].mp_id === feed) {
+  if (!state || rows[0].mp_id !== feed) return;
+  if (['attempted', 'unknown'].includes(state)) {
     const current = await prisma.feed.findUnique({ where: { id: feed } });
     if (
       current?.status === 1 &&
@@ -114,7 +122,7 @@ export async function refreshSubmissionProof(
     ) {
       const responseContext = await refreshResponseContext(prisma);
       const ticket: RefreshSubmissionTicket = {
-        id: claimId(batch, feed),
+        id,
         mpId: feed,
         reservedAt: rows[0].reserved_at,
         previousAt: rows[0].previous_at,
