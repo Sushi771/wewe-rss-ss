@@ -9,6 +9,17 @@
 
 </div>
 
+## 本机订阅采集来源
+
+以下说明依据 2026-11-20 核对的本机运行版本 `d0ed5ed`。
+
+- **公众号**：应用派生自 [cooderl/wewe-rss](https://github.com/cooderl/wewe-rss)。已配置的公众号采集使用本地 Wechat2RSS 服务，项目 Compose 固定了 `ttttmr/wechat2rss` 镜像。主动刷新请求的受理与缓存同步入库分别记录。 [Wechat2RSS 上游仓库](https://github.com/ttttmr/Wechat2RSS)
+- **小红书博主列表**：项目内置 `RedbookSubscriptionAdapter`，通过 `RedbookClient.getUserNotes` 读取笔记列表。
+- **小红书笔记详情**：同一适配器通过 `RedbookClient.getNoteById` 读取详情，并核对笔记与作者身份。客户端随本项目运行，内嵌了 Redbook v0.8.2 的部分代码。 [固定上游提交](https://github.com/lucasygu/redbook/tree/801a09847699a2bae5560eeefd901e3afdde469b) [保留代码范围与许可证](apps/server/src/collection/redbook-vendor/README.md)
+- **小红书登录及恢复**：本机连接或恢复入口由 `XhsSubscriptionRuntime` 管理。项目仅对符合既有条件的已知作者主页鉴权失败提供有限验证。主页验证成功不能证明详情可用。Rnote 是历史候选，当前订阅、登录及恢复链路没有调用它。 [现有验证条件](docs/XHS_KNOWN_AUTH_RESPONSE_REVIEW.md) [Rnote 历史评估](docs/paid-sources/XHS_SOURCE_PREPARATION.md)
+
+当前只核实到小红书详情请求被归为鉴权中断，并触发共享保护。平台拒绝的具体原因和详情采集恢复均未得到证实。
+
 ## 当前产品边界与证据入口
 
 公众号与小红书标题打开合法原文；平台内正文阅读器已移除。订阅、筛选和指标管理保留，正文图片下载到本地/Obsidian 阅读；ZIP仅为兼容入口。暂停新评论正文与回复采集，保留评论总数字段、历史数据和用户文件。未核验的视频来源不能称为完整归档。
