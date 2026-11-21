@@ -3,7 +3,12 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const entries = require('./fixtures/managed-wechat-local-cache-compat.json');
 const activeEntries = require('./fixtures/managed-wechat-active-compat.json');
+const futureRoundEntries = require('./fixtures/managed-wechat-future-round-compat.json');
 const sha = (text) => crypto.createHash('sha256').update(text).digest('hex');
+assert.equal(
+  sha(JSON.stringify(futureRoundEntries)),
+  'f1737ca9e82b4098865943f9904375ecb43a39f51b12ba7ae2d9bcb060d60c03',
+);
 assert.equal(
   sha(JSON.stringify(activeEntries)),
   '3fba13d7ee213742e67b15ad659f2155c8b1fb58837c657139279997ca85cee1',
@@ -37,11 +42,17 @@ function restore(entries, file, source, label) {
   return source;
 }
 
+const restoreFutureRound = (file, source) =>
+  restore(futureRoundEntries, file, source, 'future-round approval');
 const restoreActive = (file, source) =>
   restore(activeEntries, file, source, 'active-refresh');
 const restoreLocalCache = (file, source) =>
   restore(entries, file, source, 'local-cache');
 module.exports = (file, source) =>
-  restoreLocalCache(file, restoreActive(file, source));
+  restoreLocalCache(
+    file,
+    restoreActive(file, restoreFutureRound(file, source)),
+  );
+module.exports.restoreFutureRound = restoreFutureRound;
 module.exports.restoreActive = restoreActive;
 module.exports.restoreLocalCache = restoreLocalCache;

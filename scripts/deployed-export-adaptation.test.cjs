@@ -39,6 +39,30 @@ test('the active-refresh delta preserves exact prior runtime and interface sourc
   }
 });
 
+test('future-round approval inverse permits only the exact reviewed service delta', () => {
+  const entries = require('./fixtures/managed-wechat-future-round-compat.json');
+  const file = 'apps/server/src/trpc/trpc.service.ts';
+  assert.deepEqual(Object.keys(entries), [file]);
+  const entry = entries[file];
+  const raw = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+  const restore = (source) =>
+    restoreManagedWechatLocalCache.restoreFutureRound(file, source);
+  assert.equal(hash(raw), entry.afterSha256);
+  const original = restore(raw);
+  assert.equal(hash(original), entry.beforeSha256);
+  assert.equal(restore(original), original);
+  for (const changed of [
+    raw + '// unreviewed\n',
+    ...entry.hunks.map(({ before, after }) => raw.replace(after, before)),
+  ]) {
+    assert.notEqual(changed, raw);
+    assert.throws(
+      () => restore(changed),
+      /exact reviewed future-round approval/,
+    );
+  }
+});
+
 test('managed local-cache inverse preserves the full prior startup and deployment sources', () => {
   const entries = require('./fixtures/managed-wechat-local-cache-compat.json');
   assert.deepEqual(Object.keys(entries).sort(), [
@@ -49,7 +73,10 @@ test('managed local-cache inverse preserves the full prior startup and deploymen
   for (const [file, entry] of Object.entries(entries)) {
     const raw = restoreManagedWechatLocalCache.restoreActive(
       file,
-      fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+      restoreManagedWechatLocalCache.restoreFutureRound(
+        file,
+        fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n'),
+      ),
     );
     assert.equal(hash(readSource(file)), entry.beforeSha256);
     for (const changed of [

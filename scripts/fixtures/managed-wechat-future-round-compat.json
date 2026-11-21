@@ -1,0 +1,16 @@
+{
+  "apps/server/src/trpc/trpc.service.ts": {
+    "beforeSha256": "9347fb4915b03899e5b35c933c03ee959458db72b587b60c47f0350fe959998c",
+    "afterSha256": "902c407093b0d4c5b824fa53d9844919f0672bcf05070d7fb077721d9bc9d76b",
+    "hunks": [
+      {
+        "before": "  RefreshSubmissionTicket,\n  refreshSubmissionProof,\n  unknownRefreshSource,\n} from '../collection/refresh-submission-claim';\n",
+        "after": "  RefreshSubmissionTicket,\n  refreshSubmissionProof,\n  refreshSubmissionClaimId,\n  unknownRefreshSource,\n} from '../collection/refresh-submission-claim';\n"
+      },
+      {
+        "before": "    return this.taskStorage(() => this.subscriptionBatches.resume(id));\n  }\n  unknownRefreshReleaseBinding(batchId: string, feedId: string) {\n    return this.taskStorage(() =>\n",
+        "after": "    return this.taskStorage(() => this.subscriptionBatches.resume(id));\n  }\n  allowsManagedWechatFutureRound(\n    feedId: string,\n    claimId: string,\n    round: { key: string; due: number },\n  ) {\n    // Exactly one reviewed batch, feed and approval. Unset disables this path.\n    const scope = process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE?.match(\n      /^([a-f0-9-]{36}):(MP_WXS_\\d{5,15}):([a-f0-9]{64})$/,\n    );\n    if (\n      !scope ||\n      scope[2] !== feedId ||\n      refreshSubmissionClaimId(scope[1], feedId) !== claimId\n    )\n      return Promise.resolve(false);\n    return this.subscriptionBatches.allowsManagedFutureRound(\n      scope[1],\n      feedId,\n      scope[3],\n      round,\n    );\n  }\n\n  unknownRefreshReleaseBinding(batchId: string, feedId: string) {\n    return this.taskStorage(() =>\n"
+      }
+    ]
+  }
+}
