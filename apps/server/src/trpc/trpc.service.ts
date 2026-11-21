@@ -54,6 +54,7 @@ import {
   cancelRefreshPreparation,
   RefreshSubmissionTicket,
   refreshSubmissionProof,
+  refreshSubmissionClaimId,
   unknownRefreshSource,
 } from '../collection/refresh-submission-claim';
 import { wechat2RssAddReceipt } from '../collection/wechat2rss-add-receipt';
@@ -912,6 +913,29 @@ export class TrpcService {
   resumeSubscriptionBatch(id: string) {
     return this.taskStorage(() => this.subscriptionBatches.resume(id));
   }
+  allowsManagedWechatFutureRound(
+    feedId: string,
+    claimId: string,
+    round: { key: string; due: number },
+  ) {
+    // Exactly one reviewed batch, feed and approval. Unset disables this path.
+    const scope = process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE?.match(
+      /^([a-f0-9-]{36}):(MP_WXS_\d{5,15}):([a-f0-9]{64})$/,
+    );
+    if (
+      !scope ||
+      scope[2] !== feedId ||
+      refreshSubmissionClaimId(scope[1], feedId) !== claimId
+    )
+      return Promise.resolve(false);
+    return this.subscriptionBatches.allowsManagedFutureRound(
+      scope[1],
+      feedId,
+      scope[3],
+      round,
+    );
+  }
+
   unknownRefreshReleaseBinding(batchId: string, feedId: string) {
     return this.taskStorage(() =>
       this.subscriptionBatches.unknownRefreshReleaseBinding(batchId, feedId),

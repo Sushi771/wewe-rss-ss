@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { withFixtureMigrationConnection } from '../../test/fixture-migration-connection';
 import { splitSqliteStatements } from '../../../../scripts/sqlite-statements.cjs';
 import { promises as fs } from 'node:fs';
@@ -24,8 +25,9 @@ import {
   finishRefreshSubmission,
   reserveRefreshSubmission,
 } from '../collection/refresh-submission-claim';
-import { saveRefreshResponseReceipt } from '../collection/refresh-response-receipt';
+import * as responseReceipt from '../collection/refresh-response-receipt';
 import { FeedsService } from './feeds.service';
+import { latestActiveRefreshRound } from './active-refresh-schedule';
 jest.mock('../collection/sqlite-backup', () => ({
   createVerifiedSqliteBackup: jest
     .fn()
@@ -192,7 +194,7 @@ describe('cache delta through original SQLite merge', () => {
         Math.floor((now - 7 * 3_600_000) / 1000),
       );
       await beginRefreshSubmission(prisma, prior.ticket!);
-      await saveRefreshResponseReceipt(prior.ticket!, {
+      await responseReceipt.saveRefreshResponseReceipt(prior.ticket!, {
         version: 1,
         httpStatus: 200,
         receivedAt: now - 7 * 3_600_000 + 1000,
@@ -304,6 +306,312 @@ describe('cache delta through original SQLite merge', () => {
       await prisma.feed.deleteMany({ where: { id: { in: feeds } } });
       await prisma.$executeRawUnsafe(
         "UPDATE Wechat2RssSourceGate SET state='idle', token=NULL,status=NULL WHERE id=1",
+      );
+    }
+  });
+  it('uses one verified future-round release without rewriting any unknown', async () => {
+    const feeds = Array.from(
+      { length: 7 },
+      (_, i) => 'MP_WXS_' + (1234567810 + i),
+    );
+    const [selected, other] = feeds;
+    const batchId = randomUUID();
+    const historyDir = path.join(root, '.wechat2rss-subscription-batches');
+    const batchFile = path.join(historyDir, batchId + '.json');
+    const approvalFile = path.join(root, 'future-approval.json');
+    const evidenceFile = path.join(root, 'future-evidence.txt');
+    const evidence = 'Synthetic reviewed unknown and future-only approval.';
+    const digest = (value: string) =>
+      createHash('sha256').update(value).digest('hex');
+    const requests: string[] = [];
+    let beforeResponse: (() => Promise<void>) | undefined;
+    const vendor = createServer((req, res) => {
+      const pathname = new URL(req.url!, 'http://127.0.0.1').pathname;
+      requests.push(pathname);
+      if (pathname === '/login/list') {
+        void (async () => {
+          try {
+            await beforeResponse?.();
+            res.end(
+              JSON.stringify({
+                err: '',
+                data: [{ available: true, needCheck: false }],
+              }),
+            );
+          } catch {
+            res.writeHead(500).end();
+          }
+        })();
+      } else {
+        res.end(
+          JSON.stringify({
+            err: '',
+            data: '/feed/' + pathname.slice(5) + '.xml',
+          }),
+        );
+      }
+    });
+    await new Promise<void>((resolve) =>
+      vendor.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (vendor.address() as { port: number }).port;
+    const boundEnv = { ...process.env };
+    const baseURL = 'http://127.0.0.1:' + port;
+    Object.assign(process.env, {
+      WEWE_MANAGED_RUNTIME_MODE: 'scheduled-dual-v1',
+      WEWE_MANAGED_WECHAT_LOCAL_CACHE: '1',
+      WEWE_MANAGED_WECHAT_ACTIVE_REFRESH: '1',
+      WECHAT2RSS_RECOVERY_HOLD: '0',
+      WECHAT2RSS_BASE_URL: baseURL,
+    });
+    delete process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE;
+    let now = Date.parse('2026-11-20T09:15:02+08:00');
+    const start = now;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const releaseTrpc = new TrpcService(
+      prisma as any,
+      { get: () => ({ url: '', updateDelayTime: 0 }) } as any,
+      {} as any,
+      new CollectionService(prisma as any),
+    );
+    // This regression targets admission. Exact on-disk response publication has
+    // its own tests and requires a host that allows native hard links.
+    const publishReceipt = jest
+      .spyOn(responseReceipt, 'saveRefreshResponseReceipt')
+      .mockResolvedValue(undefined);
+    const cache = jest
+      .spyOn(localCache, 'readLocalWechat2RssSchedule')
+      .mockImplementation((id) => {
+        if (!feeds.includes(id)) throw Error('NOT_A_SYNTHETIC_SUBSCRIPTION');
+        return {
+          last: now - 7 * 3_600_000,
+          next: now + 2 * 3_600_000,
+          feedPath: '/feed/' + id.slice(7),
+        };
+      });
+    const slot = (time: string) => {
+      now = Date.parse(time);
+      const round = latestActiveRefreshRound(now, 0)!;
+      return { key: round.intentKey, due: round.due };
+    };
+    const attempt = (id: string, round: { key: string; due: number }) =>
+      managedWechatRefresh(prisma, id, {
+        ...round,
+        allowsRetainedClaim: (claim) =>
+          releaseTrpc.allowsManagedWechatFutureRound(id, claim, round),
+      });
+    const activeState = path.join(
+      root,
+      '.collection-channel-control',
+      'wechat',
+      'active-refresh-v1.json',
+    );
+    try {
+      for (const id of feeds) {
+        const feed = await prisma.feed.create({
+          data: {
+            id,
+            mpName: id,
+            mpIntro: '',
+            mpCover: '',
+            collectionChannel: 'wechat2rss',
+            status: 1,
+            updateTime: 0,
+          },
+        });
+        const prior = await reserveRefreshSubmission(
+          prisma,
+          feed,
+          batchId,
+          Math.floor(now / 1000),
+        );
+        await beginRefreshSubmission(prisma, prior.ticket!);
+        await finishRefreshSubmission(prisma, prior.ticket!, 'unknown');
+      }
+      const originalClaims = () =>
+        prisma.$queryRaw`SELECT * FROM refresh_submission_claims WHERE state='unknown' ORDER BY mp_id`;
+      const sealedClaims = await originalClaims();
+      await fs.mkdir(historyDir, { recursive: true });
+      await fs.writeFile(
+        batchFile,
+        JSON.stringify({
+          version: 1,
+          batchId,
+          signature: 'c'.repeat(64),
+          instance: digest(baseURL + '\0' + process.env.WECHAT2RSS_TOKEN),
+          purpose: 'scheduled-refresh',
+          intentKey: 'a'.repeat(64),
+          createdAt: start - 1000,
+          updatedAt: start,
+          nextSubmissionAt: start,
+          state: 'completed',
+          items: feeds.map((feedId, index) => ({
+            index,
+            feedId,
+            state: 'blocked',
+            message: 'Synthetic unknown',
+            accepted: false,
+            submissionUnknown: true,
+            refreshClaimedAt: start,
+            stopBatch: false,
+            retryable: false,
+          })),
+        }),
+      );
+      now = Date.parse('2026-11-20T12:00:00+08:00');
+      const binding = await releaseTrpc.unknownRefreshReleaseBinding(
+        batchId,
+        selected,
+      );
+      await fs.writeFile(evidenceFile, evidence);
+      const approval = JSON.stringify({
+        version: 1,
+        ...binding,
+        authorized: true,
+        action: 'release-future-rounds-only',
+        approvedAt: now,
+        futureRoundNotBefore: Date.parse('2026-11-21T09:15:00+08:00'),
+        evidenceSha256: digest(evidence),
+      });
+      await fs.writeFile(approvalFile, approval);
+      const approvalSha256 = digest(approval);
+      await releaseTrpc.releaseUnknownRefreshOccupancy({
+        batchId,
+        feedId: selected,
+        approvalFile,
+        approvalSha256,
+        evidenceFile,
+      });
+      const sealedBatch = await fs.readFile(batchFile, 'utf8');
+      const optIn = batchId + ':' + selected + ':' + approvalSha256;
+      const tooEarly = slot('2026-11-20T14:00:03+08:00');
+      expect(await attempt(selected, tooEarly)).toBe('retained-unknown');
+      process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE = optIn;
+      expect(await attempt(selected, tooEarly)).toBe('retained-unknown');
+      const first = slot('2026-11-21T09:15:03+08:00');
+      expect(await managedWechatRefresh(prisma, selected)).toBe(
+        'retained-unknown',
+      );
+      expect(await attempt(selected, { ...first, due: first.due + 1 })).toBe(
+        'retained-unknown',
+      );
+      for (const id of feeds.slice(1))
+        expect(await attempt(id, first)).toBe('retained-unknown');
+      process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE =
+        batchId + ':' + other + ':' + approvalSha256;
+      expect(await attempt(other, first)).toBe('retained-unknown');
+      process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE = optIn;
+      await prisma.$executeRaw`UPDATE refresh_submission_claims SET state='attempted' WHERE mp_id=${selected}`;
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      await prisma.$executeRaw`UPDATE refresh_submission_claims SET state='unknown' WHERE mp_id=${selected}`;
+      await fs.unlink(approvalFile);
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      await fs.writeFile(approvalFile, approval);
+      await fs.writeFile(evidenceFile, evidence + ' edited');
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      await fs.writeFile(evidenceFile, evidence);
+      await prisma.feed.update({
+        where: { id: selected },
+        data: { mpName: 'Changed synthetic binding' },
+      });
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      await prisma.feed.update({
+        where: { id: selected },
+        data: { mpName: selected },
+      });
+      await prisma.$executeRaw`INSERT INTO refresh_submission_claims VALUES ('second-unknown-fixture',${selected},'unknown',2,0,2000)`;
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      await prisma.$executeRaw`DELETE FROM refresh_submission_claims WHERE id='second-unknown-fixture'`;
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='stopped',token='synthetic-hold',status=429 WHERE id=1",
+      );
+      expect(await attempt(selected, first)).toBe('restricted');
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='idle',token=NULL,status=NULL WHERE id=1",
+      );
+      cache.mockReturnValueOnce({
+        last: now - 1000,
+        next: now + 7_200_000,
+        feedPath: '/feed/' + selected.slice(7),
+      });
+      expect(await attempt(selected, first)).toBe('target-cooldown');
+      expect(requests).toEqual([]);
+
+      // Revoke the proof during provider preflight. No mutating /add follows.
+      beforeResponse = () => fs.unlink(evidenceFile);
+      expect(await attempt(selected, first)).toBe('retained-unknown');
+      expect(requests).toEqual(['/login/list']);
+      await fs.writeFile(evidenceFile, evidence);
+
+      const next = slot('2026-11-21T14:00:03+08:00');
+      let notifyLogin!: () => void;
+      const started = new Promise<void>((resolve) => {
+        notifyLogin = resolve;
+      });
+      let finishLogin!: () => void;
+      const responseReady = new Promise<void>((resolve) => {
+        finishLogin = resolve;
+      });
+      beforeResponse = async () => {
+        notifyLogin();
+        await responseReady;
+      };
+      const scheduler = new FeedsService(prisma as any, releaseTrpc, {} as any);
+      const running = (scheduler as any).runManagedWechatRound(
+        next.key,
+        next.due,
+      ) as Promise<void>;
+      try {
+        await Promise.race([
+          started,
+          running.then(() => {
+            throw Error('EXPECTED_PROVIDER_PREFLIGHT');
+          }),
+        ]);
+        await expect(attempt(selected, next)).rejects.toThrow('CHANNEL_BUSY');
+      } finally {
+        finishLogin();
+        await running;
+      }
+      expect(await attempt(selected, next)).toBe('scheduled-closed');
+      expect(requests).toEqual([
+        '/login/list',
+        '/login/list',
+        '/add/' + selected.slice(7),
+      ]);
+      expect(
+        await prisma.$queryRaw`SELECT mp_id,state FROM refresh_submission_claims WHERE state='accepted' AND mp_id=${selected}`,
+      ).toEqual([{ mp_id: selected, state: 'accepted' }]);
+      expect(publishReceipt).toHaveBeenCalledTimes(1);
+      expect(publishReceipt).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mpId: selected,
+          reservedAt: Math.floor(now / 1000),
+        }),
+        expect.objectContaining({ httpStatus: 200 }),
+      );
+      expect(await originalClaims()).toEqual(sealedClaims);
+      expect(await fs.readFile(batchFile, 'utf8')).toBe(sealedBatch);
+
+      delete process.env.WEWE_WECHAT_FUTURE_ROUND_RELEASE;
+      const later = slot('2026-11-22T09:15:03+08:00');
+      expect(await attempt(selected, later)).toBe('retained-unknown');
+      expect(requests).toHaveLength(3);
+    } finally {
+      releaseTrpc.onModuleDestroy();
+      clock.mockRestore();
+      cache.mockRestore();
+      publishReceipt.mockRestore();
+      process.env = boundEnv;
+      vendor.closeAllConnections();
+      await new Promise<void>((resolve) => vendor.close(() => resolve()));
+      for (const file of [activeState, batchFile, approvalFile, evidenceFile])
+        await fs.unlink(file).catch(() => undefined);
+      for (const id of feeds)
+        await prisma.$executeRaw`DELETE FROM refresh_submission_claims WHERE mp_id=${id}`;
+      await prisma.feed.deleteMany({ where: { id: { in: feeds } } });
+      await prisma.$executeRawUnsafe(
+        "UPDATE Wechat2RssSourceGate SET state='idle',token=NULL,status=NULL WHERE id=1",
       );
     }
   });

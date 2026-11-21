@@ -19,6 +19,7 @@ import {
 } from './refresh-submission-claim';
 import { saveRefreshResponseReceipt } from './refresh-response-receipt';
 import { databaseWritesAllowed } from '../startup-audit';
+import { latestActiveRefreshRound } from '../feeds/active-refresh-schedule';
 
 const spacing = 30_000;
 const targetSpacing = 6 * 3_600_000;
@@ -163,7 +164,11 @@ export type ManagedWechatRefreshState =
 export async function managedWechatRefresh(
   db: PrismaClient,
   id: string,
-  scheduled?: { key: string; due: number },
+  scheduled?: {
+    key: string;
+    due: number;
+    allowsRetainedClaim?: (claimId: string) => Promise<boolean>;
+  },
 ): Promise<ManagedWechatRefreshState> {
   if (!managedWechatActiveRefresh() || !databaseWritesAllowed())
     return 'paused';
@@ -210,14 +215,27 @@ export async function managedWechatRefresh(
       const feed = await db.feed.findUnique({ where: { id } });
       if (!feed || feed.status !== 1 || feed.collectionChannel !== 'wechat2rss')
         return 'unavailable';
-      const unknown = await db.$queryRaw<Array<{ id: string }>>`
-      SELECT id FROM refresh_submission_claims
-      WHERE mp_id=${id} AND state IN ('attempted','unknown') LIMIT 2
-    `;
+      const retainedClaims = () =>
+        db.$queryRaw<Array<{ id: string; state: string }>>`
+          SELECT id,state FROM refresh_submission_claims
+          WHERE mp_id=${id} AND state IN ('attempted','unknown') LIMIT 2
+        `;
+      const unknown = await retainedClaims();
       if (unknown.length > 1) return 'retained-unknown';
-      if (unknown.length === 1) {
-        // Only the immutable response for this exact claim can confirm that
-        // submission. Missing or invalid proof stays local to this feed.
+      const naturalRound =
+        scheduled && latestActiveRefreshRound(scheduled.due, 0);
+      const isNaturalRound =
+        scheduled &&
+        naturalRound?.due === scheduled.due &&
+        naturalRound.intentKey === scheduled.key;
+      const releasedForFutureRound = () =>
+        isNaturalRound &&
+        scheduled.allowsRetainedClaim &&
+        unknown[0]?.state === 'unknown'
+          ? scheduled.allowsRetainedClaim(unknown[0].id).catch(() => false)
+          : Promise.resolve(false);
+      const usingFutureRelease = await releasedForFutureRound();
+      if (unknown.length === 1 && !usingFutureRelease) {
         const proof = await refreshSubmissionProofById(
           db,
           unknown[0].id,
@@ -259,6 +277,16 @@ export async function managedWechatRefresh(
           !accounts.some((account) => account.available === true)
         )
           throw new Restricted('account');
+        if (usingFutureRelease) {
+          const current = await retainedClaims();
+          if (
+            current.length !== 1 ||
+            current[0].id !== unknown[0].id ||
+            current[0].state !== 'unknown' ||
+            !(await releasedForFutureRound())
+          )
+            return 'retained-unknown';
+        }
         const reserved = await reserveRefreshSubmission(
           db,
           feed,

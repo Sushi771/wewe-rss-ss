@@ -804,6 +804,48 @@ export class Wechat2RssSubscriptionBatches {
       sourceSha256,
     };
   }
+  async allowsManagedFutureRound(
+    batchId: string,
+    feedId: string,
+    approvalSha256: string,
+    round: { key: string; due: number },
+  ) {
+    if (this.busy || this.accepting) return false;
+    const b = await this.read(batchId);
+    const item = b?.items.find((i) => i.feedId === feedId);
+    const release = item?.occupancyRelease;
+    if (
+      !b ||
+      b.purpose !== 'scheduled-refresh' ||
+      !item ||
+      !release ||
+      !releasedUnknown(b, item) ||
+      release.approvalSha256 !== approvalSha256 ||
+      round.key === b.intentKey ||
+      round.due <= release.resolvedAt ||
+      round.due < release.futureRoundNotBefore
+    )
+      return false;
+
+    // Reopen the original proof on each admission. The stored disposition is
+    // useful only while both approved files and the current source still match.
+    const binding = await this.unknownRefreshReleaseBinding(batchId, feedId);
+    const verified = await readUnknownReleaseApproval(
+      release,
+      binding,
+      release.resolvedAt,
+    );
+    return (
+      verified.itemSha256 === release.itemSha256 &&
+      verified.sourceSha256 === release.sourceSha256 &&
+      verified.evidenceSha256 === release.evidenceSha256 &&
+      verified.approvedAt === release.approvedAt &&
+      verified.futureRoundNotBefore === release.futureRoundNotBefore &&
+      verified.approvalFile === release.approvalFile &&
+      verified.evidenceFile === release.evidenceFile
+    );
+  }
+
   async releaseUnknownRefreshOccupancy(input: {
     batchId: string;
     feedId: string;

@@ -194,6 +194,11 @@ export class FeedsService implements OnApplicationBootstrap, OnModuleDestroy {
       const outcome = await managedWechatRefresh(this.prismaService, id, {
         key,
         due,
+        allowsRetainedClaim: (claimId) =>
+          this.trpcService.allowsManagedWechatFutureRound(id, claimId, {
+            key,
+            due,
+          }),
       });
       // Start with at most one admitted provider operation per original slot.
       // A stale, paused or historically uncertain feed can be skipped locally.

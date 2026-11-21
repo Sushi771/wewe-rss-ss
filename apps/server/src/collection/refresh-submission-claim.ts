@@ -29,7 +29,7 @@ export type RefreshSubmissionTicket = {
   feedCreatedAt?: number;
   responseContext?: RefreshResponseContext;
 };
-const claimId = (batch: string, feed: string) => {
+export const refreshSubmissionClaimId = (batch: string, feed: string) => {
   if (!batch || batch.length > 256)
     throw new Error('REFRESH_DURABLE_CLAIM_REQUIRED');
   return createHash('sha256')
@@ -63,7 +63,7 @@ export async function readRefreshSubmission(
 ) {
   const rows = await prisma.$queryRawUnsafe<Claim[]>(
     'SELECT state,reserved_at,previous_at FROM refresh_submission_claims WHERE id=?',
-    claimId(batch, feed),
+    refreshSubmissionClaimId(batch, feed),
   );
   return settled(rows[0]);
 }
@@ -77,7 +77,7 @@ export async function unknownRefreshSource(
 ) {
   const rows = await prisma.$queryRawUnsafe<Array<Claim>>(
     'SELECT state,mp_id,reserved_at,previous_at FROM refresh_submission_claims WHERE id=?',
-    claimId(batch, feed),
+    refreshSubmissionClaimId(batch, feed),
   );
   const claim = rows[0],
     current = await prisma.feed.findUnique({ where: { id: feed } });
@@ -99,7 +99,11 @@ export function refreshSubmissionProof(
   batch: string,
   feed: string,
 ) {
-  return refreshSubmissionProofById(prisma, claimId(batch, feed), feed);
+  return refreshSubmissionProofById(
+    prisma,
+    refreshSubmissionClaimId(batch, feed),
+    feed,
+  );
 }
 
 export async function refreshSubmissionProofById(
@@ -175,7 +179,7 @@ export async function reserveRefreshSubmission(
   batch: string,
   now: number,
 ): Promise<{ ticket?: RefreshSubmissionTicket; outcome?: BatchOutcome }> {
-  const id = claimId(batch, feed.id);
+  const id = refreshSubmissionClaimId(batch, feed.id);
   const responseContext = await refreshResponseContext(prisma);
   return incrementalWrite(prisma, 4096, () =>
     prisma.$transaction(async (tx) => {
